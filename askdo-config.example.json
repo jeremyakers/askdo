@@ -1,0 +1,28 @@
+{
+  "config_version": 4,
+  "inspection": {
+    "read_roots": ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin"],
+    "deny_paths": [],
+    "sensitive_masks": [".env", ".env.*", ".envrc", ".netrc", ".npmrc", ".pypirc", ".pgpass", ".my.cnf", "credentials", "*.key", "*.pem", "*.p12", "*.pfx", "*.jks", "*.keystore", "*.kubeconfig", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", ".ssh", ".aws", ".git", ".docker", ".kube", ".config/gcloud", "*.tfvars", "*.tfvars.json", "terraform.tfstate*", "*.secret", "*.secrets"]
+  },
+  "review": {
+    "local_only": false,
+    "auto_approve_grants": [],
+    "models": [],
+    "request_timeout": "2m",
+    "total_timeout": "20m",
+    "max_model_calls_per_attempt": 32,
+    "max_output_tokens": 8192
+  },
+  "limits": {
+    "max_inspected_files": 256,
+    "max_inspected_bytes": 8388608,
+    "max_log_bytes_per_stream": 33554432
+  },
+  "telegram": {
+    "token_file": "/etc/askdo/credentials/telegram.token",
+    "operator_user_id": 0,
+    "chat_id": 0,
+    "approval_ttl": "10m"
+  }
+}

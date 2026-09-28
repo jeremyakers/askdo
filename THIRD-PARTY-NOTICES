@@ -1,0 +1,75 @@
+Third-Party Notices for askdo
+==================================
+
+askdo is distributed as two Go executables (`askdo` and `askdo-launch`).
+The complete set of non-standard-library packages compiled into that
+pair (verified with `go list -deps ./cmd/askdo ./cmd/askdo-launch`) belongs to the
+modules listed below. The full requirement graph (`go mod graph`)
+additionally names test-only/tooling requirements of these modules (for
+example modernc.org/cc, github.com/creack/pty, github.com/google/go-cmp);
+those packages are NOT compiled into or shipped with the askdo binaries.
+
+License names and copyright notices below were verified against the LICENSE
+files shipped in each module's release in the Go module cache on
+2026-09-21.
+
+--------------------------------------------------------------------------
+
+golang.org/x/sys v0.48.0
+License: BSD 3-Clause "New" or "Revised" License
+Copyright 2009 The Go Authors.
+
+--------------------------------------------------------------------------
+
+modernc.org/sqlite v1.59.0
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2017 The Sqlite Authors. All rights reserved.
+
+The module also carries LICENSE-SQLITE (the original SQLite source, which
+modernc.org/sqlite translates to Go, is dedicated to the public domain by
+its authors) and LICENSE-SQLITE_VEC.
+
+modernc.org/libc v1.75.7
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2017 The Libc Authors. All rights reserved.
+
+The module also carries LICENSE-3RD-PARTY.md covering incorporated
+third-party components, including code from the Go project:
+Copyright (c) 2009 The Go Authors. All rights reserved. (BSD 3-Clause).
+
+modernc.org/mathutil v1.7.1
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2014 The mathutil Authors. All rights reserved.
+
+modernc.org/memory v1.12.1
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2017 The Memory Authors. All rights reserved.
+
+The module also carries LICENSE-MMAP-GO:
+Copyright (c) 2011, Evan Shaw <edsrzf@gmail.com>. All rights reserved.
+(BSD 3-Clause); LICENSE-GO: Copyright (c) 2009 The Go Authors
+(BSD 3-Clause); and LICENSE-LOGO.
+
+github.com/dustin/go-humanize v1.0.1
+License: MIT License
+Copyright (c) 2005-2008 Dustin Sallings <dustin@spy.net>
+
+github.com/google/uuid v1.6.0
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2009,2014 Google Inc. All rights reserved.
+
+github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2012 The Go Authors. All rights reserved.
+
+--------------------------------------------------------------------------
+
+mvdan.cc/sh/v3 v3.14.1
+License: BSD 3-Clause "New" or "Revised" License
+Copyright (c) 2016, Daniel Martí. All rights reserved.
+
+--------------------------------------------------------------------------
+
+Full license and associated notice texts for these versions are included in
+the `licenses/` directory of this repository and its source distribution.
+They are also available in the Go module cache and upstream repositories.

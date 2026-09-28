@@ -1,0 +1,2 @@
+%askdo ALL=(root) NOPASSWD: /usr/local/libexec/askdo-launch ""
+Defaults!/usr/local/libexec/askdo-launch !use_pty

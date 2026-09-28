@@ -1,0 +1,12 @@
+[Unit]
+Description=askdo approval-gate daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/askdo daemon
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

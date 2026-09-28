@@ -1,0 +1,24 @@
+# Go build outputs and local test artifacts.
+/askdo
+/askdo-launch
+/dist/
+*.test
+*.out
+coverage.out
+
+# Local agent working files and credentials, not part of the public interface.
+/.opencode/
+/.codegraph-native
+/.codegraph
+/docs/evidence/
+/.debug-journal.md
+/.env
+/.env.*
+!/.env.example
+*.key
+*.pem
+
+# Host-specific private notes live outside this public tree.
+/TESTED*.md
+/BACKLOG*.md
+/vm-smoke*.sh
