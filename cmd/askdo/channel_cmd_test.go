@@ -7,10 +7,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -638,6 +640,91 @@ func TestChannelRouteSet(t *testing.T) {
 	if code := channelRouteSet([]string{login, "ops", "--config", legacyPath}, &stdout, &stderr); code == 0 ||
 		!strings.Contains(stderr.String(), "named") || fileContent(t, legacyPath) != legacyBefore {
 		t.Fatalf("legacy route set exit=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestChannelRouteSetAtCapacity(t *testing.T) {
+	stubRoot(t)
+	stubCredentials(t)
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name           string
+		existing       bool
+		invalidSibling bool
+		wantError      string
+	}{
+		{name: "replace existing login", existing: true},
+		{name: "refuse new login", wantError: "at most 128 logins"},
+		{name: "replacement still validates section", existing: true, invalidSibling: true, wantError: "chat_id must be non-zero"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routes := make(map[string]string, maxTelegramRoutes)
+			// Only the target login needs real NSS resolution for this mutation.
+			// Synthetic unrelated logins avoid creating 128 OS users; section
+			// validation checks their shape and targets, not startup UID pinning.
+			for i := 0; i < maxTelegramRoutes; i++ {
+				login := fmt.Sprintf("askdo-route-capacity-fixture-%03d", i)
+				if _, err := user.Lookup(login); err == nil {
+					t.Fatalf("synthetic fixture login %q unexpectedly resolves", login)
+				}
+				routes[login] = "ops"
+			}
+			if tc.existing {
+				delete(routes, "askdo-route-capacity-fixture-000")
+				routes[current.Username] = "ops"
+			}
+			routeJSON, err := json.Marshal(routes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			telegram := fmt.Sprintf(namedTelegramFixture, dir, `, "routes": `+string(routeJSON))
+			if tc.invalidSibling {
+				telegram = strings.Replace(telegram, `"chat_id": 11`, `"chat_id": 0`, 1)
+			}
+			// An unfinished review section must not block a telegram-only save.
+			configPath, _ := onboardFixture(t, "", telegram)
+			before := fileContent(t, configPath)
+			wantTelegram := readTelegram(t, configPath)
+			var stdout, stderr bytes.Buffer
+			code := channelRouteSet([]string{current.Username, "alice", "--config", configPath}, &stdout, &stderr)
+			if tc.wantError != "" {
+				if code != 1 || !strings.Contains(stderr.String(), tc.wantError) || stdout.Len() != 0 {
+					t.Fatalf("exit=%d stdout=%s stderr=%s, want refusal containing %q", code, stdout.String(), stderr.String(), tc.wantError)
+				}
+				if fileContent(t, configPath) != before {
+					t.Fatal("refused route set changed the original config bytes")
+				}
+				return
+			}
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("replacement at capacity exit=%d stderr=%s", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), fmt.Sprintf("login %q (UID %s) -> channel %q", current.Username, current.Uid, "alice")) {
+				t.Fatalf("replacement summary missing: %s", stdout.String())
+			}
+			wantTelegram.Routes[current.Username] = "alice"
+			got := readTelegram(t, configPath)
+			if len(got.Routes) != maxTelegramRoutes || !reflect.DeepEqual(got, wantTelegram) {
+				t.Fatalf("replacement changed route count or unrelated telegram settings: %+v", got)
+			}
+			if err := config.ValidateTelegramSection(got); err != nil {
+				t.Fatalf("saved telegram section is invalid: %v", err)
+			}
+			if len(readModels(t, configPath)) != 0 {
+				t.Fatal("telegram save changed the unfinished review section")
+			}
+			info, err := os.Stat(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0600 {
+				t.Fatalf("saved config mode %04o, want 0600", info.Mode().Perm())
+			}
+		})
 	}
 }
 

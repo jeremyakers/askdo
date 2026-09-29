@@ -506,7 +506,7 @@ func channelRouteSet(args []string, stdout, stderr io.Writer) int {
 	if tg.Routes == nil {
 		tg.Routes = map[string]string{}
 	}
-	if len(tg.Routes) >= maxTelegramRoutes {
+	if _, exists := tg.Routes[login]; !exists && len(tg.Routes) >= maxTelegramRoutes {
 		fmt.Fprintf(stderr, "channel route set: telegram.routes holds at most %d logins (edit the config to replace one)\n", maxTelegramRoutes)
 		return 1
 	}
