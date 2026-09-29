@@ -4,6 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
 	"strings"
@@ -60,6 +65,9 @@ type FakeBrokerClient struct {
 	Read      proto.ReadPathResult
 	List      proto.ListPathResult
 	Search    proto.SearchPathResult
+	Stat      proto.StatPathResult
+	Find      proto.FindPathResult
+	Mount     proto.MountInfoResult
 	StatusFor map[string]string
 }
 
@@ -77,6 +85,12 @@ func (b *FakeBrokerClient) Inspect(_ context.Context, req proto.InspectRequest) 
 		payload = b.List
 	case "search_path":
 		payload = b.Search
+	case "stat_path":
+		payload = b.Stat
+	case "find_path":
+		payload = b.Find
+	case "mount_info":
+		payload = b.Mount
 	default:
 		return proto.InspectResult{}, errors.New("unexpected op " + req.Op)
 	}
@@ -146,6 +160,60 @@ func TestPathToolBrokerErrorIsBounded(t *testing.T) {
 	result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "list_path", Arguments: json.RawMessage(`{"base":"host","path":"/usr/bin","cursor":""}`)})
 	if err != nil || terminal || !result.IsError {
 		t.Fatalf("result=%+v terminal=%v err=%v", result, terminal, err)
+	}
+}
+
+// The three structural filesystem ops each proxy one typed inspect request and
+// return the broker's typed result to the model.
+func TestStructuralOpsProxyTypedRequests(t *testing.T) {
+	broker := &FakeBrokerClient{
+		Stat:  proto.StatPathResult{Source: "host", Type: "file", Mode: 0644, Size: 12},
+		Find:  proto.FindPathResult{Matches: []string{"/tmp/a.go"}},
+		Mount: proto.MountInfoResult{MountID: 42, MountPoint: "/", FSType: "ext4"},
+	}
+	executor := NewToolExecutor(toolBootstrap(), broker)
+	calls := []struct {
+		name string
+		args string
+		op   string
+	}{
+		{"stat_path", `{"base":"host","path":"/tmp/a.go","resolve":false}`, "stat_path"},
+		{"find_path", `{"base":"host","path":"/tmp","glob":"*.go","cursor":""}`, "find_path"},
+		{"mount_info", `{"path":"/tmp/a.go"}`, "mount_info"},
+	}
+	for _, call := range calls {
+		result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: call.name, Name: call.name, Arguments: json.RawMessage(call.args)})
+		if err != nil || terminal || result.IsError {
+			t.Fatalf("%s result=%+v terminal=%v err=%v", call.name, result, terminal, err)
+		}
+	}
+	if len(broker.Requests) != 3 {
+		t.Fatalf("inspect requests=%d, want 3", len(broker.Requests))
+	}
+	for i, want := range []string{"stat_path", "find_path", "mount_info"} {
+		if broker.Requests[i].Op != want {
+			t.Fatalf("request[%d].Op=%q, want %q", i, broker.Requests[i].Op, want)
+		}
+	}
+}
+
+// A malformed structural request is rejected before the broker pipe, and the
+// request never crosses it.
+func TestStructuralOpArgumentValidation(t *testing.T) {
+	broker := &FakeBrokerClient{}
+	executor := NewToolExecutor(toolBootstrap(), broker)
+	for _, call := range []ToolCall{
+		{ID: "1", Name: "stat_path", Arguments: json.RawMessage(`{"base":"host","path":"/tmp/a.go","resolve":false,"approved":true}`)},
+		{ID: "2", Name: "find_path", Arguments: json.RawMessage(`{"base":"host","path":"/tmp","glob":"../*","cursor":""}`)},
+		{ID: "3", Name: "mount_info", Arguments: json.RawMessage(`{"path":"relative"}`)},
+	} {
+		result, terminal, err := executor.Execute(context.Background(), call)
+		if err != nil || terminal || !result.IsError {
+			t.Fatalf("%s result=%#v terminal=%v err=%v", call.Name, result, terminal, err)
+		}
+	}
+	if len(broker.Requests) != 0 {
+		t.Fatalf("invalid structural requests reached the broker: %+v", broker.Requests)
 	}
 }
 
@@ -233,20 +301,21 @@ func TestSubmitReviewControlFieldsRejectedBeforePipe(t *testing.T) {
 	}
 }
 
-// The model-facing tool surface is exactly the four direct tools: read_path,
-// list_path, search_path, submit_review. The removed capture tools are
-// unknown tools. JSON Schema's required-field list is structural; it is not
-// the deleted model-facing `required:true` file-importance flag.
-func TestDefinitionsAreFixedFour(t *testing.T) {
+// The model-facing tool surface is exactly the seven direct tools: read_path,
+// list_path, search_path, stat_path, find_path, mount_info, submit_review. The
+// removed capture tools are unknown tools. JSON Schema's required-field list is
+// structural; it is not the deleted model-facing `required:true` file-importance
+// flag. The webfetch tool is opt-in and absent from this default surface.
+func TestDefinitionsAreFixedSeven(t *testing.T) {
 	defs := Definitions()
-	if len(defs) != 4 {
+	if len(defs) != 7 {
 		t.Fatalf("definitions=%d", len(defs))
 	}
 	names := make([]string, len(defs))
 	for i, d := range defs {
 		names[i] = d.Name
 	}
-	if strings.Join(names, ",") != "read_path,list_path,search_path,submit_review" {
+	if strings.Join(names, ",") != "read_path,list_path,search_path,stat_path,find_path,mount_info,submit_review" {
 		t.Fatalf("names=%v", names)
 	}
 	for _, def := range defs {
@@ -285,13 +354,197 @@ func TestDefinitionsAreFixedFour(t *testing.T) {
 // Strict providers reject schemas whose properties lack an explicit "type";
 // walk every emitted tool schema and require one on every property.
 func TestToolSchemasEveryPropertyHasType(t *testing.T) {
-	for _, def := range Definitions() {
-		var schema map[string]any
-		if err := json.Unmarshal(def.Schema, &schema); err != nil {
-			t.Fatalf("%s schema does not parse: %v", def.Name, err)
+	for _, defs := range [][]ToolDefinition{Definitions(), DefinitionsWithWebfetch(true)} {
+		for _, def := range defs {
+			var schema map[string]any
+			if err := json.Unmarshal(def.Schema, &schema); err != nil {
+				t.Fatalf("%s schema does not parse: %v", def.Name, err)
+			}
+			assertPropertyTypes(t, def.Name, schema)
 		}
-		assertPropertyTypes(t, def.Name, schema)
 	}
+}
+
+// Optional webfetch surface: disabled by default it is neither offered nor
+// executable; enabled it decodes strict args, fetches with the review context,
+// and returns only a bounded result or a fixed category.
+func TestWebfetchToolDisabledIsNotOfferedOrExecutable(t *testing.T) {
+	if names := definitionNames(Definitions()); strings.Contains(strings.Join(names, ","), "webfetch") {
+		t.Fatalf("disabled Definitions offered webfetch: %v", names)
+	}
+	if names := definitionNames(DefinitionsWithWebfetch(false)); strings.Contains(strings.Join(names, ","), "webfetch") {
+		t.Fatalf("DefinitionsWithWebfetch(false) offered webfetch: %v", names)
+	}
+	called := false
+	executor := NewToolExecutor(toolBootstrap(), noBroker{})
+	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		called = true
+		return FetchResult{}, nil
+	}
+	result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"http://example.com/"}`)})
+	if err != nil || terminal || !result.IsError {
+		t.Fatalf("disabled webfetch result=%+v terminal=%v err=%v", result, terminal, err)
+	}
+	if called {
+		t.Fatal("disabled webfetch reached the fetcher")
+	}
+}
+
+func TestWebfetchToolEnabledExecutesAndBoundsResult(t *testing.T) {
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	if names := definitionNames(DefinitionsWithWebfetch(true)); !strings.Contains(strings.Join(names, ","), "webfetch") {
+		t.Fatalf("enabled tool list missing webfetch: %v", names)
+	}
+	executor := NewToolExecutor(boot, noBroker{})
+	var gotURL string
+	executor.Fetch = func(_ context.Context, rawURL string) (FetchResult, error) {
+		gotURL = rawURL
+		return FetchResult{FinalURL: rawURL, Status: 200, Content: "bounded evidence"}, nil
+	}
+	result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"http://example.com/page"}`)})
+	if err != nil || terminal || result.IsError {
+		t.Fatalf("enabled webfetch result=%+v terminal=%v err=%v", result, terminal, err)
+	}
+	if gotURL != "http://example.com/page" {
+		t.Fatalf("fetcher URL=%q", gotURL)
+	}
+	var decoded webfetchToolResult
+	if err := json.Unmarshal([]byte(result.Content), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Status != "ok" || decoded.HTTPStatus != 200 || decoded.Content != "bounded evidence" {
+		t.Fatalf("decoded result=%+v", decoded)
+	}
+}
+
+func TestWebfetchToolEnabledRejectsMalformedArgs(t *testing.T) {
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	called := false
+	executor := NewToolExecutor(boot, noBroker{})
+	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		called = true
+		return FetchResult{}, nil
+	}
+	for _, args := range []string{`{}`, `{"url":""}`, `{"url":"http://example.com/","token":"x"}`} {
+		result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(args)})
+		if err != nil || terminal || !result.IsError {
+			t.Fatalf("args %s result=%+v terminal=%v err=%v", args, result, terminal, err)
+		}
+	}
+	if called {
+		t.Fatal("malformed webfetch args reached the fetcher")
+	}
+}
+
+// A failing fetch returns only a fixed category label: the raw URL including
+// credentials and any network diagnostics never reach the model.
+func TestWebfetchToolErrorCategoryDoesNotLeak(t *testing.T) {
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	executor := NewToolExecutor(boot, noBroker{})
+	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		return FetchResult{}, fmt.Errorf("%w: credentials in URL http://alice:secret@10.0.0.1/", ErrFetchInvalidURL)
+	}
+	result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"http://alice:secret@10.0.0.1/"}`)})
+	if err != nil || terminal || !result.IsError {
+		t.Fatalf("result=%+v terminal=%v err=%v", result, terminal, err)
+	}
+	var decoded webfetchToolError
+	if err := json.Unmarshal([]byte(result.Content), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Category != "invalid_url" || decoded.Status != "error" {
+		t.Fatalf("decoded error=%+v", decoded)
+	}
+	for _, secret := range []string{"secret", "alice", "10.0.0.1", "credentials in URL"} {
+		if strings.Contains(result.Content, secret) {
+			t.Fatalf("webfetch error leaked %q: %s", secret, result.Content)
+		}
+	}
+}
+
+// The enabled branch runs the real validated fetch pipeline: a fake resolver
+// returns a public address, the dial is redirected to a public httptest
+// listener, and the bounded text is returned through the tool.
+func TestWebfetchToolEnabledUsesValidatedFetcher(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "public evidence")
+	}))
+	t.Cleanup(server.Close)
+	fetcher, dialer, rawURL := newTestFetcher(t, server, staticLookup(fakePublicIP))
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	executor := NewToolExecutor(boot, noBroker{})
+	executor.Fetch = fetcher.fetch
+	result, terminal, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"` + rawURL + `"}`)})
+	if err != nil || terminal || result.IsError {
+		t.Fatalf("result=%+v terminal=%v err=%v", result, terminal, err)
+	}
+	var decoded webfetchToolResult
+	if err := json.Unmarshal([]byte(result.Content), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Content != "public evidence" || decoded.HTTPStatus != http.StatusOK {
+		t.Fatalf("decoded result=%+v", decoded)
+	}
+	expectedDial := net.JoinHostPort(fakePublicIP, mustFetchPort(t, rawURL))
+	if dialed := dialer.dialed(); len(dialed) != 1 || dialed[0] != expectedDial {
+		t.Fatalf("dialed=%v, want the validated literal %q", dialed, expectedDial)
+	}
+}
+
+// capturingModel records each ModelRequest and then submits a valid report, so
+// a Loop test can inspect the exact tool list it was offered.
+type capturingModel struct {
+	requests []ModelRequest
+}
+
+func (m *capturingModel) ChatTurn(_ context.Context, req ModelRequest) (ModelResponse, error) {
+	m.requests = append(m.requests, req)
+	return ModelResponse{ToolCalls: []ToolCall{{ID: "1", Name: "submit_review", Arguments: json.RawMessage(validReview)}}}, nil
+}
+
+// Loop.Run offers webfetch exactly when the projected flag is set, always keeps
+// submit_review in the list, and still treats submit_review as terminal.
+func TestLoopOffersWebfetchOnlyWhenEnabled(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			boot := toolBootstrap()
+			boot.ConfigProjection.Models[0].RequestTimeoutMS = 1000
+			boot.ConfigProjection.Limits = proto.WorkerLimits{MaxModelCallsPerAttempt: 2, MaxOutputTokens: 100, WebfetchEnabled: enabled}
+			model := &capturingModel{}
+			review, err := (&Loop{Model: model, Tools: NewToolExecutor(boot, noBroker{}), Bootstrap: boot}).Run(context.Background())
+			if err != nil || review.Report.Risk != "4" {
+				t.Fatalf("err=%v review=%+v", err, review)
+			}
+			if len(model.requests) != 1 {
+				t.Fatalf("model turns=%d", len(model.requests))
+			}
+			names := definitionNames(model.requests[0].Tools)
+			if names[len(names)-1] != "submit_review" {
+				t.Fatalf("submit_review is not last: %v", names)
+			}
+			hasWebfetch := false
+			for _, name := range names {
+				if name == "webfetch" {
+					hasWebfetch = true
+				}
+			}
+			if hasWebfetch != enabled {
+				t.Fatalf("enabled=%v tool list=%v", enabled, names)
+			}
+		})
+	}
+}
+
+func definitionNames(defs []ToolDefinition) []string {
+	names := make([]string, len(defs))
+	for i, d := range defs {
+		names[i] = d.Name
+	}
+	return names
 }
 
 func assertPropertyTypes(t *testing.T, path string, schema map[string]any) {

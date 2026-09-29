@@ -46,6 +46,7 @@ type Decision struct {
 	OperatorUserID int64
 	// MessageID is the approval-card message the decision was made on.
 	MessageID int64
+	ChatID    int64
 	// Time is when the decision was validated.
 	Time time.Time
 }
@@ -53,6 +54,7 @@ type Decision struct {
 // PollerConfig binds a Poller to one pending approval. All values come from
 // the reviewer notify stage's in-memory binding (design §9 step 1).
 type PollerConfig struct {
+	Targets []PollTarget
 	// OperatorUserID is the sole numeric Telegram user ID allowed to
 	// decide. Username and chat membership are never authentication.
 	OperatorUserID int64
@@ -74,6 +76,13 @@ type PollerConfig struct {
 	PollTimeoutSec int
 }
 
+// PollTarget binds one card to its chat and eligible sender IDs.
+type PollTarget struct {
+	ChatID          int64
+	CardMessageID   int64
+	OperatorUserIDs []int64
+}
+
 // Poller is the single getUpdates long-poller for one pending approval
 // (design §9: "Only one poller runs"). The update offset advances in worker
 // memory only; a restarted worker must never revive an old pending
@@ -91,13 +100,31 @@ func NewPoller(client *Client, cfg PollerConfig) (*Poller, error) {
 	if client == nil {
 		return nil, errors.New("telegram: poller requires a client")
 	}
+	if len(cfg.Targets) != 0 {
+		if cfg.OperatorUserID != 0 || cfg.ChatID != 0 || cfg.CardMessageID != 0 || len(cfg.Targets) > 16 {
+			return nil, errors.New("telegram: invalid target set")
+		}
+		seen := map[int64]bool{}
+		for _, target := range cfg.Targets {
+			if target.ChatID == 0 || target.CardMessageID <= 0 || seen[target.ChatID] || len(target.OperatorUserIDs) == 0 || len(target.OperatorUserIDs) > 16 {
+				return nil, errors.New("telegram: invalid poll target")
+			}
+			seen[target.ChatID] = true
+			users := map[int64]bool{}
+			for _, id := range target.OperatorUserIDs {
+				if id <= 0 || users[id] {
+					return nil, errors.New("telegram: invalid poll operator")
+				}
+				users[id] = true
+			}
+		}
+	} else {
+		if cfg.OperatorUserID <= 0 || cfg.ChatID == 0 || cfg.CardMessageID <= 0 {
+			return nil, errors.New("telegram: poller requires a valid legacy target")
+		}
+		cfg.Targets = []PollTarget{{ChatID: cfg.ChatID, CardMessageID: cfg.CardMessageID, OperatorUserIDs: []int64{cfg.OperatorUserID}}}
+	}
 	switch {
-	case cfg.OperatorUserID <= 0:
-		return nil, errors.New("telegram: poller requires a positive operator user ID")
-	case cfg.ChatID == 0:
-		return nil, errors.New("telegram: poller requires a chat ID")
-	case cfg.CardMessageID <= 0:
-		return nil, errors.New("telegram: poller requires the approval-card message ID")
 	case !noncePattern.MatchString(cfg.Nonce):
 		return nil, errors.New("telegram: poller requires a 128-bit hex nonce")
 	case cfg.Expiry.IsZero():
@@ -165,11 +192,23 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 	}
 
 	action, nonce, parseOK := parseCallbackData(cb.Data)
+	var target *PollTarget
+	if cb.Message != nil {
+		for i := range p.cfg.Targets {
+			t := &p.cfg.Targets[i]
+			if t.ChatID == cb.Message.Chat.ID && t.CardMessageID == cb.Message.MessageID {
+				for _, id := range t.OperatorUserIDs {
+					if id == cb.From.ID {
+						target = t
+						break
+					}
+				}
+				break
+			}
+		}
+	}
 	if !parseOK || action == "" ||
-		cb.From.ID != p.cfg.OperatorUserID ||
-		cb.Message == nil ||
-		cb.Message.Chat.ID != p.cfg.ChatID ||
-		cb.Message.MessageID != p.cfg.CardMessageID ||
+		target == nil ||
 		nonce != p.cfg.Nonce {
 		// Any missing/mismatched field: ack-and-ignore, never grant.
 		p.ack(ctx, cb.ID, ackReject)
@@ -187,7 +226,7 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 			p.ack(ctx, cb.ID, ackNoDetail)
 			return Decision{}, false, nil
 		}
-		if _, err := SendDetails(ctx, p.client, p.cfg.ChatID, p.cfg.DetailsParts); err != nil {
+		if _, err := SendDetails(ctx, p.client, target.ChatID, p.cfg.DetailsParts); err != nil {
 			return Decision{}, false, err
 		}
 		p.ack(ctx, cb.ID, "")
@@ -204,6 +243,7 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 	decision := Decision{
 		OperatorUserID: cb.From.ID,
 		MessageID:      cb.Message.MessageID,
+		ChatID:         target.ChatID,
 		Time:           now,
 	}
 	switch action {
@@ -215,7 +255,9 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 		p.ack(ctx, cb.ID, ackDeny)
 	}
 	// Remove the buttons as best-effort cleanup (design §9 step 5).
-	_ = p.client.EditMessageReplyMarkup(ctx, p.cfg.ChatID, p.cfg.CardMessageID)
+	for _, t := range p.cfg.Targets {
+		_ = p.client.EditMessageReplyMarkup(ctx, t.ChatID, t.CardMessageID)
+	}
 	return decision, true, nil
 }
 

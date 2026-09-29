@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
+	"golang.org/x/sys/unix"
 )
 
 // Capture index schema (capture-index.json): version is 1; files holds relative
@@ -50,6 +52,23 @@ func captureSubmittedBundle(spool spoolFiles, request proto.SubmitRequest, limit
 		return errors.New("bundle capture requires inspection policy")
 	}
 	if request.Mode != "bundle" {
+		if request.CapturedStdinBase64 != "" {
+			data, decodeErr := strictBase64(request.CapturedStdinBase64)
+			if decodeErr != nil || len(data) == 0 || len(data) > proto.MaxCapturedStdinBytes || !utf8.Valid(data) || containsNUL(data) {
+				return errors.New("invalid captured stdin")
+			}
+			if limits.MaxInspectedFiles < 1 || int64(len(data)) > limits.MaxInspectedBytes {
+				return errors.New("captured stdin exceeds broker inspection limits")
+			}
+			if err := os.Mkdir(spool.bundle, 0700); err != nil {
+				return err
+			}
+			if err := captureWriteFile(filepath.Join(spool.bundle, "stdin"), data, 0600); err != nil {
+				return err
+			}
+			digest := sha256.Sum256(data)
+			return writeCaptureIndex(spool.captureIndex, captureIndex{Version: 1, Files: []captureRecord{{Path: "stdin", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), Masked: policy.MatchesSensitive("stdin")}}}, true)
+		}
 		return writeCaptureIndex(spool.captureIndex, captureIndex{Version: 1, Files: []captureRecord{}}, true)
 	}
 	files, sensitive, err := validateSubmittedBundle(request, limits)
@@ -105,6 +124,78 @@ func readCaptureIndex(path string) (captureIndex, error) {
 		return captureIndex{}, errors.New("invalid capture index")
 	}
 	return index, nil
+}
+
+// openCapturedStdin binds the approved bytes to a single confined regular-file
+// descriptor. Both the captured request and the index must agree; replacing
+// either the path or the index cannot authorize different input.
+func (j *jobRuntime) openCapturedStdin() (*os.File, error) {
+	if j.req.CapturedStdinBase64 == "" {
+		return nil, errors.New("no captured stdin")
+	}
+	data, err := strictBase64(j.req.CapturedStdinBase64)
+	if err != nil {
+		return nil, err
+	}
+	want := sha256.Sum256(data)
+	index, err := readCaptureIndex(j.spool.captureIndex)
+	if err != nil {
+		return nil, err
+	}
+	if len(index.Files) != 1 || index.Files[0].Path != "stdin" || index.Files[0].Size != int64(len(data)) || index.Files[0].SHA256 != hex.EncodeToString(want[:]) {
+		return nil, errors.New("captured stdin index differs from submitted input")
+	}
+	root, err := os.OpenRoot(j.spool.bundle)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	linked, err := root.Lstat("stdin")
+	if err != nil || !linked.Mode().IsRegular() {
+		return nil, errors.New("captured stdin is not a regular file")
+	}
+	file, err := root.Open("stdin")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(linked, info) || info.Size() != int64(len(data)) {
+		return nil, errors.New("captured stdin changed before dispatch")
+	}
+	read, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
+	if err != nil || int64(len(read)) != int64(len(data)) || sha256.Sum256(read) != want {
+		return nil, errors.New("captured stdin bytes changed before dispatch")
+	}
+	linked, err = root.Lstat("stdin")
+	if err != nil || !linked.Mode().IsRegular() || !os.SameFile(linked, info) {
+		return nil, errors.New("captured stdin path changed before dispatch")
+	}
+	// The staged inode is writable by the broker. Freeze the verified bytes
+	// into a sealed regular memfd so an in-place write after verification
+	// cannot change what the approved child actually reads.
+	fd, err := unix.MemfdCreate("askdo-stdin", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	if err != nil {
+		return nil, fmt.Errorf("freeze captured stdin: %w", err)
+	}
+	immutable := os.NewFile(uintptr(fd), "captured stdin")
+	valid := false
+	defer func() {
+		if !valid {
+			_ = immutable.Close()
+		}
+	}()
+	if _, err := immutable.Write(read); err != nil {
+		return nil, err
+	}
+	if _, err := unix.FcntlInt(immutable.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
+		return nil, fmt.Errorf("seal captured stdin: %w", err)
+	}
+	if _, err := immutable.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	valid = true
+	return immutable, nil
 }
 
 func writeCaptureIndex(path string, index captureIndex, create bool) error {

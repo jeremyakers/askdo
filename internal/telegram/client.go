@@ -459,6 +459,91 @@ func SendApproval(ctx context.Context, c *Client, chatID int64, parts []string, 
 	return messageIDs, cardID, nil
 }
 
+// ApprovalDelivery records one fully delivered summary/card pair.
+type ApprovalDelivery struct {
+	ChatID     int64
+	CardID     int64
+	MessageIDs []int64
+}
+
+// SendApprovals uses one bot and finishes every destination before approval is
+// opened. On failure, previously sent cards lose their keyboards best effort.
+func SendApprovals(ctx context.Context, c *Client, chatIDs []int64, parts []string, cardText string, keyboard InlineKeyboardMarkup) ([]ApprovalDelivery, error) {
+	if len(chatIDs) == 0 || len(chatIDs) > 16 {
+		return nil, errors.New("telegram: invalid approval destinations")
+	}
+	seen := map[int64]bool{}
+	for _, id := range chatIDs {
+		if id == 0 || seen[id] {
+			return nil, errors.New("telegram: invalid approval destination")
+		}
+		seen[id] = true
+	}
+	deliveries := make([]ApprovalDelivery, 0, len(chatIDs))
+	for _, chatID := range chatIDs {
+		if chatID == 0 {
+			return nil, errors.New("telegram: invalid chat ID")
+		}
+		ids, card, err := SendApproval(ctx, c, chatID, parts, cardText, keyboard)
+		if err == nil && card <= 0 {
+			err = errors.New("telegram: approval card has no positive message ID")
+		}
+		if err == nil {
+			for _, id := range ids {
+				if id <= 0 {
+					err = errors.New("telegram: approval summary has no positive message ID")
+					break
+				}
+			}
+		}
+		if err != nil {
+			// Cancellation must not suppress cleanup; authorization still fails.
+			cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			for _, sent := range deliveries {
+				_ = c.EditMessageReplyMarkup(cleanup, sent.ChatID, sent.CardID)
+			}
+			if card > 0 {
+				_ = c.EditMessageReplyMarkup(cleanup, chatID, card)
+			}
+			cancel()
+			return nil, err
+		}
+		deliveries = append(deliveries, ApprovalDelivery{ChatID: chatID, CardID: card, MessageIDs: ids})
+	}
+	return deliveries, nil
+}
+
+type AutoDelivery struct {
+	ChatID     int64
+	NoticeID   int64
+	MessageIDs []int64
+}
+
+func SendAutoNotices(ctx context.Context, c *Client, chatIDs []int64, parts []string, notice string) ([]AutoDelivery, error) {
+	if len(chatIDs) == 0 || len(chatIDs) > 16 {
+		return nil, errors.New("telegram: invalid auto destinations")
+	}
+	seen := map[int64]bool{}
+	for _, id := range chatIDs {
+		if id == 0 || seen[id] {
+			return nil, errors.New("telegram: invalid auto destination")
+		}
+		seen[id] = true
+	}
+	result := make([]AutoDelivery, 0, len(chatIDs))
+	for _, chatID := range chatIDs {
+		if chatID == 0 {
+			return nil, errors.New("telegram: invalid chat ID")
+		}
+		ids, id, err := SendAutoNotice(ctx, c, chatID, parts, notice)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, AutoDelivery{ChatID: chatID, NoticeID: id, MessageIDs: ids})
+	}
+	return result, nil
+}
+
 // SendAutoNotice requires Bot API acknowledgments for all summary parts and
 // the final button-free notice; an ambiguous result is never authorization.
 func SendAutoNotice(ctx context.Context, c *Client, chatID int64, parts []string, notice string) ([]int64, int64, error) {

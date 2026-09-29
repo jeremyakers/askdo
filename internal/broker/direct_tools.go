@@ -3,12 +3,15 @@ package broker
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
+	"golang.org/x/sys/unix"
 )
 
 func directOK(seq uint32, value any) (proto.InspectResult, error) {
@@ -126,13 +130,17 @@ func (j *jobRuntime) bundleBytes(record captureRecord) ([]byte, inspection.Statu
 		return nil, inspection.StatusChangedDuringCapture
 	}
 	defer root.Close()
+	linked, err := root.Lstat(record.Path)
+	if err != nil || !linked.Mode().IsRegular() {
+		return nil, inspection.StatusChangedDuringCapture
+	}
 	f, err := root.Open(record.Path)
 	if err != nil {
 		return nil, inspection.StatusChangedDuringCapture
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() != record.Size {
+	if err != nil || !st.Mode().IsRegular() || st.Size() != record.Size || !os.SameFile(linked, st) {
 		return nil, inspection.StatusChangedDuringCapture
 	}
 	data, err := io.ReadAll(io.LimitReader(f, record.Size+1))
@@ -141,6 +149,10 @@ func (j *jobRuntime) bundleBytes(record captureRecord) ([]byte, inspection.Statu
 	}
 	digest := sha256.Sum256(data)
 	if hex.EncodeToString(digest[:]) != record.SHA256 {
+		return nil, inspection.StatusChangedDuringCapture
+	}
+	linked, err = root.Lstat(record.Path)
+	if err != nil || !linked.Mode().IsRegular() || !os.SameFile(linked, st) {
 		return nil, inspection.StatusChangedDuringCapture
 	}
 	return data, inspection.StatusOK
@@ -237,11 +249,10 @@ func (j *jobRuntime) listPath(seq uint32, req proto.ListPathRequest) (proto.Insp
 	return directOK(seq, proto.ListPathResult{Entries: entries[offset:end], NextCursor: next, SkippedMasked: skipped})
 }
 
-// Host search intentionally accepts only an explicit regular file. Directory
-// traversal cannot guarantee a stable bounded set of authorized descendants.
+// Host directory search shares the bounded policy walker with find_path.
 func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.InspectResult, error) {
 	offset, ok := directCursor(req.Cursor)
-	if !ok {
+	if !ok && req.Base != "host" {
 		return failedInspect(seq, inspection.StatusUnresolved), nil
 	}
 	// Match paths on the wire are capped at 1024 bytes. A longer explicit
@@ -298,29 +309,33 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 		budget = 1 << 20
 	}
 	if req.Base == "host" {
-		// ReadRange performs descriptor authorization, both masks and post-read
-		// revalidation; no capture or index write is involved.
-		if budget > proto.MaxDirectReadBytes {
-			budget = proto.MaxDirectReadBytes
+		meta, status := j.daemon.policy.StatPath(req.Path, false)
+		if status != inspection.StatusOK {
+			if status == inspection.StatusWithheld {
+				j.recordWithheldPath(req.Path)
+			}
+			return failedInspect(seq, status), nil
+		}
+		if meta.Type == "dir" {
+			return j.searchHostTree(seq, req, re, budget)
+		}
+		if !ok {
+			return failedInspect(seq, inspection.StatusUnresolved), nil
 		}
 		if budget < 1 {
 			return failedInspect(seq, inspection.StatusLimitExceeded), nil
 		}
-		r := j.daemon.policy.ReadRange(req.Path, 0, int(budget), j.identity)
-		if r.Status == inspection.StatusWithheld {
+		data, status := j.daemon.policy.ReadSearchFile(req.Path, budget)
+		if status == inspection.StatusWithheld {
 			j.recordWithheldPath(req.Path)
 		}
-		if r.Status != inspection.StatusOK {
-			return failedInspect(seq, r.Status), nil
+		if status != inspection.StatusOK {
+			return failedInspect(seq, status), nil
 		}
-		if !r.EOF {
-			return failedInspect(seq, inspection.StatusLimitExceeded), nil
-		}
-		budget -= int64(len(r.Content))
-		if !utf8.Valid(r.Content) || bytes.IndexByte(r.Content, 0) >= 0 {
+		if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
 			return failedInspect(seq, inspection.StatusUnresolved), nil
 		}
-		page.scan(re, req.Path, r.Content)
+		page.scan(re, req.Path, data)
 	} else {
 		for _, r := range files {
 			if len(r.Path) > 1024 {
@@ -341,6 +356,342 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 		}
 	}
 	return page.result(seq, skipped)
+}
+
+const maxWalkEntries = inspection.MaxWalkEntries
+const maxWalkDepth = 8
+
+// walkHost never follows directory symlinks: ListDir authorizes each child,
+// while StatPath checks the final object without following it. Entire trees
+// beyond the limit fail, not just a silently truncated prefix.
+func (j *jobRuntime) walkHost(root string) ([]string, int, inspection.Status) {
+	type frame struct {
+		path  string
+		depth int
+	}
+	stack := []frame{{root, 0}}
+	paths := make([]string, 0)
+	skipped := 0
+	visited := 0 // raw names, including omitted masked/denied entries
+	for len(stack) > 0 {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for offset := 0; ; {
+			if visited >= maxWalkEntries {
+				return nil, 0, inspection.StatusLimitExceeded
+			}
+			pageSize := maxWalkEntries - visited
+			if pageSize > 500 {
+				pageSize = 500
+			}
+			r := j.daemon.policy.ListDirForWalk(f.path, offset, pageSize, offset+maxWalkEntries-visited, j.identity)
+			if r.Status != inspection.StatusOK {
+				return nil, 0, r.Status
+			}
+			skipped += r.SkippedMasked
+			// Count actual raw names, including masked/denied entries, without
+			// charging empty or short pages as if they were full.
+			visited += r.RawCount
+			for _, e := range r.Entries {
+				if len(paths) >= maxWalkEntries {
+					return nil, 0, inspection.StatusLimitExceeded
+				}
+				child := filepath.Join(f.path, e.Name)
+				if len(child) > 1024 {
+					return nil, 0, inspection.StatusLimitExceeded
+				}
+				meta, status := j.daemon.policy.StatPath(child, false)
+				if status == inspection.StatusWithheld {
+					skipped++
+					continue
+				}
+				if status != inspection.StatusOK {
+					return nil, 0, inspection.StatusChangedDuringCapture
+				}
+				paths = append(paths, child)
+				if meta.Type == "dir" {
+					if f.depth >= maxWalkDepth {
+						return nil, 0, inspection.StatusLimitExceeded
+					}
+					stack = append(stack, frame{child, f.depth + 1})
+				}
+			}
+			if r.NextOffset < 0 {
+				break
+			}
+			offset = r.NextOffset
+		}
+	}
+	sort.Strings(paths)
+	return paths, skipped, inspection.StatusOK
+}
+
+// A cursor embeds a digest of the complete bounded observation, so a resumed
+// page cannot silently continue over a changed directory or changed content.
+func observationCursor(offset int, digest [32]byte) string {
+	return fmt.Sprintf("%d:%s", offset, base64.RawURLEncoding.EncodeToString(digest[:12]))
+}
+func observationOffset(cursor string, digest [32]byte) (int, bool) {
+	if cursor == "" {
+		return 0, true
+	}
+	text, _, ok := strings.Cut(cursor, ":")
+	if !ok {
+		return 0, false
+	}
+	offset, valid := directCursor(text)
+	return offset, valid && cursor == observationCursor(offset, digest)
+}
+
+func (j *jobRuntime) statPath(seq uint32, req proto.StatPathRequest) (proto.InspectResult, error) {
+	if req.Base == "host" {
+		m, status := j.daemon.policy.StatPath(req.Path, req.Resolve)
+		if status != inspection.StatusOK {
+			if status == inspection.StatusWithheld {
+				j.recordWithheldPath(req.Path)
+			}
+			return failedInspect(seq, status), nil
+		}
+		return directOK(seq, proto.StatPathResult{Source: "host", Type: m.Type, Mode: m.Mode, UID: m.UID, GID: m.GID, Nlink: m.Nlink, Size: m.Size, AtimeUnixNS: m.AtimeUnixNS, MtimeUnixNS: m.MtimeUnixNS, CtimeUnixNS: m.CtimeUnixNS, Device: m.Device, Inode: m.Inode, Target: m.Target, ResolvedPath: m.ResolvedPath})
+	}
+	if req.Resolve {
+		return failedInspect(seq, inspection.StatusInspectionDenied), nil
+	}
+	record, status := j.bundleRecord(req.Path)
+	if status != inspection.StatusOK {
+		if status == inspection.StatusWithheld {
+			j.recordMaskedBundlePath(req.Path)
+		}
+		return failedInspect(seq, status), nil
+	}
+	if record.Size < 0 || record.Size > j.daemon.cfg.Limits.MaxInspectedBytes {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	root, err := os.OpenRoot(j.spool.bundle)
+	if err != nil {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	defer root.Close()
+	linked, err := root.Lstat(record.Path)
+	if err != nil || !linked.Mode().IsRegular() {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	f, err := root.Open(record.Path)
+	if err != nil {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	defer f.Close()
+	var before unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &before); err != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Size != record.Size {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	digest := sha256.New()
+	n, err := io.Copy(digest, io.LimitReader(f, record.Size+1))
+	if err != nil || n != record.Size || hex.EncodeToString(digest.Sum(nil)) != record.SHA256 {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &after); err != nil || after.Dev != before.Dev || after.Ino != before.Ino || after.Size != before.Size || after.Mtim != before.Mtim || after.Ctim != before.Ctim {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	check, err := root.Open(record.Path)
+	if err != nil {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	defer check.Close()
+	var current unix.Stat_t
+	if err := unix.Fstat(int(check.Fd()), &current); err != nil || current.Dev != before.Dev || current.Ino != before.Ino {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	checked, err := check.Stat()
+	if err != nil || !os.SameFile(linked, checked) {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	linked, err = root.Lstat(record.Path)
+	if err != nil || !linked.Mode().IsRegular() || !os.SameFile(linked, checked) {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	// These are staged-file facts, never claimed as source-host metadata.
+	return directOK(seq, proto.StatPathResult{Source: "bundle_staged", Type: "file", Mode: before.Mode & 07777, UID: before.Uid, GID: before.Gid, Nlink: uint64(before.Nlink), Size: before.Size, AtimeUnixNS: before.Atim.Sec*1e9 + before.Atim.Nsec, MtimeUnixNS: before.Mtim.Sec*1e9 + before.Mtim.Nsec, CtimeUnixNS: before.Ctim.Sec*1e9 + before.Ctim.Nsec, Device: uint64(before.Dev), Inode: before.Ino})
+}
+
+func (j *jobRuntime) mountInfo(seq uint32, req proto.MountInfoRequest) (proto.InspectResult, error) {
+	m, status := j.daemon.policy.MountPath(req.Path)
+	if status != inspection.StatusOK {
+		if status == inspection.StatusWithheld {
+			j.recordWithheldPath(req.Path)
+		}
+		return failedInspect(seq, status), nil
+	}
+	return directOK(seq, proto.MountInfoResult{MountID: m.ID, MountPoint: m.Point, FSType: m.FSType, ReadOnly: m.ReadOnly})
+}
+
+func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.InspectResult, error) {
+	var names []string
+	skipped := 0
+	if req.Base == "host" {
+		meta, status := j.daemon.policy.StatPath(req.Path, false)
+		if status != inspection.StatusOK {
+			if status == inspection.StatusWithheld {
+				j.recordWithheldPath(req.Path)
+			}
+			return failedInspect(seq, status), nil
+		}
+		if meta.Type != "dir" {
+			return failedInspect(seq, inspection.StatusInspectionDenied), nil
+		}
+		names, skipped, status = j.walkHost(req.Path)
+		if status != inspection.StatusOK {
+			return failedInspect(seq, status), nil
+		}
+	} else {
+		if j.daemon.policy.MatchesSensitive(req.Path) {
+			j.recordMaskedBundlePath(req.Path)
+			return failedInspect(seq, inspection.StatusWithheld), nil
+		}
+		index, err := readCaptureIndex(j.spool.captureIndex)
+		if err != nil {
+			return failedInspect(seq, inspection.StatusUnknown), nil
+		}
+		found := req.Path == "."
+		seen := make(map[string]struct{})
+		for _, record := range index.Files {
+			if req.Path != "." && record.Path != req.Path && !strings.HasPrefix(record.Path, req.Path+"/") {
+				continue
+			}
+			found = true
+			if record.Path == req.Path {
+				return failedInspect(seq, inspection.StatusInspectionDenied), nil
+			}
+			if record.Masked || j.daemon.policy.MatchesSensitive(record.Path) {
+				skipped++
+				continue
+			}
+			if len(names) >= maxWalkEntries || strings.Count(record.Path, "/") > maxWalkDepth || len(record.Path) > 1024 {
+				return failedInspect(seq, inspection.StatusLimitExceeded), nil
+			}
+			if _, status := j.bundleBytes(record); status != inspection.StatusOK {
+				return failedInspect(seq, status), nil
+			}
+			for parent := path.Dir(record.Path); parent != "." && parent != req.Path; parent = path.Dir(parent) {
+				if j.daemon.policy.MatchesSensitive(parent) {
+					break
+				}
+				if _, exists := seen[parent]; !exists {
+					if len(names) >= maxWalkEntries {
+						return failedInspect(seq, inspection.StatusLimitExceeded), nil
+					}
+					seen[parent] = struct{}{}
+					names = append(names, parent)
+				}
+			}
+			names = append(names, record.Path)
+		}
+		if !found {
+			return failedInspect(seq, inspection.StatusNotFound), nil
+		}
+	}
+	var matches []string
+	for _, name := range names {
+		if ok, _ := path.Match(req.Glob, path.Base(name)); ok {
+			matches = append(matches, name)
+		}
+	}
+	sort.Strings(matches)
+	fingerprint := sha256.New()
+	fingerprint.Write([]byte(req.Path))
+	fmt.Fprintf(fingerprint, ":%d:", skipped)
+	for _, name := range names {
+		fingerprint.Write([]byte(name))
+		fingerprint.Write([]byte{0})
+		if req.Base == "host" {
+			m, status := j.daemon.policy.StatPath(name, false)
+			if status != inspection.StatusOK {
+				return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+			}
+			fmt.Fprintf(fingerprint, "%d:%d:%d:%d:%d:%d;", m.Device, m.Inode, m.MtimeUnixNS, m.CtimeUnixNS, m.Size, m.Mode)
+		}
+	}
+	var hash [32]byte
+	copy(hash[:], fingerprint.Sum(nil))
+	offset, ok := observationOffset(req.Cursor, hash)
+	if !ok || offset > len(matches) {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	end := offset + 200
+	if end > len(matches) {
+		end = len(matches)
+	}
+	next := ""
+	if end < len(matches) {
+		next = observationCursor(end, hash)
+	}
+	return directOK(seq, proto.FindPathResult{Matches: append([]string{}, matches[offset:end]...), NextCursor: next, SkippedMasked: skipped})
+}
+
+func (j *jobRuntime) searchHostTree(seq uint32, req proto.SearchPathRequest, re *regexp.Regexp, budget int64) (proto.InspectResult, error) {
+	names, skipped, status := j.walkHost(req.Path)
+	if status != inspection.StatusOK {
+		return failedInspect(seq, status), nil
+	}
+	offset := 0
+	if req.Cursor != "" {
+		prefix, _, found := strings.Cut(req.Cursor, ":")
+		var ok bool
+		offset, ok = directCursor(prefix)
+		if !found || !ok {
+			return failedInspect(seq, inspection.StatusUnresolved), nil
+		}
+	}
+	page := newSearchPage(offset)
+	hash := sha256.New()
+	fmt.Fprintf(hash, ":%d:", skipped)
+	for _, name := range names {
+		hash.Write([]byte(name))
+		hash.Write([]byte{0})
+	}
+	for _, name := range names {
+		meta, status := j.daemon.policy.StatPath(name, false)
+		if status != inspection.StatusOK {
+			return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+		}
+		if meta.Type != "file" {
+			continue
+		}
+		if meta.Size > budget {
+			return failedInspect(seq, inspection.StatusLimitExceeded), nil
+		}
+		data, status := j.daemon.policy.ReadSearchFile(name, budget)
+		if status != inspection.StatusOK {
+			return failedInspect(seq, status), nil
+		}
+		budget -= int64(len(data))
+		if !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 {
+			return failedInspect(seq, inspection.StatusUnresolved), nil
+		}
+		hash.Write([]byte(name))
+		hash.Write([]byte{0})
+		hash.Write(data)
+		hash.Write([]byte{0})
+		page.scan(re, name, data)
+	}
+	var digest [32]byte
+	copy(digest[:], hash.Sum(nil))
+	_, ok := observationOffset(req.Cursor, digest)
+	if !ok || offset > page.total {
+		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
+	}
+	result, err := page.result(seq, skipped)
+	if err == nil && result.Status == "ok" {
+		var body proto.SearchPathResult
+		if json.Unmarshal(result.Payload, &body) == nil {
+			if body.NextCursor != "" {
+				body.NextCursor = observationCursor(offset+directSearchPageSize, digest)
+			}
+			return directOK(seq, body)
+		}
+	}
+	return result, err
 }
 
 // directSearchPageSize bounds the matches returned in a single search page.

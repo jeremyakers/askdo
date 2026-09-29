@@ -84,6 +84,41 @@ func TestAutoNoticeFailureFailsClosed(t *testing.T) {
 	}
 }
 
+func TestNamedAutoNoticeAllRecipientsOrNoReport(t *testing.T) {
+	for _, failSecond := range []bool{false, true} {
+		t.Run(map[bool]string{true: "second_fails", false: "all_delivered"}[failSecond], func(t *testing.T) {
+			fake := faketelegram.New(t)
+			if failSecond {
+				fake.FailSend(func(call int, _ string, _ bool) *faketelegram.APIError {
+					if call == 3 {
+						return &faketelegram.APIError{Code: 403, Description: "blocked"}
+					}
+					return nil
+				})
+			}
+			w := wireNotifyReviewer(t, fake, reviewerTestReport("1"), 30*time.Second, namedNotifyRoute)
+			freezeAuto(t, w)
+			if failSecond {
+				if err := <-w.done; err == nil {
+					t.Fatal("incomplete auto delivery accepted")
+				}
+				expectNoMessage(t, w.messages, "auto_notification_sent", "decision")
+				return
+			}
+			n := awaitMessage(t, w.messages, "auto_notification_sent").(*proto.AutoNotificationSent)
+			if err := <-w.done; err != nil {
+				t.Fatal(err)
+			}
+			if len(n.Targets) != 2 || n.Targets[0].ChatID != 101 || n.Targets[1].ChatID != -202 || n.Targets[0].NoticeID <= 0 || n.Targets[1].NoticeID <= 0 {
+				t.Fatalf("targets=%+v", n.Targets)
+			}
+			if countCalls(fake.Calls(), "getUpdates") != 0 {
+				t.Fatal("auto notice polled for decision")
+			}
+		})
+	}
+}
+
 func TestUnknownReviewCannotTriggerAutoNotice(t *testing.T) {
 	fake := faketelegram.New(t)
 	w := wireNotifyReviewer(t, fake, reviewerTestReport("unknown"), 30*time.Second)

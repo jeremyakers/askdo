@@ -385,6 +385,7 @@ type mountInfoEntry struct {
 	id           uint64
 	major, minor uint32
 	root, point  string
+	fsType       string
 }
 
 func readMountInfo() ([]mountInfoEntry, error) {
@@ -427,7 +428,7 @@ func parseMountInfo(r io.Reader) ([]mountInfoEntry, error) {
 		if err1 != nil || err2 != nil || errID != nil || err3 != nil || err4 != nil || root == "" || !filepath.IsAbs(point) {
 			return nil, fmt.Errorf("malformed path or device on line %d (device=%q root=%q point=%q): %v %v %v %v", len(entries)+1, fields[2], fields[3], fields[4], err1, err2, err3, err4)
 		}
-		entries = append(entries, mountInfoEntry{id: id, major: uint32(major), minor: uint32(minor), root: filepath.Clean(root), point: filepath.Clean(point)})
+		entries = append(entries, mountInfoEntry{id: id, major: uint32(major), minor: uint32(minor), root: filepath.Clean(root), point: filepath.Clean(point), fsType: fields[separator+1]})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err

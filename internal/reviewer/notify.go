@@ -52,6 +52,9 @@ func notifyAutoApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.
 		ReviewerModel: model, Expiry: time.Now().Add(time.Duration(bootstrap.ConfigProjection.Telegram.ApprovalTTLMS) * time.Millisecond),
 		SubmitterUID: bootstrap.SubmitterUID, SubmitterName: bootstrap.SubmitterName, CWD: bootstrap.Operation.CWD,
 	}
+	if bootstrap.Operation.CapturedStdin != nil {
+		input.CapturedStdinBytes = bootstrap.Operation.CapturedStdin.Size
+	}
 	parts, err := telegram.RenderSummaryParts(input)
 	if err != nil {
 		return fmt.Errorf("render auto-approval summary: %w", err)
@@ -69,11 +72,23 @@ func notifyAutoApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.
 		return fmt.Errorf("telegram client: %w", err)
 	}
 	_ = pipe.write(proto.Progress{Type: "progress", Stage: "notifying", Detail: "sending auto-approval policy notice", ModelName: model})
-	ids, noticeID, err := telegram.SendAutoNotice(ctx, client, tg.ChatID, parts, notice)
-	if err != nil {
-		return fmt.Errorf("auto-approval notification was not fully delivered: %w", err)
+	message := proto.AutoNotificationSent{Type: "auto_notification_sent", Digest: frozen.ManifestDigest, TimeUnixMS: time.Now().UnixMilli(), MessageIDs: []int64{}}
+	if tg.ChannelName == "" {
+		ids, noticeID, err := telegram.SendAutoNotice(ctx, client, tg.ChatID, parts, notice)
+		if err != nil {
+			return fmt.Errorf("auto-approval notification was not fully delivered: %w", err)
+		}
+		message.MessageIDs, message.NoticeID = ids, noticeID
+	} else {
+		deliveries, err := telegram.SendAutoNotices(ctx, client, telegramChatIDs(tg), parts, notice)
+		if err != nil {
+			return fmt.Errorf("auto-approval notification was not fully delivered: %w", err)
+		}
+		for _, delivery := range deliveries {
+			message.Targets = append(message.Targets, proto.AutoNotificationTarget{ChatID: delivery.ChatID, MessageIDs: delivery.MessageIDs, NoticeID: delivery.NoticeID})
+		}
 	}
-	if err := pipe.write(proto.AutoNotificationSent{Type: "auto_notification_sent", Digest: frozen.ManifestDigest, MessageIDs: ids, NoticeID: noticeID, TimeUnixMS: time.Now().UnixMilli()}); err != nil {
+	if err := pipe.write(message); err != nil {
 		return fmt.Errorf("report auto_notification_sent: %w", err)
 	}
 	return nil
@@ -149,6 +164,9 @@ func notifyApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.Boot
 		SubmitterName: bootstrap.SubmitterName,
 		CWD:           bootstrap.Operation.CWD,
 	}
+	if bootstrap.Operation.CapturedStdin != nil {
+		input.CapturedStdinBytes = bootstrap.Operation.CapturedStdin.Size
+	}
 	parts, err := telegram.RenderSummaryParts(input)
 	if err != nil {
 		return fmt.Errorf("render approval summary: %w", err)
@@ -168,14 +186,14 @@ func notifyApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.Boot
 	// Step 2: send the complete required summary and fixed buttons. A partial
 	// failure means no actionable card exists and the stage fails closed.
 	_ = pipe.write(proto.Progress{Type: "progress", Stage: "notifying", Detail: "sending approval request", ModelName: model})
-	messageIDs, cardID, err := telegram.SendApproval(ctx, client, tg.ChatID, parts, cardText, keyboard)
+	notification, targets, err := sendApprovalTargets(ctx, client, tg, parts, cardText, keyboard)
 	if err != nil {
 		return fmt.Errorf("approval notification was not fully delivered: %w", err)
 	}
 
 	// Step 3: report notification_sent before any polling; the private pipe's
 	// write ordering guarantees this precedes any decision.
-	notification := proto.NotificationSent{Type: "notification_sent", MessageIDs: proto.NonNilSlice(messageIDs), CardID: cardID, Digest: frozen.ManifestDigest, ExpiryUnixMS: expiry.UnixMilli()}
+	notification.Type, notification.Digest, notification.ExpiryUnixMS = "notification_sent", frozen.ManifestDigest, expiry.UnixMilli()
 	if err := pipe.write(notification); err != nil {
 		return fmt.Errorf("report notification_sent: %w", err)
 	}
@@ -185,12 +203,10 @@ func notifyApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.Boot
 	// message ID, nonce/action, pending state and expiry; Details only
 	// returns the expanded report and never grants or extends approval.
 	poller, err := telegram.NewPoller(client, telegram.PollerConfig{
-		OperatorUserID: tg.OperatorUserID,
-		ChatID:         tg.ChatID,
-		CardMessageID:  cardID,
-		Nonce:          nonce,
-		Expiry:         expiry,
-		DetailsParts:   details,
+		Targets:      targets,
+		Nonce:        nonce,
+		Expiry:       expiry,
+		DetailsParts: details,
 	})
 	if err != nil {
 		return fmt.Errorf("start approval poller: %w", err)
@@ -209,6 +225,9 @@ func notifyApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.Boot
 
 	// Step 6: deliver the code-constructed decision and exit successfully.
 	message := proto.Decision{Type: "decision", Digest: frozen.ManifestDigest, OperatorUserID: decision.OperatorUserID, MessageID: decision.MessageID, Action: decision.Action, TimeUnixMS: decision.Time.UnixMilli()}
+	if tg.ChannelName != "" {
+		message.ChannelName, message.ChatID = tg.ChannelName, decision.ChatID
+	}
 	if err := pipe.write(message); err != nil {
 		return fmt.Errorf("deliver decision: %w", err)
 	}
@@ -250,6 +269,9 @@ func notifyAvailabilityApproval(ctx context.Context, pipe *asyncBroker, bootstra
 		SubmitterUID: bootstrap.SubmitterUID, SubmitterName: bootstrap.SubmitterName,
 		CWD: bootstrap.Operation.CWD, Expiry: expiry, Failures: frozen.History,
 	}
+	if bootstrap.Operation.CapturedStdin != nil {
+		input.CapturedStdinBytes = bootstrap.Operation.CapturedStdin.Size
+	}
 	parts, err := telegram.RenderApprovalOnlySummaryParts(input)
 	if err != nil {
 		return fmt.Errorf("render approval-only summary: %w", err)
@@ -269,15 +291,16 @@ func notifyAvailabilityApproval(ctx context.Context, pipe *asyncBroker, bootstra
 		return fmt.Errorf("approval-only details exceed %d parts", maxSummaryParts)
 	}
 	_ = pipe.write(proto.Progress{Type: "progress", Stage: "notifying", Detail: "sending unreviewed approval request"})
-	messageIDs, cardID, err := telegram.SendApproval(ctx, client, tg.ChatID, parts, cardText, keyboard)
+	notification, targets, err := sendApprovalTargets(ctx, client, tg, parts, cardText, keyboard)
 	if err != nil {
 		return fmt.Errorf("approval-only notification was not fully delivered: %w", err)
 	}
-	if err := pipe.write(proto.NotificationSent{Type: "notification_sent", MessageIDs: proto.NonNilSlice(messageIDs), CardID: cardID, Digest: frozen.ManifestDigest, ExpiryUnixMS: expiry.UnixMilli()}); err != nil {
+	notification.Type, notification.Digest, notification.ExpiryUnixMS = "notification_sent", frozen.ManifestDigest, expiry.UnixMilli()
+	if err := pipe.write(notification); err != nil {
 		return fmt.Errorf("report notification_sent: %w", err)
 	}
 	_ = pipe.write(proto.Progress{Type: "progress", Stage: "awaiting_human", Detail: "awaiting operator decision"})
-	poller, err := telegram.NewPoller(client, telegram.PollerConfig{OperatorUserID: tg.OperatorUserID, ChatID: tg.ChatID, CardMessageID: cardID, Nonce: nonce, Expiry: expiry, DetailsParts: details})
+	poller, err := telegram.NewPoller(client, telegram.PollerConfig{Targets: targets, Nonce: nonce, Expiry: expiry, DetailsParts: details})
 	if err != nil {
 		return fmt.Errorf("start approval-only poller: %w", err)
 	}
@@ -288,10 +311,41 @@ func notifyAvailabilityApproval(ctx context.Context, pipe *asyncBroker, bootstra
 	if err != nil {
 		return err
 	}
-	if err := pipe.write(proto.Decision{Type: "decision", Digest: frozen.ManifestDigest, OperatorUserID: decision.OperatorUserID, MessageID: decision.MessageID, Action: decision.Action, TimeUnixMS: decision.Time.UnixMilli()}); err != nil {
+	message := proto.Decision{Type: "decision", Digest: frozen.ManifestDigest, OperatorUserID: decision.OperatorUserID, MessageID: decision.MessageID, Action: decision.Action, TimeUnixMS: decision.Time.UnixMilli()}
+	if tg.ChannelName != "" {
+		message.ChannelName, message.ChatID = tg.ChannelName, decision.ChatID
+	}
+	if err := pipe.write(message); err != nil {
 		return fmt.Errorf("deliver decision: %w", err)
 	}
 	return nil
+}
+
+func telegramChatIDs(tg proto.WorkerTelegram) []int64 {
+	ids := make([]int64, 0, len(tg.Recipients))
+	for _, r := range tg.Recipients {
+		ids = append(ids, r.ChatID)
+	}
+	return ids
+}
+
+func sendApprovalTargets(ctx context.Context, client *telegram.Client, tg proto.WorkerTelegram, parts []string, cardText string, keyboard telegram.InlineKeyboardMarkup) (proto.NotificationSent, []telegram.PollTarget, error) {
+	if tg.ChannelName == "" {
+		ids, card, err := telegram.SendApproval(ctx, client, tg.ChatID, parts, cardText, keyboard)
+		return proto.NotificationSent{MessageIDs: proto.NonNilSlice(ids), CardID: card}, []telegram.PollTarget{{ChatID: tg.ChatID, CardMessageID: card, OperatorUserIDs: []int64{tg.OperatorUserID}}}, err
+	}
+	deliveries, err := telegram.SendApprovals(ctx, client, telegramChatIDs(tg), parts, cardText, keyboard)
+	if err != nil {
+		return proto.NotificationSent{}, nil, err
+	}
+	notification := proto.NotificationSent{MessageIDs: []int64{}, Targets: make([]proto.NotificationTarget, 0, len(deliveries))}
+	targets := make([]telegram.PollTarget, 0, len(deliveries))
+	for i, d := range deliveries {
+		users := tg.Recipients[i].OperatorUserIDs
+		notification.Targets = append(notification.Targets, proto.NotificationTarget{ChatID: d.ChatID, CardID: d.CardID, MessageIDs: d.MessageIDs, OperatorUserIDs: users})
+		targets = append(targets, telegram.PollTarget{ChatID: d.ChatID, CardMessageID: d.CardID, OperatorUserIDs: users})
+	}
+	return notification, targets, nil
 }
 
 // newNonce returns a fresh 128-bit crypto-random nonce as 32 lowercase hex

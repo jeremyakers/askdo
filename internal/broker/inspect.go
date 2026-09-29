@@ -21,6 +21,12 @@ func (j *jobRuntime) handleInspect(request proto.InspectRequest) (proto.InspectR
 		return j.listPath(request.RequestSeq, value)
 	case proto.SearchPathRequest:
 		return j.searchPath(request.RequestSeq, value)
+	case proto.StatPathRequest:
+		return j.statPath(request.RequestSeq, value)
+	case proto.FindPathRequest:
+		return j.findPath(request.RequestSeq, value)
+	case proto.MountInfoRequest:
+		return j.mountInfo(request.RequestSeq, value)
 	default:
 		return proto.InspectResult{}, errors.New("unsupported inspection request")
 	}

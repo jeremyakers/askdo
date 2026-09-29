@@ -102,10 +102,16 @@ type ReviewConfig struct {
 	// resolved UID. Missing or empty means disabled; there is no boolean
 	// auto-approval and no submitter-controllable setting.
 	AutoApproveGrants []AutoApproveGrant `json:"auto_approve_grants,omitempty"`
-	approvalOnlyUIDs  map[uint32]struct{}
-	autoApproveRisk   map[uint32]int
-	usersResolved     bool
-	autoResolved      bool
+	// WebfetchEnabled opts the reviewer into the bounded public-web
+	// webfetch tool. It defaults to false when omitted; when true the
+	// broker projects it to the worker and the model may fetch public
+	// http(s) pages as evidence. Private, loopback, link-local, and
+	// metadata destinations are refused by the fetcher regardless.
+	WebfetchEnabled  bool `json:"webfetch_enabled,omitempty"`
+	approvalOnlyUIDs map[uint32]struct{}
+	autoApproveRisk  map[uint32]int
+	usersResolved    bool
+	autoResolved     bool
 }
 
 // AutoApproveGrant is one review.auto_approve_grants entry: the named login
@@ -136,10 +142,104 @@ type LimitsConfig struct {
 
 // TelegramConfig configures the mandatory Telegram decision interface.
 type TelegramConfig struct {
-	TokenFile      string   `json:"token_file"`
-	OperatorUserID int64    `json:"operator_user_id"`
-	ChatID         int64    `json:"chat_id"`
-	ApprovalTTL    Duration `json:"approval_ttl"`
+	TokenFile       string            `json:"token_file,omitempty"`
+	OperatorUserID  int64             `json:"operator_user_id,omitempty"`
+	ChatID          int64             `json:"chat_id,omitempty"`
+	ApprovalTTL     Duration          `json:"approval_ttl"`
+	DefaultChannel  string            `json:"default_channel,omitempty"`
+	Channels        []TelegramChannel `json:"channels,omitempty"`
+	Routes          map[string]string `json:"routes,omitempty"`
+	resolvedRoutes  map[uint32]TelegramRoute
+	resolvedDefault TelegramRoute
+}
+
+// TelegramChannel defines one bot and its destination chats.
+type TelegramChannel struct {
+	Name        string              `json:"name"`
+	TokenFile   string              `json:"token_file"`
+	Recipients  []TelegramRecipient `json:"recipients"`
+	ApprovalTTL Duration            `json:"approval_ttl,omitempty"`
+}
+
+// TelegramRecipient identifies a chat and the users allowed to decide there.
+type TelegramRecipient struct {
+	ChatID          int64   `json:"chat_id"`
+	OperatorUserIDs []int64 `json:"operator_user_ids"`
+}
+
+// TelegramRoute is a detached projection of the bot and recipients for a job.
+type TelegramRoute struct {
+	ChannelName string
+	TokenFile   string
+	Recipients  []TelegramRecipient
+	ApprovalTTL Duration
+}
+
+func copyTelegramRoute(route TelegramRoute) TelegramRoute {
+	copy := route
+	copy.Recipients = make([]TelegramRecipient, len(route.Recipients))
+	for i, recipient := range route.Recipients {
+		copy.Recipients[i] = recipient
+		copy.Recipients[i].OperatorUserIDs = append([]int64(nil), recipient.OperatorUserIDs...)
+	}
+	return copy
+}
+
+// RouteForUID returns an independent selected channel for an authenticated UID.
+// Load pins all named login routes to UIDs before this method is used.
+func (telegram TelegramConfig) RouteForUID(uid uint32) TelegramRoute {
+	if telegram.resolvedRoutes != nil {
+		if route, ok := telegram.resolvedRoutes[uid]; ok {
+			return copyTelegramRoute(route)
+		}
+		return copyTelegramRoute(telegram.resolvedDefault)
+	}
+	if len(telegram.Channels) == 0 {
+		return TelegramRoute{ChannelName: "default", TokenFile: telegram.TokenFile, ApprovalTTL: telegram.ApprovalTTL,
+			Recipients: []TelegramRecipient{{ChatID: telegram.ChatID, OperatorUserIDs: []int64{telegram.OperatorUserID}}}}
+	}
+	for _, channel := range telegram.Channels {
+		if channel.Name == telegram.DefaultChannel {
+			return copyTelegramRoute(telegram.channelRoute(channel))
+		}
+	}
+	return TelegramRoute{}
+}
+
+func (telegram TelegramConfig) channelRoute(channel TelegramChannel) TelegramRoute {
+	ttl := channel.ApprovalTTL
+	if ttl == 0 {
+		ttl = telegram.ApprovalTTL
+	}
+	return TelegramRoute{ChannelName: channel.Name, TokenFile: channel.TokenFile, ApprovalTTL: ttl, Recipients: channel.Recipients}
+}
+
+func (telegram *TelegramConfig) resolveRoutes() error {
+	if len(telegram.Channels) == 0 {
+		return nil
+	}
+	channels := make(map[string]TelegramRoute, len(telegram.Channels))
+	for _, channel := range telegram.Channels {
+		channels[channel.Name] = copyTelegramRoute(telegram.channelRoute(channel))
+	}
+	routes := make(map[uint32]TelegramRoute, len(telegram.Routes))
+	for login, name := range telegram.Routes {
+		account, err := lookupUser(login)
+		if err != nil {
+			return fmt.Errorf("resolve telegram.routes login %q: %w", login, err)
+		}
+		uid, err := strconv.ParseUint(account.Uid, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid UID for telegram.routes login %q: %w", login, err)
+		}
+		if _, exists := routes[uint32(uid)]; exists {
+			return fmt.Errorf("duplicate telegram.routes UID %d", uid)
+		}
+		routes[uint32(uid)] = channels[name]
+	}
+	telegram.resolvedDefault = channels[telegram.DefaultChannel]
+	telegram.resolvedRoutes = routes
+	return nil
 }
 
 type configPresence struct {
@@ -202,6 +302,9 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Review.ResolveAutoApproveGrants(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Telegram.resolveRoutes(); err != nil {
+		return nil, err
+	}
 	// Validate existence and symlink resolution without replacing requested
 	// spellings; matching must still see the operator's original aliases.
 	if _, _, err := canonicalizeRoots(cfg.Inspection.ReadRoots); err != nil {
@@ -215,6 +318,9 @@ func (c *Config) CredentialPaths() []string {
 	paths := []string{}
 	if c.Telegram.TokenFile != "" {
 		paths = append(paths, c.Telegram.TokenFile)
+	}
+	for _, channel := range c.Telegram.Channels {
+		paths = append(paths, channel.TokenFile)
 	}
 	for _, model := range c.Review.Models {
 		if model.APIKeyFile != "" {
@@ -502,6 +608,87 @@ func (review *ReviewConfig) RequiresReview(peerUID uint32, forceReview bool) boo
 // Operator tooling uses it to section-validate a channel mutation without
 // whole-file Validate.
 func ValidateTelegramSection(telegram TelegramConfig) error {
+	if len(telegram.Channels) != 0 || telegram.DefaultChannel != "" || telegram.Routes != nil {
+		if telegram.TokenFile != "" || telegram.OperatorUserID != 0 || telegram.ChatID != 0 {
+			return errors.New("telegram mixed legacy and named fields")
+		}
+		if len(telegram.Channels) < 1 || len(telegram.Channels) > 8 {
+			return errors.New("telegram.channels must have 1 through 8 channels")
+		}
+		if len(telegram.Routes) > 128 {
+			return errors.New("telegram.routes must have at most 128 logins")
+		}
+		if telegram.DefaultChannel == "" {
+			return errors.New("telegram.default_channel is required")
+		}
+		if time.Duration(telegram.ApprovalTTL) < 30*time.Second {
+			return errors.New("telegram.approval_ttl must be at least 30s")
+		}
+		names := make(map[string]struct{}, len(telegram.Channels))
+		paths := make(map[string]struct{}, len(telegram.Channels))
+		for i, channel := range telegram.Channels {
+			field := fmt.Sprintf("telegram.channels[%d]", i)
+			if channel.Name == "" || len(channel.Name) > 128 || strings.TrimSpace(channel.Name) != channel.Name {
+				return fmt.Errorf("%s.name is invalid", field)
+			}
+			if _, exists := names[channel.Name]; exists {
+				return fmt.Errorf("duplicate %s.name %q", field, channel.Name)
+			}
+			names[channel.Name] = struct{}{}
+			if err := validateCredentialFile(channel.TokenFile); err != nil {
+				return fmt.Errorf("%s.token_file: %w", field, err)
+			}
+			if _, exists := paths[channel.TokenFile]; exists {
+				return fmt.Errorf("duplicate %s.token_file", field)
+			}
+			paths[channel.TokenFile] = struct{}{}
+			if channel.ApprovalTTL != 0 && time.Duration(channel.ApprovalTTL) < 30*time.Second {
+				return fmt.Errorf("%s.approval_ttl must be at least 30s", field)
+			}
+			if len(channel.Recipients) < 1 || len(channel.Recipients) > 8 {
+				return fmt.Errorf("%s.recipients must have 1 through 8 chats", field)
+			}
+			chats := make(map[int64]struct{}, len(channel.Recipients))
+			for j, recipient := range channel.Recipients {
+				item := fmt.Sprintf("%s.recipients[%d]", field, j)
+				if recipient.ChatID == 0 {
+					return fmt.Errorf("%s.chat_id must be non-zero", item)
+				}
+				if _, exists := chats[recipient.ChatID]; exists {
+					return fmt.Errorf("duplicate %s.chat_id", item)
+				}
+				chats[recipient.ChatID] = struct{}{}
+				if len(recipient.OperatorUserIDs) < 1 || len(recipient.OperatorUserIDs) > 8 {
+					return fmt.Errorf("%s.operator_user_ids must have 1 through 8 users", item)
+				}
+				users := make(map[int64]struct{}, len(recipient.OperatorUserIDs))
+				for _, id := range recipient.OperatorUserIDs {
+					if id <= 0 {
+						return fmt.Errorf("%s.operator_user_ids must be positive", item)
+					}
+					if _, exists := users[id]; exists {
+						return fmt.Errorf("duplicate %s.operator_user_ids", item)
+					}
+					users[id] = struct{}{}
+				}
+			}
+		}
+		if _, exists := names[telegram.DefaultChannel]; !exists {
+			return errors.New("telegram.default_channel must name a channel")
+		}
+		for login, name := range telegram.Routes {
+			if login == "" || strings.TrimSpace(login) != login {
+				return errors.New("telegram.routes contains an invalid login name")
+			}
+			if _, err := strconv.ParseUint(login, 10, 32); err == nil {
+				return errors.New("telegram.routes must use login names, not UIDs")
+			}
+			if _, exists := names[name]; !exists {
+				return fmt.Errorf("telegram.routes login %q names an unknown channel", login)
+			}
+		}
+		return nil
+	}
 	if err := validateCredentialFile(telegram.TokenFile); err != nil {
 		return fmt.Errorf("telegram.token_file: %w", err)
 	}
@@ -814,9 +1001,37 @@ func (c *Config) validatePresence() error {
 	for _, item := range []struct {
 		m map[string]json.RawMessage
 		n string
-	}{{c.present.top, "config_version"}, {c.present.inspection, "read_roots"}, {c.present.review, "models"}, {c.present.telegram, "token_file"}, {c.present.telegram, "operator_user_id"}, {c.present.telegram, "chat_id"}} {
+	}{{c.present.top, "config_version"}, {c.present.inspection, "read_roots"}, {c.present.review, "models"}} {
 		if _, ok := item.m[item.n]; !ok {
 			return fmt.Errorf("missing required field %s", item.n)
+		}
+	}
+	named := hasField(c.present.telegram, "channels") || hasField(c.present.telegram, "default_channel") || hasField(c.present.telegram, "routes")
+	legacy := hasField(c.present.telegram, "token_file") || hasField(c.present.telegram, "operator_user_id") || hasField(c.present.telegram, "chat_id")
+	if named && legacy {
+		return errors.New("telegram mixed legacy and named fields")
+	}
+	if named {
+		if !hasField(c.present.telegram, "channels") || !hasField(c.present.telegram, "default_channel") {
+			return errors.New("telegram.channels and telegram.default_channel are required")
+		}
+		if hasField(c.present.telegram, "routes") && string(c.present.telegram["routes"]) == "null" {
+			return errors.New("telegram.routes must be an object")
+		}
+		var channels []map[string]json.RawMessage
+		if err := json.Unmarshal(c.present.telegram["channels"], &channels); err != nil {
+			return fmt.Errorf("telegram.channels must be an array: %w", err)
+		}
+		for i, channel := range channels {
+			if hasField(channel, "approval_ttl") && c.Telegram.Channels[i].ApprovalTTL == 0 {
+				return fmt.Errorf("telegram.channels[%d].approval_ttl must be at least 30s", i)
+			}
+		}
+	} else {
+		for _, name := range []string{"token_file", "operator_user_id", "chat_id"} {
+			if !hasField(c.present.telegram, name) {
+				return fmt.Errorf("missing required field %s", name)
+			}
 		}
 	}
 	if hasField(c.present.review, "mode") && c.Review.Mode == "" {

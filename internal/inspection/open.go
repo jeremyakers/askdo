@@ -76,8 +76,11 @@ type Result struct {
 	Facts         *Facts
 	Entries       []DirectoryEntry
 	SkippedMasked int
-	// NextOffset is the zero-based offset of the next directory page, or -1
-	// when the listing is complete. It is meaningful only for ListDir.
+	// RawCount counts selected names before masking and policy checks. Broker
+	// walkers use it for work accounting; it is never serialized to the worker.
+	RawCount int `json:"-"`
+	// NextOffset is the zero-based offset into sorted raw directory names of
+	// the next page, or -1 when complete. It is meaningful only for ListDir.
 	NextOffset int
 	Err        error
 }
@@ -181,6 +184,13 @@ const resolveFlags = unix.RESOLVE_IN_ROOT | unix.RESOLVE_NO_MAGICLINKS
 // larger directories fail explicitly with StatusLimitExceeded.
 const maxDirectoryEntries = 100_000
 
+// MaxWalkEntries is the cumulative raw-name budget for a host subtree walk.
+// A walk-specific directory listing cannot materialize more than this many.
+const MaxWalkEntries = 2048
+
+// This seam makes the actual name-read bound observable in package tests.
+var readDirectoryEntries = (*os.File).ReadDir
+
 // ProbeOpenat2 verifies the kernel supports the resolve flags required by the
 // inspection security boundary. There is deliberately no fallback.
 func ProbeOpenat2() error {
@@ -196,12 +206,26 @@ func ProbeOpenat2() error {
 	return unix.Close(fd)
 }
 
-// ListDir returns at most maxEntries sorted entries from a permitted
-// directory, starting at the zero-based offset into the complete sorted
-// listing. Result.NextOffset carries the offset of the next page or -1 when
-// the listing is complete, so callers can paginate without re-reading pages.
+// ListDir authorizes at most maxEntries sorted raw names from a permitted
+// directory. The cursor advances over raw names, including omitted masked or
+// denied entries, without revealing their spelling. Re-reading a later page
+// does not authorize any earlier page's children.
 func (p *Policy) ListDir(path string, offset, maxEntries int, identity SubmitterIdentity) Result {
-	if maxEntries < 1 || offset < 0 {
+	return p.listDir(path, offset, maxEntries, maxDirectoryEntries, identity)
+}
+
+// ListDirForWalk applies the remaining walk budget to the entire directory
+// before sorting or authorizing names. totalCap includes names consumed on
+// earlier pages of this directory (offset) and never exceeds MaxWalkEntries.
+func (p *Policy) ListDirForWalk(path string, offset, maxEntries, totalCap int, identity SubmitterIdentity) Result {
+	if totalCap < 1 || totalCap > MaxWalkEntries {
+		return Result{Status: StatusLimitExceeded}
+	}
+	return p.listDir(path, offset, maxEntries, totalCap, identity)
+}
+
+func (p *Policy) listDir(path string, offset, maxEntries, totalCap int, identity SubmitterIdentity) Result {
+	if maxEntries < 1 || maxEntries > 500 || offset < 0 {
 		return Result{Status: StatusLimitExceeded}
 	}
 	fd, auth, err := p.authorizedOpen(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC)
@@ -226,13 +250,28 @@ func (p *Policy) ListDir(path string, offset, maxEntries int, identity Submitter
 	}
 	// Bound total directory size before materializing the sorted page index;
 	// ReadDir(-1) on an unbounded directory would exhaust broker memory.
-	items, err := file.ReadDir(maxDirectoryEntries + 1)
+	items, err := readDirectoryEntries(file, totalCap+1)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return Result{Status: StatusUnknown, Facts: facts, Err: err}
 	}
-	if len(items) > maxDirectoryEntries {
+	if len(items) > totalCap {
 		return Result{Status: StatusLimitExceeded, Facts: facts}
 	}
+	// Sort untrusted names, not authorized results. Never walk the complete
+	// directory through the expensive post-open gate for a single page.
+	sort.Slice(items, func(i, j int) bool { return items[i].Name() < items[j].Name() })
+	result := Result{Status: StatusOK, Facts: facts, NextOffset: -1, Entries: []DirectoryEntry{}}
+	if offset < len(items) {
+		end := len(items)
+		if len(items)-offset > maxEntries {
+			end = offset + maxEntries
+			result.NextOffset = end
+		}
+		items = items[offset:end]
+	} else {
+		items = nil
+	}
+	result.RawCount = len(items)
 	entries := make([]DirectoryEntry, 0, len(items))
 	skipped := 0
 	for _, item := range items {
@@ -246,6 +285,13 @@ func (p *Policy) ListDir(path string, offset, maxEntries int, identity Submitter
 		}
 		childFD, childAuth, err := p.authorizedOpen(child, 0)
 		if err != nil {
+			// A dangling final symlink has no target descriptor to authorize;
+			// authorize its pinned link inode and safe target spelling instead.
+			if item.Type()&os.ModeSymlink != 0 {
+				if meta, status := p.StatPath(child, false); status == StatusOK && meta.Type == "symlink" {
+					entries = append(entries, DirectoryEntry{Name: item.Name(), Type: "symlink"})
+				}
+			}
 			continue
 		}
 		unix.Close(childFD)
@@ -263,22 +309,11 @@ func (p *Policy) ListDir(path string, offset, maxEntries int, identity Submitter
 		}
 		entries = append(entries, DirectoryEntry{Name: item.Name(), Type: kind})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	if err := p.revalidate(path, auth); err != nil {
 		return Result{Status: StatusChangedDuringCapture, Err: err}
 	}
-	result := Result{Status: StatusOK, Facts: facts, NextOffset: -1, SkippedMasked: skipped}
-	if offset >= len(entries) {
-		result.Entries = []DirectoryEntry{}
-		return result
-	}
-	end := offset + maxEntries
-	if end < len(entries) {
-		result.NextOffset = end
-	} else {
-		end = len(entries)
-	}
-	result.Entries = entries[offset:end]
+	result.Entries = entries
+	result.SkippedMasked = skipped
 	return result
 }
 

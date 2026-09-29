@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/proto"
 	_ "modernc.org/sqlite"
 )
 
@@ -412,6 +413,8 @@ func (store *Store) SetAutoApprovalThreshold(ctx context.Context, uid uint32, th
 // informational notification was acknowledged. The store does not send notices
 // or assess the model's risk score; it checks these claims against durable state.
 type AutoStartAuthorization struct {
+	ChannelName       string
+	Targets           []proto.AutoNotificationTarget
 	UID               uint32
 	RequestID         string
 	ManifestDigest    string
@@ -423,6 +426,88 @@ type AutoStartAuthorization struct {
 	NowUTC            time.Time
 }
 
+// CommitNamedDecision atomically consumes one recorded multi-recipient approval
+// and stores the winning tuple with the terminal denial or dispatch state.
+// The broker checks the worker's decision and frozen evidence before calling.
+func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, requestID string, decision proto.Decision, now time.Time) (bool, error) {
+	if requestID == "" || !validDigest(decision.Digest) || decision.ChannelName == "" || decision.ChatID == 0 ||
+		decision.OperatorUserID <= 0 || decision.MessageID <= 0 || (decision.Action != "approve" && decision.Action != "deny") || now.IsZero() {
+		return false, nil
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT approval_json FROM jobs WHERE uid = ? AND request_id = ? AND state = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, uid, requestID, StateAwaitingHuman, decision.Digest, now.UnixNano()).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var binding struct {
+		ChannelName  string                     `json:"channel_name"`
+		Digest       string                     `json:"digest"`
+		ExpiryUnixMS int64                      `json:"expiry_unix_ms"`
+		Targets      []proto.NotificationTarget `json:"targets"`
+	}
+	if json.Unmarshal(raw, &binding) != nil || binding.ChannelName != decision.ChannelName || binding.Digest != decision.Digest ||
+		len(binding.Targets) == 0 || decision.TimeUnixMS <= 0 || decision.TimeUnixMS > binding.ExpiryUnixMS || now.UnixMilli() >= binding.ExpiryUnixMS {
+		return false, nil
+	}
+	matched := false
+	for _, target := range binding.Targets {
+		if target.ChatID == decision.ChatID && target.CardID == decision.MessageID {
+			for _, id := range target.OperatorUserIDs {
+				if id == decision.OperatorUserID {
+					matched = true
+					break
+				}
+			}
+		}
+	}
+	if !matched {
+		return false, nil
+	}
+	var audit map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &audit); err != nil {
+		return false, err
+	}
+	for key, value := range map[string]any{
+		"kind": "human", "decision": map[string]string{"approve": "approved", "deny": "denied"}[decision.Action],
+		"deciding_user_id": decision.OperatorUserID, "deciding_chat_id": decision.ChatID,
+		"deciding_message_id": decision.MessageID, "decision_time_unix_ms": decision.TimeUnixMS,
+	} {
+		field, err := json.Marshal(value)
+		if err != nil {
+			return false, err
+		}
+		audit[key] = field
+	}
+	encoded, err := json.Marshal(audit)
+	if err != nil {
+		return false, err
+	}
+	state := StateStarting
+	if decision.Action == "deny" {
+		state = StateDenied
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 1 {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // CommitAutoStart is the sole atomic auto-approval dispatch boundary. False
 // means the authorization is invalid or no longer eligible, without changing
 // the job. A successful return means both the audit and starting state are
@@ -430,7 +515,7 @@ type AutoStartAuthorization struct {
 func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthorization) (bool, error) {
 	if auth.RequestID == "" || len(auth.ManifestDigest) != 64 || auth.Score < 1 || auth.Score > 4 ||
 		auth.AdminMaxRisk < 1 || auth.AdminMaxRisk > 4 || auth.Score > auth.AdminMaxRisk ||
-		auth.NoticeID <= 0 || len(auth.SummaryMessageIDs) == 0 || len(auth.SummaryMessageIDs) > 32 ||
+		(auth.ChannelName == "" && (auth.NoticeID <= 0 || len(auth.SummaryMessageIDs) == 0 || len(auth.SummaryMessageIDs) > 32)) ||
 		auth.NowUTC.IsZero() || auth.NotifiedAtUTC.IsZero() || auth.NotifiedAtUTC.After(auth.NowUTC) {
 		return false, nil
 	}
@@ -443,6 +528,25 @@ func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthoriza
 		if id <= 0 {
 			return false, nil
 		}
+	}
+	if auth.ChannelName != "" {
+		if len(auth.Targets) == 0 {
+			return false, nil
+		}
+		seen := map[int64]bool{}
+		for _, target := range auth.Targets {
+			if target.ChatID == 0 || target.NoticeID <= 0 || seen[target.ChatID] || len(target.MessageIDs) == 0 || len(target.MessageIDs) > 32 {
+				return false, nil
+			}
+			seen[target.ChatID] = true
+			for _, id := range target.MessageIDs {
+				if id <= 0 {
+					return false, nil
+				}
+			}
+		}
+	} else if len(auth.Targets) != 0 {
+		return false, nil
 	}
 
 	tx, err := store.db.BeginTx(ctx, nil)
@@ -466,17 +570,19 @@ func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthoriza
 		return false, nil
 	}
 	audit, err := json.Marshal(struct {
-		Kind               string  `json:"kind"`
-		Score              int     `json:"score"`
-		AdminMaxRisk       int     `json:"admin_max_risk"`
-		UserThreshold      int     `json:"user_threshold"`
-		EffectiveThreshold int     `json:"effective_threshold"`
-		NoticeID           int64   `json:"notice_id"`
-		MessageIDs         []int64 `json:"message_ids"`
-		Digest             string  `json:"digest"`
-		NotifiedAt         string  `json:"notified_at"`
+		Kind               string                         `json:"kind"`
+		Score              int                            `json:"score"`
+		AdminMaxRisk       int                            `json:"admin_max_risk"`
+		UserThreshold      int                            `json:"user_threshold"`
+		EffectiveThreshold int                            `json:"effective_threshold"`
+		NoticeID           int64                          `json:"notice_id"`
+		MessageIDs         []int64                        `json:"message_ids"`
+		Digest             string                         `json:"digest"`
+		NotifiedAt         string                         `json:"notified_at"`
+		ChannelName        string                         `json:"channel_name,omitempty"`
+		Targets            []proto.AutoNotificationTarget `json:"targets,omitempty"`
 	}{"auto", auth.Score, auth.AdminMaxRisk, threshold, effective, auth.NoticeID,
-		auth.SummaryMessageIDs, auth.ManifestDigest, auth.NotifiedAtUTC.UTC().Format(time.RFC3339Nano)})
+		auth.SummaryMessageIDs, auth.ManifestDigest, auth.NotifiedAtUTC.UTC().Format(time.RFC3339Nano), auth.ChannelName, auth.Targets})
 	if err != nil {
 		return false, fmt.Errorf("encode auto-start audit: %w", err)
 	}

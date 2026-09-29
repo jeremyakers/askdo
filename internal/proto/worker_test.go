@@ -391,6 +391,60 @@ func TestBootstrapLimitsOmitInspectedBounds(t *testing.T) {
 	}
 }
 
+// TestWorkerLimitsWebfetchProjectionRoundTrip pins the optional
+// review.webfetch_enabled projection: omitted keeps the tool disabled on the
+// wire, explicit true round-trips, and a non-boolean value is rejected.
+func TestWorkerLimitsWebfetchProjectionRoundTrip(t *testing.T) {
+	build := func(limits WorkerLimits) Bootstrap {
+		return Bootstrap{
+			Type:                 "bootstrap",
+			Host:                 "host",
+			RequestID:            "0123456789abcdef0123456789abcdef",
+			Operation:            WorkerOperation{Mode: "argv", Argv: []string{"/bin/true"}, CWD: "/"},
+			ReviewDeadlineUnixMS: 1,
+			ConfigProjection: ConfigProjection{
+				Models:   []ProjectedModel{{Name: "model", API: "openai_chat", BaseURL: "http://127.0.0.1", Model: "fake", RequestTimeoutMS: 1}},
+				Limits:   limits,
+				Telegram: WorkerTelegram{TokenFile: "/key", OperatorUserID: 1, ChatID: 1, ApprovalTTLMS: 1},
+			},
+		}
+	}
+	off := build(WorkerLimits{MaxModelCallsPerAttempt: 1, MaxOutputTokens: 1})
+	offBody, err := json.Marshal(off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(offBody), "webfetch") {
+		t.Fatalf("disabled webfetch leaked into the wire projection: %s", offBody)
+	}
+	if decoded, err := DecodeWorkerMessage(offBody, BrokerToWorker); err != nil {
+		t.Fatalf("disabled projection rejected: %v", err)
+	} else if decoded.(*Bootstrap).ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("omitted webfetch_enabled decoded as enabled")
+	}
+
+	on := build(WorkerLimits{MaxModelCallsPerAttempt: 1, MaxOutputTokens: 1, WebfetchEnabled: true})
+	onBody, err := json.Marshal(on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeWorkerMessage(onBody, BrokerToWorker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.(*Bootstrap).ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("explicit true webfetch_enabled did not round-trip")
+	}
+
+	bad := strings.Replace(string(onBody), `"webfetch_enabled":true`, `"webfetch_enabled":"yes"`, 1)
+	if bad == string(onBody) {
+		t.Fatalf("wire JSON shape changed, webfetch injection needs updating: %s", onBody)
+	}
+	if _, err := DecodeWorkerMessage([]byte(bad), BrokerToWorker); err == nil {
+		t.Fatal("non-boolean webfetch_enabled accepted")
+	}
+}
+
 // TestDecodeWorkerMessageNULPolicy pins the NUL boundary: review_complete and
 // progress carry model-generated content where escaped control characters are
 // legitimate data; structural messages keep strict NUL rejection.

@@ -213,7 +213,8 @@ func requiredBootstrap(bootstrap proto.Bootstrap) error {
 			return errors.New("bootstrap contains incomplete model configuration")
 		}
 	}
-	if bootstrap.ConfigProjection.Telegram.TokenFile == "" || bootstrap.ConfigProjection.Telegram.OperatorUserID <= 0 || bootstrap.ConfigProjection.Telegram.ChatID == 0 {
+	tg := bootstrap.ConfigProjection.Telegram
+	if tg.TokenFile == "" || (tg.ChannelName == "" && (tg.OperatorUserID <= 0 || tg.ChatID == 0)) || (tg.ChannelName != "" && len(tg.Recipients) == 0) {
 		return errors.New("bootstrap contains incomplete Telegram configuration")
 	}
 	if time.UnixMilli(bootstrap.ReviewDeadlineUnixMS).Before(time.Now()) {

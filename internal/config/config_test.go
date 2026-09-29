@@ -383,6 +383,50 @@ func TestConfigVersionStill4(t *testing.T) {
 	}
 }
 
+// review.webfetch_enabled is an optional v4 boolean that defaults to false.
+// Omitted and explicit-false both leave the tool disabled; only an explicit
+// true enables it. A non-boolean value is rejected by the strict decoder.
+func TestLoadWebfetchEnabledDefaultFalse(t *testing.T) {
+	restore := stubCredentialChecks(t)
+	defer restore()
+	root := t.TempDir()
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := func(field string) string {
+		return `{"config_version":4,"inspection":{"read_roots":["` + root + `"],"trusted_executable_roots":[]},"review":{"models":[{"name":"local","api":"openai_chat","base_url":"http://localhost:11434","model":"m","data_boundary":"local"}]` + field + `},"limits":{},"telegram":{"token_file":"/keys/token","operator_user_id":1,"chat_id":-1}}`
+	}
+	cases := []struct {
+		name  string
+		field string
+		want  bool
+		bad   bool
+	}{
+		{name: "omitted", field: "", want: false},
+		{name: "explicit false", field: `,"webfetch_enabled":false`, want: false},
+		{name: "explicit true", field: `,"webfetch_enabled":true`, want: true},
+		{name: "non-boolean", field: `,"webfetch_enabled":"yes"`, bad: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(body(tc.field)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if tc.bad {
+				if err == nil {
+					t.Fatal("non-boolean webfetch_enabled accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Review.WebfetchEnabled != tc.want {
+				t.Fatalf("WebfetchEnabled=%v, want %v", cfg.Review.WebfetchEnabled, tc.want)
+			}
+		})
+	}
+}
+
 func TestDuplicateJSONFieldsRejected(t *testing.T) {
 	base := `{"config_version":4,"inspection":{"read_roots":[],"trusted_executable_roots":[]},"review":{"models":[]},"limits":{},"telegram":{"token_file":"/x","operator_user_id":1,"chat_id":1}}`
 	cases := map[string]string{

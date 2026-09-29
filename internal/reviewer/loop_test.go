@@ -92,6 +92,42 @@ func TestModelReceivesCommandWithoutInternalCaptureMetadata(t *testing.T) {
 	}
 }
 
+func TestModelReceivesCapturedInputReferenceNotBody(t *testing.T) {
+	b := bootstrap(1, time.Now().Add(time.Minute))
+	b.Operation = proto.WorkerOperation{Mode: "argv", Argv: []string{"/usr/bin/bash"}, CWD: "/home/agent", CapturedStdin: &proto.CapturedInput{Path: "stdin", Size: 19, SHA256: strings.Repeat("a", 64)}}
+	m := &fakemodel.Model{Steps: []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("report", "submit_review", reviewerTestReport("unknown"))}}}}}
+	if _, err := (&reviewer.Loop{Model: m, Tools: reviewer.NewToolExecutor(b, entryBroker{}), Bootstrap: b}).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, ok := strings.Cut(m.Requests[0].Messages[1].Content, "\n")
+	if !ok {
+		t.Fatal("no structured operation")
+	}
+	var op struct {
+		CapturedStdin *proto.CapturedInput `json:"captured_stdin"`
+		BundleDir     string               `json:"bundle_dir"`
+	}
+	if err := json.Unmarshal([]byte(raw), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.CapturedStdin == nil || *op.CapturedStdin != *b.Operation.CapturedStdin || op.BundleDir != "" {
+		t.Fatalf("incorrect model input reference: %+v", op)
+	}
+	b.Operation.CapturedStdin = nil
+	m = &fakemodel.Model{Steps: []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("report", "submit_review", reviewerTestReport("unknown"))}}}}}
+	if _, err := (&reviewer.Loop{Model: m, Tools: reviewer.NewToolExecutor(b, entryBroker{}), Bootstrap: b}).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, _ = strings.Cut(m.Requests[0].Messages[1].Content, "\n")
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := legacy["captured_stdin"]; present {
+		t.Fatal("legacy argv request acquired captured input")
+	}
+}
+
 // A read issued in the same batch as submit_review completes normally; the
 // report carries no mechanical coverage accounting.
 func TestSameBatchReadCompletes(t *testing.T) {
@@ -101,6 +137,39 @@ func TestSameBatchReadCompletes(t *testing.T) {
 	review, err := (&reviewer.Loop{Model: m, Tools: tools, Bootstrap: b}).Run(context.Background())
 	if err != nil || review.Report.Risk != "4" {
 		t.Fatalf("err=%v report=%+v", err, review.Report)
+	}
+}
+
+func TestCapturedStdinSameBatchRequiresSuccessfulNextModelTurn(t *testing.T) {
+	for _, continuation := range []bool{true, false} {
+		b := bootstrap(3, time.Now().Add(time.Minute))
+		b.Operation = proto.WorkerOperation{Mode: "argv", Argv: []string{"/usr/bin/bash"}, CWD: "/home/agent", CapturedStdin: &proto.CapturedInput{Path: "stdin", Size: 12, SHA256: strings.Repeat("a", 64)}}
+		steps := []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{
+			call("read", "read_path", `{"base":"bundle","path":"stdin","offset":0,"max_bytes":12}`),
+			call("report", "submit_review", reviewerTestReport("unknown")),
+		}}}}
+		if continuation {
+			steps = append(steps, fakemodel.Step{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("report2", "submit_review", reviewerTestReport("unknown"))}}})
+		}
+		m := &fakemodel.Model{Steps: steps}
+		completed := 0
+		tools := reviewer.NewToolExecutor(b, entryBroker{})
+		tools.Completion = func(proto.ReviewComplete) error { completed++; return nil }
+		_, err := (&reviewer.Loop{Model: m, Tools: tools, Bootstrap: b}).Run(context.Background())
+		if len(m.Requests) != 2 || len(m.Requests[1].Messages) != 5 {
+			t.Fatalf("missing next-turn tool results: %+v", m.Requests)
+		}
+		var content proto.ReadPathResult
+		if decodeErr := json.Unmarshal([]byte(m.Requests[1].Messages[3].Content), &content); decodeErr != nil || content.Content != "print('ok')\n" {
+			t.Fatalf("read not delivered before second turn: %+v %v", content, decodeErr)
+		}
+		if continuation {
+			if err != nil || completed != 1 || m.Calls() != 2 {
+				t.Fatalf("second turn failed to complete: err=%v completions=%d", err, completed)
+			}
+		} else if err == nil || completed != 0 {
+			t.Fatalf("failed next turn bypassed review: err=%v completions=%d", err, completed)
+		}
 	}
 }
 

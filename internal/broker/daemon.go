@@ -621,8 +621,8 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid submit request"})
 			return
 		}
-		if request.ProtocolVersion != proto.CanonicalProtocolVersion {
-			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "upgrade_required", Message: "submit requires protocol version 4 and a reserved job ID"})
+		if request.ProtocolVersion != proto.CanonicalProtocolVersion && request.ProtocolVersion != proto.CapturedStdinProtocolVersion {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "upgrade_required", Message: "submit requires protocol version 4 or 5 and a reserved job ID"})
 			return
 		}
 		d.handleSubmit(conn, uid, body, request, admission.release)
