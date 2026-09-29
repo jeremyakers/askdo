@@ -727,7 +727,7 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 				j.state = store.StateDenied
 				j.mu.Unlock()
 				j.finishTerminal(store.StateDenied, store.Result{})
-			} else if err != nil {
+			} else {
 				j.fail("commit denial")
 			}
 			return
