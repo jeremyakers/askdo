@@ -23,8 +23,8 @@
   authentication, exit codes).
 - [`protocol-worker.md`](protocol-worker.md) — broker ↔ reviewer private
   pipe (process contract, full message reference, invariants).
-- [`review-tools.md`](review-tools.md) — the reviewer's four fixed tools,
-  the report schema, and model-selected inspection boundaries.
+- [`review-tools.md`](review-tools.md) — six filesystem inspection tools,
+  optional webfetch, the report schema, and inspection boundaries.
 
 **Historical design context:**
 

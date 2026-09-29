@@ -7,8 +7,8 @@ default is foreground on the caller's original terminal. Without one (the
 normal sandboxed-agent case), `askdo --reason ... -- /absolute/command`
 selects detached execution automatically while the CLI waits synchronously and
 relays captured stdout/stderr. `--detach` is an optional override for a TTY
-caller, not a mandatory agent flag. Detached root stdin is `/dev/null`, not
-caller stdin: this is not full regular-sudo parity.
+caller, not a mandatory agent flag. Ordinary detached jobs use `/dev/null` for
+stdin; v5 captured-input jobs run with the frozen script, not a live stdin stream.
 
 ## What shipped in source
 

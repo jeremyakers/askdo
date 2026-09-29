@@ -18,7 +18,11 @@ daemon; coordinate client and daemon versions.
 run two active pollers or approval workflows against the same bot token at
 once: updates or decisions may go to the wrong process. Use distinct bot
 tokens for simultaneous operation, or arrange an operator-approved handoff
-before starting askdo with a token another service already uses.
+before starting askdo with a token another service already uses. With the
+named multi-channel form, this holds per bot: each channel's token must be
+unique among all running services, but the different bots of one askdo
+installation each poll their own token independently (one bot serves a whole
+job; a request is never fanned out across several bots).
 During onboarding, the Telegram wizard can poll the bot to discover IDs; if
 another process is polling that bot, supply the numeric operator and private
 chat IDs manually instead. Separate bot tokens do not replace checking that
@@ -42,7 +46,8 @@ the two services have independent sockets and state.
    uses that same group; no second foreground membership is needed. Set up a
    reviewer with `askdo reviewer add` or explicitly choose
    `askdo review mode approval-only`;
-   complete `askdo channel add telegram` with the intended bot token and IDs.
+   complete `askdo channel add telegram` with the intended bot token and IDs
+   (`askdo channel add telegram NAME` for the named multi-channel form).
    Review `/etc/askdo/config.json`, credential file ownership/modes and
    inspection policy against [configuration](configuration.md). Telegram
    remains required even in approval-only mode; an empty model list alone does

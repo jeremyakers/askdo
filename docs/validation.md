@@ -17,8 +17,17 @@ CGO_ENABLED=0 go build -trimpath -o askdo-launch ./cmd/askdo-launch
 ./askdo --help
 ```
 
-Optional, container-based suites (require Docker; they do not install a
-service on the host):
+- `go vet ./...` and `go test -race ./...` include unit tests for the
+  client-side stdin capture (pipes and redirected files, 1 MiB ceiling,
+  UTF-8/NUL rejection), the broker's captured-stdin staging, review
+  coverage tracking and no-auto-approval rule, and the named Telegram
+  channels: config validation and login→UID route resolution, per-channel
+  wire projections, first-valid-decision and per-chat message-ID handling,
+  and fail-closed behavior when one recipient's delivery fails. Those checks
+  run against test fixtures and fake bots; they do not operate a Telegram
+  bot or run real scripts.
+- Optional, container-based suites (require Docker; they do not install a
+  service on the host):
 
 ```sh
 scripts/build-release.sh dist    # refuses to overwrite an existing dist/

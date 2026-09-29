@@ -1,11 +1,13 @@
 # Review tools and report schema
 
-When AI review is required, the reviewer model investigates a job through exactly **four fixed tools**
-(`internal/reviewer/tools.go`, `Definitions()`). The tool set is compiled in;
-no configuration can add, remove, or redefine tools. Three path tools
-(`read_path`, `list_path`, `search_path`) are proxied to the broker over the
-private pipe as `inspect_request`/`inspect_result` exchanges; `submit_review`
-is executed by trusted worker code. Tool calls execute strictly sequentially.
+When AI review is required, the reviewer model always has the six broker-mediated
+filesystem inspection tools (`read_path`, `list_path`, `search_path`,
+`stat_path`, `find_path`, `mount_info`) plus the worker-side `submit_review`
+(`internal/reviewer/tools.go`, `Definitions()`); the six inspection tools use
+private-pipe `inspect_request`/`inspect_result` exchanges. One additional,
+worker-side `webfetch` tool is offered only when the root-owned
+`review.webfetch_enabled` setting is true (false by default). Configuration
+cannot redefine the tools. Tool calls execute strictly sequentially.
 
 Under explicit `review.mode: "approval_only"`, or for an exempt OS login UID
 under `required`, no model or tools are used unless `--review=yes` is given.
@@ -21,22 +23,27 @@ never authorizes execution by itself. Safety refusal, malformed final report,
 inspection/broker/evidence failure, and expired deadlines fail closed. A job
 from which **no model report exists** is never labeled reviewed.
 
-## The four tools
+## Tools and bounds
 
 The model-visible operation description includes `mode`, `argv` (argv mode) or
 `entry` plus `args` (bundle mode), the caller's exact `cwd` and `reason`, and
 broker-known execution facts: `target_uid`, `submitter_uid`, submitter name,
 host, observed container, and the fixed non-secret `PATH`, `HOME`, `LANG`, and
 `PWD` variables (`internal/reviewer/loop.go`). The broker-private bundle
-staging path and staged bundle hashes are **never** shown to the model. For bundle jobs the
-entry is staged and dependency files are exposed to the executed process
-through `ASKDO_BUNDLE`; relative shell paths otherwise resolve from
-`cwd`. Review instructions and dependency references should use the explicit
-bundle path (for example `"$ASKDO_BUNDLE/helper.sh"`) rather than
-assuming the bundle is the process working directory.
+staging path and staged bundle hashes are **never** shown to the model. For
+a captured-stdin job (`protocol_version` 5) the description also carries the
+captured-input metadata `captured_stdin` — path `stdin`, size in bytes, and
+SHA-256 — never the script bytes; the reviewer reads the content itself as a
+bundle file (below). For bundle jobs the entry is staged and dependency files
+are exposed to the executed process through `ASKDO_BUNDLE`; relative shell
+paths otherwise resolve from `cwd`. Review instructions and dependency
+references should use the explicit bundle path (for example
+`"$ASKDO_BUNDLE/helper.sh"`) rather than assuming the bundle is the process
+working directory.
 
-Every path tool takes `base` (enum `"host"` or `"bundle"`). A host path is a
-clean absolute path; a bundle path is a clean relative path confined to the
+Every path tool except host-only `mount_info` takes `base` (enum `"host"` or
+`"bundle"`). A host path is a clean absolute path; a bundle path is a clean
+relative path confined to the
 staged bundle root, with `"."` selecting the root itself. The model chooses
 every path; there is no broker-side dependency discovery, capture-ID list, or
 importance flag.
@@ -72,11 +79,17 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
   broker classified as masked (admin `Masked` policy or a client
   `sensitive_inclusions` opt-in) returns payload-free `withheld` whatever the
   client opted into at submit time.
+- **Captured stdin reads:** a captured-stdin job stages the submitted script
+  bytes root-only as the bundle path `stdin`; the model reads them with
+  `read_path` using `base:"bundle"`, `path:"stdin"`, paginating as usual. The
+  broker hashes each read against the frozen capture just as for bundle
+  files.
 
 ### 2. `list_path`
 
-List one page of one directory the model chooses. Directory enumeration is
-always explicit — there is no recursive host walk.
+List one page of one directory the model chooses. `list_path` does not walk
+recursively; `find_path` and directory `search_path` use a separate bounded
+host walker under an explicit scope.
 
 - **Arguments:** `base`, `path` (as above), `cursor` (string, required;
   empty = first page, opaque thereafter, ≤ 128).
@@ -106,19 +119,57 @@ implicit global search.
 - **Path bound:** a path longer than the 1024-byte search-result path limit
   yields `limit_exceeded` for that tool call, not a failed review. The model
   can still choose `read_path` for the same file.
-- **Host scope:** exactly one explicit **regular file**. The broker reads it
-  under the same descriptor policy as `read_path`, bounded to 16 KiB, and
-  requires the read to reach EOF — a larger file fails `limit_exceeded` and
-  content that is not UTF-8 text fails `unresolved`. Host directory traversal
-  is deliberately unsupported: a directory scope is denied, so the model
-  lists directories explicitly with `list_path` and searches chosen files.
+- **Host scope:** one explicit regular file or directory subtree. The broker
+  reads whole files under the same host inspection policy, bounded by
+  `min(limits.max_inspected_bytes, 1 MiB)` of content per search call; an
+  over-budget file returns `limit_exceeded` and non-UTF-8/NUL text returns
+  `unresolved`. Directory searches reuse the `find_path` walker (depth ≤ 8,
+  ≤ 2048 raw entries); symlink directories are not followed. Host directory
+  pagination checks a digest of the bounded observation on resumption; this
+  is not an atomic snapshot of a changing host tree.
 - **Bundle scope:** a staged file or subtree. Masked staged files are skipped
   and counted in `skipped_masked`; a scope that directly names masked content
   returns payload-free `withheld`. The whole bundle search is one bounded
   broker operation (at most 1 MiB of staged content, and within the
   configured per-job capture budgets).
 
-### 4. `submit_review`
+### 4. `stat_path`
+
+Inspect metadata without file contents. `base` and `path` use the path rules
+above; required `resolve` (bool) explicitly follows the final symlink when
+true. Host links are inspected as links by default. An inaccessible, masked,
+or dangling target does not become a successful resolved link result.
+
+- **Result:** `source` (`"host"` or `"bundle_staged"`), `type` (`file`, `dir`,
+  `symlink`), `mode` (permission and special bits), `uid`, `gid`, `nlink`,
+  `size`, `atime_unix_ns`, `mtime_unix_ns`, `ctime_unix_ns`, `device`, `inode`,
+  and optional `target` (symlink text) and `resolved_path`. Host metadata and
+  symlink targets remain subject to inspection policy and name masks.
+- **Bundle:** only staged captured files are stat-able, with `resolve: false`.
+  `source: "bundle_staged"` identifies staged-file metadata, **not** the
+  original source host's ownership, mode, timestamps, or inode.
+
+### 5. `find_path`
+
+Find names beneath an explicit host or bundle directory. Arguments are
+`base`, `path`, `glob` (nonempty basename glob ≤ 256 bytes; no `/` or `..`),
+and `cursor` (empty on first page, ≤ 128 bytes). The result has `matches`
+(≤ 200 paths, each ≤ 1024), `next_cursor`, and `skipped_masked`. The host
+walker does not follow directory symlinks and is bounded to depth 8 and
+2048 raw entries, including masked/omitted names. Bundle results come from
+the staged capture index. A too-large traversal fails `limit_exceeded` rather
+than silently claiming completeness; a continuation cursor checks the bounded
+observation for changes. No host walk supplies an atomic snapshot.
+
+### 6. `mount_info`
+
+For one allowed clean absolute **host** `path` (no `base`), return only that
+object's `mount_id`, `mount_point`, `fs_type`, and `read_only`. The broker
+withholds or denies masked, excluded, or pseudo-filesystem paths; it does not
+return raw mount-table contents. Mount type does not establish container or
+host isolation.
+
+### 7. `submit_review`
 
 Submit the final report. This is the **sole completion path** and it cannot
 approve, notify, or execute anything.
@@ -142,6 +193,30 @@ approve, notify, or execute anything.
 - **Correction:** a malformed first `submit_review` returns
   `{"status":"invalid","correction":"…"}` and the model may correct it once;
   a second malformed submission terminates the attempt.
+- **Captured stdin turn boundary:** if the model read `bundle:stdin` in the
+  same model turn that produced the report, `submit_review` is rejected with
+  `{"status":"inspection_pending","correction":"Read the captured stdin tool
+  results in the next model turn before submitting the review"}` — the model
+  must receive the read results in a real model turn before finalizing.
+  This costs no malformed-report allowance and never terminates the attempt.
+
+### Optional `webfetch`
+
+With `review.webfetch_enabled: true`, the reviewer worker can fetch one
+model-chosen public HTTP(S) `url` (≤ 4096 bytes) per call. It returns
+`status: "ok"`, `final_url`, `http_status`, and UTF-8 `content` (≤ 2 MiB
+decompressed); fetch failures return only a fixed error category. The dedicated
+client has a 15-second whole-fetch timeout, at most five redirects to the same
+host, default HTTP(S) ports only, and no inherited proxy, cookies, URL
+credentials, or provider tokens. URL, DNS results and dialed address are
+checked against private, loopback, link-local and other non-public networks.
+Fetched text is untrusted evidence: the tool does **not** execute code, follow
+dependencies automatically, or verify that a remote script is safe to run.
+The model chooses whether to follow another URL. The requested URL (including
+its query) goes to the public server; the fetcher does not automatically attach
+host files, but a model could include inspected data in a URL. An external
+configured model provider may receive fetched content in its tool result.
+`review.local_only` controls model selection separately from this opt-in.
 
 ## What the broker enforces
 
@@ -169,7 +244,7 @@ of the trust boundary — enforces:
 - **Sensitive name masks:** a permitted host path or staged bundle path whose
   requested or resolved name matches `inspection.sensitive_masks` (or a
   client `sensitive_inclusions` opt-in) is answered `withheld` without
-  content, or skipped with a `skipped_masked` count in list/search results.
+  content, or skipped with a `skipped_masked` count in list/search/find results.
   Masks match **names, not content**: a credential copied under an ordinary
   filename, or a secret value placed in argv, the environment, or `--reason`,
   can still leak. The broker records every reference it withheld (host
@@ -178,14 +253,17 @@ of the trust boundary — enforces:
   count and up to 16 references in a code-constructed warning.
 - **Freeze-time validation** (`internal/broker/manifest.go`): the report and
   model history are re-validated against the wire schema; the caller's
-  working directory identity is re-verified; every staged bundle file is
-  re-hashed (change-after-staging aborts `evidence_changed`); and the final
-  successful model in the history must be a configured choice. The frozen
-  manifest binds the report, the ordered model history, the exact command
-  (mode, argv/environment, cwd), the caller's cwd identity, the staged bundle
-  SHA-256 records, and the withheld references. There is no coverage
-  cross-check because the model cannot reference broker captures — it only
-  ever received bounded bytes for paths it chose.
+  working directory identity is re-verified; every staged bundle file —
+  including a captured-stdin script — is re-hashed (change-after-staging
+  aborts `evidence_changed`); and the final successful model in the history
+  must be a configured choice. The frozen manifest binds the report, the
+  ordered model history, the exact command (mode, argv/environment, cwd), the
+  caller's cwd identity, the staged bundle SHA-256 records, and the withheld
+  references. Host file selection is never cross-checked by the broker — the
+  model cannot reference broker captures for host paths, it only ever
+  received bounded bytes for paths it chose — but a captured-stdin script is
+  the one broker-captured artifact with broker-verified read coverage (see
+  *Completeness honesty model*).
 
 ## Report schema
 
@@ -211,9 +289,10 @@ model to list every withheld path as uncertainty in `missing_context`.
 
 ## Completeness honesty model
 
-There is no coverage scoring: nothing tracks which bytes the model saw, no
-tool marks a path required, and no mechanical check decides whether the
-review was complete. Honesty is structural instead:
+There is deliberately **no coverage scoring for host files**: nothing tracks
+which bytes the model saw from host paths, no tool marks a path required, and
+no mechanical check decides whether that side of the review was complete.
+Honesty is structural instead:
 
 - The model alone decides which files, in any language, are relevant and
   reads them with the path tools. Following `source ./helper` is a model
@@ -234,13 +313,39 @@ review was complete. Honesty is structural instead:
   is never labeled reviewed. The unreviewed lane is the distinct **NO AI
   REVIEW** Telegram card, which still requires the human decision.
 
+Captured stdin is the exception: it is a broker-captured, broker-staged
+artifact with exact known bytes, so the broker does verify read coverage for
+it.
+
+- While the review runs, the broker records which bytes of `bundle:stdin` it
+  actually delivered to the final model (successful `read_path` results
+  only, tracked per byte; model assertions, failed and withheld reads add
+  nothing).
+- At freeze time, coverage counts only if history has exactly one entry —
+  a successful final model — with an end-of-file read. Coverage is never
+  combined across fallback models.
+- If the captured script was not fully read, the broker appends its own
+  operator-visible warning to the report before freezing: a `warnings` entry
+  ("Broker cannot verify that the AI read all captured stdin script bytes;
+  inspect before approval.", with broker-observed coverage evidence) plus a
+  `missing_context` entry — and fails closed if the report has no room left
+  for them. The reviewed Telegram card shows the warning in its Warnings
+  section plus an `Input: captured script input (N bytes); review via
+  bundle:stdin` line: size and location only, never the script body. This is
+  a broker-authored notice, not model-authored, and it does not change the
+  model's score.
+- A captured-stdin job is also **never auto-approved**, regardless of an
+  otherwise eligible score, grant and preference.
+
 ## What the reviewer cannot do
 
 - **No shell, no process execution.** There is no exec tool; the reviewer
   binary itself is the only process the broker starts, and it runs as the
   unprivileged `askdo-review` user with an empty supplementary-group list.
   The reviewer refuses to run as root.
-- **No arbitrary network tool for the model.** Trusted reviewer code calls
+- **No unrestricted network tool for the model.** The optional `webfetch`
+  is limited to public HTTP(S) targets under the bounds above; with the flag
+  off it is neither offered nor executable. Trusted reviewer code also calls
   configured model endpoints and the Telegram Bot API through bounded HTTP
   clients (the Codex subscription endpoint uses bounded SSE). This is an
   application/tool boundary, **not an OS-enforced network sandbox** around
