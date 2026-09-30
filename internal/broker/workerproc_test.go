@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 type helperProcessState struct {
@@ -32,6 +35,7 @@ func TestAskdoBrokerDefaults(t *testing.T) {
 
 func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
 	binary := buildWorkerHelper(t)
+	openWorkerFDCanary(t) // Keep a private broker descriptor open through both launches.
 	home := filepath.Join(t.TempDir(), "review-home")
 	targetUID, targetGID := uint32(os.Getuid()), uint32(os.Getgid())
 	if os.Geteuid() == 0 {
@@ -89,6 +93,30 @@ func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
 	if targetUID != 0 && state.CapEff != "0000000000000000" {
 		t.Fatalf("non-root reviewer retains capabilities: %+v", state)
 	}
+	if err := unexpectedWorkerFD(state); err != nil {
+		t.Fatal(err)
+	}
+	second, err := worker.Start(context.Background())
+	if err != nil {
+		t.Fatalf("start after reap: %v", err)
+	}
+	data, err = io.ReadAll(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	state = helperProcessState{}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("second helper output=%q: %v", data, err)
+	}
+	if err := unexpectedWorkerFD(state); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func unexpectedWorkerFD(state helperProcessState) error {
 	// No broker file descriptors may be inherited beyond stdin/stdout/stderr.
 	// The child Go runtime may create its own anonymous eventpoll/eventfd
 	// fds after exec; those are not inherited and are excluded.
@@ -99,15 +127,63 @@ func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
 		if target == "anon_inode:[eventpoll]" || target == "anon_inode:[eventfd]" {
 			continue
 		}
-		t.Fatalf("inherited broker fd %s -> %s (all: %v)", name, target, state.FDList)
+		return fmt.Errorf("inherited broker fd %s -> %s (all: %v)", name, target, state.FDList)
 	}
-	second, err := worker.Start(context.Background())
+	return nil
+}
+
+func openWorkerFDCanary(t *testing.T) *os.File {
+	t.Helper()
+	file, err := os.OpenFile(filepath.Join(t.TempDir(), "private-broker-canary"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
-		t.Fatalf("start after reap: %v", err)
-	}
-	_, _ = io.Copy(io.Discard, second)
-	if err := second.Wait(); err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := file.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFD, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		t.Fatal("private broker canary is not close-on-exec")
+	}
+	return file
+}
+
+func TestWorkerHelperFDProbe(t *testing.T) {
+	binary := buildWorkerHelper(t)
+	canary := openWorkerFDCanary(t)
+	for _, inherit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inherit=%t", inherit), func(t *testing.T) {
+			command := exec.Command(binary)
+			if inherit {
+				command.ExtraFiles = []*os.File{canary}
+			}
+			data, err := command.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state helperProcessState
+			if err := json.Unmarshal(data, &state); err != nil {
+				t.Fatalf("helper output=%q: %v", data, err)
+			}
+			err = unexpectedWorkerFD(state)
+			if !inherit {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if state.FDList["3"] != canary.Name() {
+				t.Fatalf("inherited canary fd=%q want=%q (all: %v)", state.FDList["3"], canary.Name(), state.FDList)
+			}
+			if err == nil || !strings.Contains(err.Error(), "inherited broker fd 3 -> "+canary.Name()) {
+				t.Fatalf("inherited canary validation error=%v", err)
+			}
+		})
 	}
 }
 
@@ -135,7 +211,11 @@ func buildWorkerHelper(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
 	source := filepath.Join(directory, "main.go")
-	program := `package main
+	// Disable the helper runtime's retained cgroup quota FD before the snapshot;
+	// it is opened after exec, not inherited from the broker.
+	program := `//go:debug containermaxprocs=0
+
+package main
 import ("encoding/json"; "os"; "strconv"; "strings")
 type state struct { Env []string ` + "`json:\"env\"`" + `; UID int ` + "`json:\"uid\"`" + `; GID int ` + "`json:\"gid\"`" + `; Groups []int ` + "`json:\"groups\"`" + `; CapEff string ` + "`json:\"cap_eff\"`" + `; FDs int ` + "`json:\"fds\"`" + `; FDList map[string]string ` + "`json:\"fd_list\"`" + ` }
 func main() { groups:=[]int{}; capEff:=""; f,_:=os.Open("/proc/self/status"); s:=bufio.NewScanner(f); for s.Scan(){ if strings.HasPrefix(s.Text(),"Groups:"){ for _,v:=range strings.Fields(strings.TrimPrefix(s.Text(),"Groups:")){ n,_:=strconv.Atoi(v); groups=append(groups,n) } }; if strings.HasPrefix(s.Text(),"CapEff:"){ capEff=strings.TrimSpace(strings.TrimPrefix(s.Text(),"CapEff:")) } }; f.Close(); entries,_:=os.ReadDir("/proc/self/fd"); fds:=0; fdlist:=map[string]string{}; for _,entry:=range entries { if target,err:=os.Readlink("/proc/self/fd/"+entry.Name()); err==nil { fds++; fdlist[entry.Name()]=target } }; json.NewEncoder(os.Stdout).Encode(state{os.Environ(),os.Getuid(),os.Getgid(),groups,capEff,fds,fdlist}) }
