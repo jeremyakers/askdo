@@ -42,14 +42,14 @@ func wireNotifyReviewer(t *testing.T, fake *faketelegram.Server, reportArgs stri
 	boot := fallbackBootstrap(time.Now().Add(time.Minute), "local")
 	boot.Host = "energy-host"
 	boot.Operation.CWD = "/tmp"
-	for _, change := range changeBootstrap {
-		change(&boot)
-	}
 	boot.ConfigProjection.Telegram = proto.WorkerTelegram{
 		TokenFile:      fake.TokenFile(t),
 		OperatorUserID: notifyOperator,
 		ChatID:         notifyChat,
 		ApprovalTTLMS:  ttl.Milliseconds(),
+	}
+	for _, change := range changeBootstrap {
+		change(&boot)
 	}
 	body, err := json.Marshal(boot)
 	if err != nil {
@@ -125,6 +125,10 @@ func messageType(message any) string {
 }
 
 func wireApprovalOnly(t *testing.T, fake *faketelegram.Server, policy bool, factory reviewer.ModelFactory, approvalTTL time.Duration, providerName ...string) *notifyWiring {
+	return wireApprovalOnlyConfigured(t, fake, policy, factory, approvalTTL, nil, providerName...)
+}
+
+func wireApprovalOnlyConfigured(t *testing.T, fake *faketelegram.Server, policy bool, factory reviewer.ModelFactory, approvalTTL time.Duration, configure func(*proto.Bootstrap), providerName ...string) *notifyWiring {
 	t.Helper()
 	reviewer.TelegramBaseURL = fake.URL()
 	boot := fallbackBootstrap(time.Now().Add(time.Minute), "local")
@@ -146,6 +150,9 @@ func wireApprovalOnly(t *testing.T, fake *faketelegram.Server, policy bool, fact
 		boot.ConfigProjection.Models = []proto.ProjectedModel{}
 	}
 	boot.ConfigProjection.Telegram = proto.WorkerTelegram{TokenFile: fake.TokenFile(t), OperatorUserID: notifyOperator, ChatID: notifyChat, ApprovalTTLMS: approvalTTL.Milliseconds()}
+	if configure != nil {
+		configure(&boot)
+	}
 	body, err := json.Marshal(boot)
 	if err != nil {
 		t.Fatal(err)
@@ -406,6 +413,97 @@ func freezeReview(t *testing.T, w *notifyWiring) *proto.ReviewComplete {
 func awaitNotification(t *testing.T, w *notifyWiring) *proto.NotificationSent {
 	t.Helper()
 	return awaitMessage(t, w.messages, "notification_sent").(*proto.NotificationSent)
+}
+
+func namedNotifyRoute(boot *proto.Bootstrap) {
+	boot.ConfigProjection.Telegram.ChannelName = "operations"
+	boot.ConfigProjection.Telegram.ChatID = 0
+	boot.ConfigProjection.Telegram.OperatorUserID = 0
+	boot.ConfigProjection.Telegram.Recipients = []proto.WorkerTelegramRecipient{
+		{ChatID: 101, OperatorUserIDs: []int64{11}},
+		{ChatID: -202, OperatorUserIDs: []int64{12, 13}},
+	}
+}
+
+func TestNamedNotifyAllRecipientsAndDecidingTuple(t *testing.T) {
+	fake := faketelegram.New(t)
+	w := wireNotifyReviewer(t, fake, reviewerTestReport("4"), 30*time.Second, namedNotifyRoute)
+	freezeReview(t, w)
+	n := awaitNotification(t, w)
+	if len(n.Targets) != 2 || n.CardID != 0 || n.Targets[0].ChatID != 101 || n.Targets[1].ChatID != -202 || len(n.Targets[0].MessageIDs) == 0 || len(n.Targets[1].MessageIDs) == 0 {
+		t.Fatalf("notification=%+v", n)
+	}
+	sent := fake.Sent()
+	var card faketelegram.Message
+	for _, m := range sent {
+		if m.ChatID == -202 && len(m.Buttons) > 0 {
+			card = m
+		}
+	}
+	if card.ID == 0 {
+		t.Fatalf("second recipient did not receive card: %+v", sent)
+	}
+	fake.QueueCallback(1, "wrong", 11, -202, card.ID, card.ButtonData("a:"))
+	fake.QueueCallback(2, "details", 12, -202, card.ID, card.ButtonData("v:"))
+	fake.QueueCallback(3, "deny", 13, -202, card.ID, card.ButtonData("d:"))
+	fake.QueueCallback(4, "late", 11, 101, n.Targets[0].CardID, card.ButtonData("a:"))
+	d := awaitMessage(t, w.messages, "decision").(*proto.Decision)
+	if d.Action != "deny" || d.ChannelName != "operations" || d.ChatID != -202 || d.MessageID != card.ID || d.OperatorUserID != 13 {
+		t.Fatalf("decision=%+v", d)
+	}
+	if err := <-w.done; err != nil {
+		t.Fatal(err)
+	}
+	if countCalls(fake.Calls(), "editMessageReplyMarkup") != 2 {
+		t.Fatal("not all keyboards cleared")
+	}
+}
+
+func TestNamedNotifyPartialSendNeverReportsApproval(t *testing.T) {
+	fake := faketelegram.New(t)
+	// First summary and card succeed; second chat summary fails.
+	fake.FailSend(func(call int, _ string, _ bool) *faketelegram.APIError {
+		if call == 3 {
+			return &faketelegram.APIError{Code: 403, Description: "blocked"}
+		}
+		return nil
+	})
+	w := wireNotifyReviewer(t, fake, reviewerTestReport("4"), 30*time.Second, namedNotifyRoute)
+	freezeReview(t, w)
+	if err := <-w.done; err == nil {
+		t.Fatal("partial delivery accepted")
+	}
+	if countCalls(fake.Calls(), "editMessageReplyMarkup") != 1 {
+		t.Fatalf("prior card not cleared: %+v", fake.Calls())
+	}
+	expectNoMessage(t, w.messages, "notification_sent", "decision")
+}
+
+func TestNamedApprovalOnlyAllRecipients(t *testing.T) {
+	fake := faketelegram.New(t)
+	w := wireApprovalOnlyConfigured(t, fake, true, nil, 30*time.Second, namedNotifyRoute)
+	freezeApprovalOnly(t, w, []proto.AvailabilityFailure{})
+	n := awaitNotification(t, w)
+	if len(n.Targets) != 2 {
+		t.Fatalf("approval-only targets=%+v", n)
+	}
+	var second faketelegram.Message
+	for _, m := range fake.Sent() {
+		if m.ChatID == -202 && len(m.Buttons) > 0 {
+			second = m
+		}
+	}
+	if second.ID != n.Targets[1].CardID {
+		t.Fatalf("missing second card: %+v", second)
+	}
+	fake.QueueCallback(1, "approve", 12, -202, second.ID, second.ButtonData("a:"))
+	d := awaitMessage(t, w.messages, "decision").(*proto.Decision)
+	if d.Action != "approve" || d.ChatID != -202 || d.ChannelName != "operations" || d.OperatorUserID != 12 {
+		t.Fatalf("decision=%+v", d)
+	}
+	if err := <-w.done; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // awaitCard polls the fake server until the approval card (the message with

@@ -127,6 +127,24 @@ func TestApprovedPATHBasenameCardMatchesExecutedPath(t *testing.T) {
 	}
 }
 
+func TestBootstrapProjectsWebfetchEnabled(t *testing.T) {
+	h := newBrokerHarness(t, nil, nil)
+	req := proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id"}, RequestID: reserveForTest(t, h.socket, h.peerUID.Load())}
+	spool, err := createSpool(t.TempDir(), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := newTestJobRuntime(t, h.daemon, req, spool)
+
+	if boot := job.bootstrap(); boot.ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("webfetch projected as enabled with the default config")
+	}
+	h.daemon.cfg.Review.WebfetchEnabled = true
+	if boot := job.bootstrap(); !boot.ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("webfetch_enabled was not projected to the worker limits")
+	}
+}
+
 func TestBootstrapProjectsExecutionIdentityWithoutPrivateBundlePath(t *testing.T) {
 	for _, tc := range []struct {
 		name string

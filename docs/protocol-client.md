@@ -9,13 +9,14 @@ fixed no-argv sudo helper *only* after an approved one-use handoff; it is not
 general sudo access.
 
 Current source uses protocol version `4` (`proto.CanonicalProtocolVersion`)
-with an explicit `lifecycle` and a separate reservation before submission.
-Versions `2` and `3` **cannot create new jobs** on a v4 daemon. Historical
-jobs can still be queried by their owning UID; v2's original lifecycle was
-implicitly detached, while v3 introduced explicit foreground/detached fields.
-**An older installed binary is not changed by editing this source:** v4 and
-automatic no-TTY selection require a separately approved installation and
-service start/handoff.
+with an explicit `lifecycle` and a separate reservation before submission,
+plus version `5` (`proto.CapturedStdinProtocolVersion`) for the one v4-shaped
+case that carries captured stdin (below). Versions `2` and `3` **cannot
+create new jobs** on a v4/v5 daemon. Historical jobs can still be queried by
+their owning UID; v2's original lifecycle was implicitly detached, while v3
+introduced explicit foreground/detached fields. **An older installed binary
+is not changed by editing this source:** v4/v5 and automatic no-TTY selection
+require a separately approved installation and service start/handoff.
 
 ## Framing
 
@@ -76,7 +77,7 @@ ID is owner-scoped for status/cancel and cannot be submitted by another UID.
 | Field | Type | Rule |
 |---|---|---|
 | `op` | string | must be `"submit"` |
-| `protocol_version` | int | `4` required for new submissions; v2/v3 new submits receive `upgrade_required` |
+| `protocol_version` | int | `4` for new submissions (`5` when the request carries captured stdin); v2/v3 new submits receive `upgrade_required` |
 | `request_id` | string | previously reserved canonical ID owned by peer UID |
 | `wait_timeout_ms` | int64 or null | optional; if present must be positive. See below |
 | `reason` | string | required, non-blank after trimming |
@@ -93,11 +94,16 @@ ID is owner-scoped for status/cancel and cannot be submitted by another UID.
 
 The CLI chooses v4 foreground when the caller has a controlling `/dev/tty`,
 and v4 detached automatically when it does not (for example a sandboxed
-agent's Bash-tool invocation). `--detach` is an optional override for a TTY caller.
-The client waits synchronously for either result; detached stdout/stderr are
-captured in the spool and streamed to the caller. Detached execution uses the
-daemon-owned `SystemExecutor`, with no TTY and root stdin from `/dev/null`:
-there is no stdin passthrough and this is not full regular-sudo parity.
+agent's Bash-tool invocation). `--detach` is an optional override for a TTY
+caller. When the caller's stdin is a pipe or a regular redirected file with
+content, the CLI instead submits a v5 detached argv request that carries the
+captured bytes (`captured_stdin_base64`, below); capturing forces detached
+lifecycle even for a TTY caller. The client waits synchronously for either
+result; detached stdout/stderr are captured in the spool and streamed to the
+caller. Detached execution uses the daemon-owned `SystemExecutor`, with no
+TTY: root stdin is the sealed captured input for a v5 request, or `/dev/null`
+when nothing was captured (older v4 detached jobs are always `/dev/null`) —
+no stdin passthrough either way, and this is not full regular-sudo parity.
 Foreground uses the original TTY, not a daemon PTY, and the fixed helper
 sudoers rule is limited to `askdo` members with an approved one-use grant.
 
@@ -117,7 +123,10 @@ chooses to read it through its path tools during review.
 ```
 
 For a forced review without a controlling TTY, the CLI form is
-`askdo --review=yes --reason 'Check this' -- /usr/bin/id -u`.
+`askdo --review=yes --reason 'Check this' -- /usr/bin/id -u`. Captured-stdin
+requests look like
+`curl -fsSL URL | askdo --review=yes -- bash` or
+`askdo --review=yes -- bash < installer.sh`.
 With no configured model the broker refuses a review-required submit before
 creating a job. If all configured providers fail with typed availability
 errors, `force_review: true` fails closed; without it the human can receive a
@@ -125,10 +134,46 @@ errors, `force_review: true` fails closed; without it the human can receive a
 approval is always necessary for this no-review path; it never auto-approves.
 For valid detached AI-reviewed reports only, an explicitly enabled root grant
 and submitter preference may authorize an eligible risk score; foreground
-always requires human approval. See
-[configuration](configuration.md). Safety refusal,
+always requires human approval, and a captured-stdin job is never
+auto-approved. See [configuration](configuration.md). Safety refusal,
 invalid final review, broker/capture/changed evidence and elapsed deadlines
 never trigger that fallback.
+
+### Captured stdin (protocol version 5)
+
+Before reserving, the CLI captures its own stdin **only** when it is a real
+pipe or a regular redirected file (a TTY and any other descriptor type are
+left uncaptured) and the content is non-empty. The capture happens on the
+client, before job submission:
+
+- At most 1 MiB (`proto.MaxCapturedStdinBytes`); a larger stream fails the
+  submit with an error and runs nothing.
+- The bytes must be valid UTF-8 text without NUL bytes.
+- There is no capture timeout. Pipe reads honor the caller's cancellation
+  (including `--timeout` deadlines and SIGINT) and the 1 MiB ceiling; a
+  regular-file read may wait as long as the underlying filesystem takes.
+- Capture never reads TTY stdin: an interactive caller is unaffected.
+
+A captured request bundles the bytes into the submit itself as
+`captured_stdin_base64` (canonical standard base64 of the non-empty, UTF-8,
+NUL-free payload). `ProtocolVersion` becomes `5` and the only valid shape is
+a **detached argv submit**; captured stdin cannot be combined with `--bundle`.
+
+```json
+{"op":"submit","protocol_version":5,"lifecycle":"detached","request_id":"2026-09-27_#3",
+  "reason":"Review the piped installer","mode":"argv",
+   "cwd":"/work/project",
+  "argv":["/usr/bin/bash"],
+  "captured_stdin_base64":"IyEvYmluL2Jhc2gK"}
+```
+
+The broker validates the decoded content against the same bounds, stages it
+root-only in the job spool, and records only metadata (path `stdin`, size,
+SHA-256) in the operation description the reviewer sees. The launched process
+reads the exact frozen bytes from a sealed, immutable descriptor. Captured
+scripts always require human approval; auto-approval never applies. AI review
+runs when required by policy or requested with `--review=yes`; approval-only
+requests retain their **NO AI REVIEW** card.
 
 **bundle mode** (`"mode":"bundle"`): `cwd` is required, just as in argv mode.
 `entry` is required (relative path of
@@ -337,7 +382,9 @@ fence is active; it is not a required stage of a new installation.
 
 New IDs are globally unique and reserved by peer UID before submission;
 historical rows remain keyed by `(peer UID, request_id)` and can have
-cross-UID collisions. A v4 submit must use a reservation owned by its peer UID.
+cross-UID collisions. A v4/v5 submit must use a reservation owned by its peer
+UID. A v5 submit body includes the captured stdin bytes, so any byte
+difference is a conflict, not a dedup.
 
 - Resubmitting with a **byte-identical** submit body is a no-op dedup: the
   daemon replies `accepted` with the current state and the connection follows

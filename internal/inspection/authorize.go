@@ -38,7 +38,7 @@ func (p *Policy) authorizeFD(fd int, requested string) (authorization, error) {
 	if err := unix.Fstat(fd, &a.stat); err != nil {
 		return a, err
 	}
-	if fileType(a.stat.Mode) == "other" {
+	if fileType(a.stat.Mode) == "other" && a.stat.Mode&unix.S_IFMT != unix.S_IFLNK {
 		return a, denied("special filesystem object")
 	}
 	var fs unix.Statfs_t
@@ -129,7 +129,11 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		// A mountinfo root is a filesystem coordinate, not necessarily an
 		// addressable namespace path (notably systemd PrivateTmp). Prove
 		// reachability and object identity before treating it as an alias.
-		probe, err := openat2(p.roots[0].fd, alias, &unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC, Resolve: resolveFlags})
+		flags := uint64(unix.O_PATH | unix.O_CLOEXEC)
+		if a.stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+			flags |= unix.O_NOFOLLOW
+		}
+		probe, err := openat2(p.roots[0].fd, alias, &unix.OpenHow{Flags: flags, Resolve: resolveFlags})
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
 			continue
 		}

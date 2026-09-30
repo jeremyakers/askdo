@@ -260,7 +260,8 @@ func TestDirectHostMaskAliasesAndList(t *testing.T) {
 		t.Fatal("broker did not record the masked host directory for operator disclosure")
 	}
 	r = directCall(t, j, "search_path", proto.SearchPathRequest{Base: "host", Path: root, Pattern: "sensitive"})
-	if r.Status != "inspection_denied" && r.Status != "unresolved" {
+	var searched proto.SearchPathResult
+	if r.Status != "ok" || json.Unmarshal(r.Payload, &searched) != nil || len(searched.Matches) != 0 || strings.Contains(string(r.Payload), "sensitive-value") {
 		t.Fatalf("directory search: %+v", r)
 	}
 }

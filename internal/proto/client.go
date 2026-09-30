@@ -28,6 +28,9 @@ const (
 	AskdoProtocolVersion = 3
 	// CanonicalProtocolVersion requires a reserved canonical job ID on submit.
 	CanonicalProtocolVersion = 4
+	// CapturedStdinProtocolVersion adds frozen argv stdin to canonical submits.
+	CapturedStdinProtocolVersion = 5
+	MaxCapturedStdinBytes        = 1 << 20
 )
 
 // Lifecycle values accepted by AskdoProtocolVersion submit requests.
@@ -89,7 +92,11 @@ type SubmitRequest struct {
 	Args                []string     `json:"args,omitempty"`
 	Files               []BundleFile `json:"files,omitempty"`
 	SensitiveInclusions []string     `json:"sensitive_inclusions,omitempty"`
-	// Lifecycle is required at versions 3 and 4 and forbidden at version 2.
+	// CapturedStdinBase64 is present only in version 5 argv requests. Empty
+	// input is omitted and uses the existing version 4 wire contract.
+	CapturedStdinBase64  string `json:"captured_stdin_base64,omitempty"`
+	capturedStdinPresent bool
+	// Lifecycle is required at versions 3 through 5 and forbidden at version 2.
 	// It declares the job lifetime only; it carries no
 	// caller identity (the broker authenticates via SO_PEERCRED).
 	Lifecycle string `json:"lifecycle,omitempty"`
@@ -103,6 +110,30 @@ type SubmitRequest struct {
 type BundleFile struct {
 	Path          string `json:"path"`
 	ContentBase64 string `json:"content_base64"`
+}
+
+// UnmarshalJSON retains field presence to forbid even empty/null captured
+// input on legacy wires; otherwise the string zero value would hide it.
+func (r *SubmitRequest) UnmarshalJSON(data []byte) error {
+	type wire SubmitRequest
+	var decoded wire
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if raw, ok := fields["captured_stdin_base64"]; ok {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return errors.New("captured_stdin_base64 cannot be null")
+		}
+		decoded.capturedStdinPresent = true
+	}
+	*r = SubmitRequest(decoded)
+	return nil
 }
 
 // StatusRequest asks for the state of an existing job.
@@ -238,14 +269,28 @@ func (r SubmitRequest) Validate() error {
 		if r.Lifecycle != "" || r.TerminalType != "" {
 			return errors.New("protocol version 2 forbids lifecycle and terminal_type")
 		}
-	case AskdoProtocolVersion, CanonicalProtocolVersion:
+	case AskdoProtocolVersion, CanonicalProtocolVersion, CapturedStdinProtocolVersion:
 		if err := validateLifecycle(r.Lifecycle, r.TerminalType); err != nil {
 			return err
 		}
 	default:
 		return fmt.Errorf("unsupported protocol version %d", r.ProtocolVersion)
 	}
-	if r.ProtocolVersion == CanonicalProtocolVersion {
+	if r.ProtocolVersion == CapturedStdinProtocolVersion {
+		if r.Mode != "argv" || r.Lifecycle != LifecycleDetached || r.CapturedStdinBase64 == "" {
+			return errors.New("protocol version 5 requires detached argv with captured stdin")
+		}
+		if len(r.CapturedStdinBase64) > base64.StdEncoding.EncodedLen(MaxCapturedStdinBytes) {
+			return errors.New("captured stdin exceeds 1 MiB")
+		}
+		decoded, err := base64.StdEncoding.Strict().DecodeString(r.CapturedStdinBase64)
+		if err != nil || len(decoded) == 0 || len(decoded) > MaxCapturedStdinBytes || !utf8.Valid(decoded) || bytes.IndexByte(decoded, 0) >= 0 || base64.StdEncoding.EncodeToString(decoded) != r.CapturedStdinBase64 {
+			return errors.New("captured stdin must be nonempty canonical base64 UTF-8 text without NUL, at most 1 MiB")
+		}
+	} else if r.CapturedStdinBase64 != "" || r.capturedStdinPresent {
+		return errors.New("captured stdin requires protocol version 5")
+	}
+	if r.ProtocolVersion == CanonicalProtocolVersion || r.ProtocolVersion == CapturedStdinProtocolVersion {
 		if err := jobid.Validate(r.RequestID); err != nil {
 			return fmt.Errorf("invalid canonical request_id: %w", err)
 		}

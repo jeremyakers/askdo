@@ -28,6 +28,7 @@ type Operation struct {
 	Env   []string
 	CWD   string
 	CWDFd *os.File
+	Stdin *os.File // broker-verified captured input, or nil for /dev/null
 }
 
 // Execution is one launched operation. Wait must be called exactly once.
@@ -76,9 +77,15 @@ func (SystemExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, 
 	if err := validateOperation(op); err != nil {
 		return nil, err
 	}
-	stdin, err := os.OpenFile(os.DevNull, os.O_RDONLY, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open devnull for stdin: %w", err)
+	stdin := op.Stdin
+	ownedStdin := false
+	if stdin == nil {
+		var err error
+		stdin, err = os.OpenFile(os.DevNull, os.O_RDONLY, 0)
+		if err != nil {
+			return nil, fmt.Errorf("open devnull for stdin: %w", err)
+		}
+		ownedStdin = true
 	}
 	// Go chdirs before mapping ExtraFiles onto fd 3. Point cmd.Dir at
 	// the duplicate's original number; F_DUPFD_CLOEXEC atomically prevents
@@ -86,7 +93,9 @@ func (SystemExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, 
 	// approved process after its chdir. ExtraFiles supplies fd 3 there.
 	dupDir, err := duplicateCWD(op.CWDFd)
 	if err != nil {
-		_ = stdin.Close()
+		if ownedStdin {
+			_ = stdin.Close()
+		}
 		return nil, fmt.Errorf("duplicate working directory descriptor: %w", err)
 	}
 	heldDir := os.NewFile(uintptr(dupDir), op.CWD)
@@ -98,11 +107,15 @@ func (SystemExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, 
 	cmd.Stderr = stderr
 	cmd.ExtraFiles = []*os.File{heldDir}
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
+		if ownedStdin {
+			_ = stdin.Close()
+		}
 		_ = heldDir.Close()
 		return nil, fmt.Errorf("launch %q: %w", op.Argv[0], err)
 	}
-	_ = stdin.Close() // the child holds its own devnull fd
+	if ownedStdin {
+		_ = stdin.Close()
+	} // the child holds its own stdin fd
 	_ = heldDir.Close()
 	return &systemExecution{cmd: cmd}, nil
 }

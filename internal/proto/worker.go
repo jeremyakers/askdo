@@ -102,13 +102,22 @@ type Bootstrap struct {
 
 // WorkerOperation is the frozen operation supplied to the reviewer.
 type WorkerOperation struct {
-	Mode      string   `json:"mode"`
-	Argv      []string `json:"argv,omitempty"`
-	Entry     string   `json:"entry,omitempty"`
-	Args      []string `json:"args,omitempty"`
-	CWD       string   `json:"cwd"`
-	BundleDir string   `json:"bundle_dir,omitempty"`
-	Reason    string   `json:"reason"`
+	Mode          string         `json:"mode"`
+	CapturedStdin *CapturedInput `json:"captured_stdin,omitempty"`
+	Argv          []string       `json:"argv,omitempty"`
+	Entry         string         `json:"entry,omitempty"`
+	Args          []string       `json:"args,omitempty"`
+	CWD           string         `json:"cwd"`
+	BundleDir     string         `json:"bundle_dir,omitempty"`
+	Reason        string         `json:"reason"`
+}
+
+// CapturedInput is broker-authored metadata for the logical bundle file;
+// script bytes stay in the spool until a reviewer explicitly reads it.
+type CapturedInput struct {
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 // ConfigProjection is the worker-safe subset of configuration.
@@ -141,14 +150,27 @@ type ProjectedModel struct {
 type WorkerLimits struct {
 	MaxModelCallsPerAttempt int `json:"max_model_calls_per_attempt"`
 	MaxOutputTokens         int `json:"max_output_tokens"`
+	// WebfetchEnabled gates the optional public-web webfetch tool. It is
+	// false unless the root-owned review.webfetch_enabled config is
+	// explicitly true, and the reviewer never offers or executes webfetch
+	// otherwise.
+	WebfetchEnabled bool `json:"webfetch_enabled,omitempty"`
 }
 
 // WorkerTelegram contains the worker's Telegram configuration projection.
 type WorkerTelegram struct {
-	TokenFile      string `json:"token_file"`
-	OperatorUserID int64  `json:"operator_user_id"`
-	ChatID         int64  `json:"chat_id"`
-	ApprovalTTLMS  int64  `json:"approval_ttl_ms"`
+	TokenFile      string                    `json:"token_file"`
+	OperatorUserID int64                     `json:"operator_user_id"`
+	ChatID         int64                     `json:"chat_id"`
+	ApprovalTTLMS  int64                     `json:"approval_ttl_ms"`
+	ChannelName    string                    `json:"channel_name,omitempty"`
+	Recipients     []WorkerTelegramRecipient `json:"recipients,omitempty"`
+}
+
+// WorkerTelegramRecipient is one destination and its authenticated operators.
+type WorkerTelegramRecipient struct {
+	ChatID          int64   `json:"chat_id"`
+	OperatorUserIDs []int64 `json:"operator_user_ids"`
 }
 
 // InspectRequest requests one bounded broker inspection operation. Payload is
@@ -187,6 +209,48 @@ type SearchPathRequest struct {
 	Path    string `json:"path"`
 	Pattern string `json:"pattern"`
 	Cursor  string `json:"cursor"`
+}
+
+type StatPathRequest struct {
+	Base    string `json:"base"`
+	Path    string `json:"path"`
+	Resolve bool   `json:"resolve"`
+}
+type StatPathResult struct {
+	Source       string `json:"source"`
+	Type         string `json:"type"`
+	Mode         uint32 `json:"mode"`
+	UID          uint32 `json:"uid"`
+	GID          uint32 `json:"gid"`
+	Nlink        uint64 `json:"nlink"`
+	Size         int64  `json:"size"`
+	AtimeUnixNS  int64  `json:"atime_unix_ns"`
+	MtimeUnixNS  int64  `json:"mtime_unix_ns"`
+	CtimeUnixNS  int64  `json:"ctime_unix_ns"`
+	Device       uint64 `json:"device"`
+	Inode        uint64 `json:"inode"`
+	Target       string `json:"target,omitempty"`
+	ResolvedPath string `json:"resolved_path,omitempty"`
+}
+type FindPathRequest struct {
+	Base   string `json:"base"`
+	Path   string `json:"path"`
+	Glob   string `json:"glob"`
+	Cursor string `json:"cursor"`
+}
+type FindPathResult struct {
+	Matches       []string `json:"matches"`
+	NextCursor    string   `json:"next_cursor"`
+	SkippedMasked int      `json:"skipped_masked"`
+}
+type MountInfoRequest struct {
+	Path string `json:"path"`
+}
+type MountInfoResult struct {
+	MountID    uint64 `json:"mount_id"`
+	MountPoint string `json:"mount_point"`
+	FSType     string `json:"fs_type"`
+	ReadOnly   bool   `json:"read_only"`
 }
 
 // InspectResult returns a result correlated to an outstanding inspect request.
@@ -347,21 +411,37 @@ type ReviewRejected struct {
 
 // NotificationSent binds the completed Telegram approval card to a manifest.
 type NotificationSent struct {
-	Type         string  `json:"type"`
-	MessageIDs   []int64 `json:"message_ids"`
-	CardID       int64   `json:"card_id"`
-	Digest       string  `json:"digest"`
-	ExpiryUnixMS int64   `json:"expiry_unix_ms"`
+	Type         string               `json:"type"`
+	MessageIDs   []int64              `json:"message_ids"`
+	CardID       int64                `json:"card_id"`
+	Digest       string               `json:"digest"`
+	ExpiryUnixMS int64                `json:"expiry_unix_ms"`
+	Targets      []NotificationTarget `json:"targets,omitempty"`
+}
+
+// NotificationTarget binds IDs within their chat; message IDs are not bot-global.
+type NotificationTarget struct {
+	ChatID          int64   `json:"chat_id"`
+	CardID          int64   `json:"card_id"`
+	MessageIDs      []int64 `json:"message_ids"`
+	OperatorUserIDs []int64 `json:"operator_user_ids"`
 }
 
 // AutoNotificationSent acknowledges every reviewed summary part and the
 // button-free auto-approval notice. It is not a human decision or dispatch.
 type AutoNotificationSent struct {
-	Type       string  `json:"type"`
-	Digest     string  `json:"digest"`
-	MessageIDs []int64 `json:"message_ids"`
+	Type       string                   `json:"type"`
+	Digest     string                   `json:"digest"`
+	MessageIDs []int64                  `json:"message_ids"`
+	NoticeID   int64                    `json:"notice_id"`
+	TimeUnixMS int64                    `json:"time_unix_ms"`
+	Targets    []AutoNotificationTarget `json:"targets,omitempty"`
+}
+
+type AutoNotificationTarget struct {
+	ChatID     int64   `json:"chat_id"`
 	NoticeID   int64   `json:"notice_id"`
-	TimeUnixMS int64   `json:"time_unix_ms"`
+	MessageIDs []int64 `json:"message_ids"`
 }
 
 // Decision is the one-use authenticated human decision.
@@ -372,6 +452,8 @@ type Decision struct {
 	MessageID      int64  `json:"message_id"`
 	Action         string `json:"action"`
 	TimeUnixMS     int64  `json:"time_unix_ms"`
+	ChannelName    string `json:"channel_name,omitempty"`
+	ChatID         int64  `json:"chat_id,omitempty"`
 }
 
 // Cancel ends worker review or approval before dispatch.
@@ -511,7 +593,7 @@ func ValidateWorkerMessage(message any, direction Direction) error {
 		return ValidateWorkerMessage(*m, direction)
 	case NotificationSent:
 		expected = WorkerToBroker
-		if m.Type != "notification_sent" || m.MessageIDs == nil || len(m.MessageIDs) > 32 || !digestPattern.MatchString(m.Digest) {
+		if m.Type != "notification_sent" || !digestPattern.MatchString(m.Digest) || (len(m.Targets) == 0 && (m.Targets != nil || m.MessageIDs == nil || len(m.MessageIDs) > 32)) || (len(m.Targets) != 0 && (m.CardID != 0 || m.MessageIDs == nil || len(m.MessageIDs) != 0 || !validNotificationTargets(m.Targets))) {
 			return errors.New("invalid notification_sent")
 		}
 	case *NotificationSent:
@@ -521,7 +603,7 @@ func ValidateWorkerMessage(message any, direction Direction) error {
 		return ValidateWorkerMessage(*m, direction)
 	case AutoNotificationSent:
 		expected = WorkerToBroker
-		if m.Type != "auto_notification_sent" || !digestPattern.MatchString(m.Digest) || len(m.MessageIDs) < 1 || len(m.MessageIDs) > 32 || m.NoticeID <= 0 || m.TimeUnixMS <= 0 {
+		if m.Type != "auto_notification_sent" || !digestPattern.MatchString(m.Digest) || m.TimeUnixMS <= 0 || (len(m.Targets) == 0 && (m.Targets != nil || len(m.MessageIDs) < 1 || len(m.MessageIDs) > 32 || m.NoticeID <= 0)) || (len(m.Targets) != 0 && (m.MessageIDs == nil || len(m.MessageIDs) != 0 || m.NoticeID != 0 || !validAutoNotificationTargets(m.Targets))) {
 			return errors.New("invalid auto_notification_sent")
 		}
 		for _, id := range m.MessageIDs {
@@ -536,7 +618,7 @@ func ValidateWorkerMessage(message any, direction Direction) error {
 		return ValidateWorkerMessage(*m, direction)
 	case Decision:
 		expected = WorkerToBroker
-		if m.Type != "decision" || !digestPattern.MatchString(m.Digest) || !oneOf(m.Action, "approve", "deny") {
+		if m.Type != "decision" || !digestPattern.MatchString(m.Digest) || !oneOf(m.Action, "approve", "deny") || ((m.ChannelName != "" || m.ChatID != 0) && (!bounded(m.ChannelName, 128) || m.ChannelName == "" || m.ChatID == 0 || m.OperatorUserID <= 0 || m.MessageID <= 0 || m.TimeUnixMS <= 0)) {
 			return errors.New("invalid decision")
 		}
 	case *Decision:
@@ -761,6 +843,45 @@ func ValidateInspectResultFor(request InspectRequest, result InspectResult) erro
 			return err
 		}
 		return validateSearchPathResult(p)
+	case "stat_path":
+		var p StatPathResult
+		if err := strictUnmarshalWorker(result.Payload, &p); err != nil {
+			return err
+		}
+		if !oneOf(p.Source, "host", "bundle_staged") || !oneOf(p.Type, "file", "dir", "symlink") || p.Mode > 07777 || p.Size < 0 || (p.Type != "symlink" && p.Target != "") || !bounded(p.Target, 4096) || !bounded(p.ResolvedPath, 4096) || (p.ResolvedPath != "" && !validDirectPath("host", p.ResolvedPath)) || (p.Source == "bundle_staged" && (p.Type != "file" || p.Target != "" || p.ResolvedPath != "")) {
+			return errors.New("invalid stat_path result")
+		}
+		var requestPayload StatPathRequest
+		if err := strictUnmarshalWorker(request.Payload, &requestPayload); err != nil {
+			return err
+		}
+		if (requestPayload.Base == "host") != (p.Source == "host") {
+			return errors.New("stat_path source does not match request")
+		}
+		return nil
+	case "find_path":
+		var p FindPathResult
+		if err := strictUnmarshalWorker(result.Payload, &p); err != nil {
+			return err
+		}
+		if p.Matches == nil || len(p.Matches) > 200 || !bounded(p.NextCursor, 128) || p.SkippedMasked < 0 {
+			return errors.New("invalid find_path result")
+		}
+		for _, name := range p.Matches {
+			if !bounded(name, 1024) || name == "" {
+				return errors.New("invalid find_path match")
+			}
+		}
+		return nil
+	case "mount_info":
+		var p MountInfoResult
+		if err := strictUnmarshalWorker(result.Payload, &p); err != nil {
+			return err
+		}
+		if p.MountID == 0 || !validDirectPath("host", p.MountPoint) || !bounded(p.FSType, 64) || p.FSType == "" {
+			return errors.New("invalid mount_info result")
+		}
+		return nil
 	}
 	return errors.New("unknown inspect request op")
 }
@@ -793,6 +914,24 @@ func DecodeInspectRequestPayload(request InspectRequest) (any, error) {
 		return p, nil
 	case "search_path":
 		var p SearchPathRequest
+		if err := strictUnmarshalWorker(request.Payload, &p); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "stat_path":
+		var p StatPathRequest
+		if err := strictUnmarshalWorker(request.Payload, &p); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "find_path":
+		var p FindPathRequest
+		if err := strictUnmarshalWorker(request.Payload, &p); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "mount_info":
+		var p MountInfoRequest
 		if err := strictUnmarshalWorker(request.Payload, &p); err != nil {
 			return nil, err
 		}
@@ -843,6 +982,9 @@ func validateBootstrap(m Bootstrap) error {
 	return validateProjectionFor(m.ConfigProjection, m.ApprovalOnly)
 }
 func validateOperation(o WorkerOperation) error {
+	if o.CapturedStdin != nil && (o.Mode != "argv" || o.CapturedStdin.Path != "stdin" || o.CapturedStdin.Size < 1 || o.CapturedStdin.Size > MaxCapturedStdinBytes || !digestPattern.MatchString(o.CapturedStdin.SHA256)) {
+		return errors.New("invalid captured stdin metadata")
+	}
 	if !bounded(o.CWD, 4096) || !path.IsAbs(o.CWD) || path.Clean(o.CWD) != o.CWD {
 		return errors.New("invalid operation")
 	}
@@ -877,7 +1019,7 @@ func validateProjection(p ConfigProjection) error {
 }
 
 func validateProjectionFor(p ConfigProjection, approvalOnly bool) error {
-	if p.Models == nil || (!approvalOnly && len(p.Models) < 1) || len(p.Models) > 16 || p.Limits.MaxModelCallsPerAttempt < 1 || p.Limits.MaxModelCallsPerAttempt > 128 || p.Limits.MaxOutputTokens < 1 || p.Limits.MaxOutputTokens > 200000 || !bounded(p.Telegram.TokenFile, 1024) || p.Telegram.ApprovalTTLMS <= 0 {
+	if p.Models == nil || (!approvalOnly && len(p.Models) < 1) || len(p.Models) > 16 || p.Limits.MaxModelCallsPerAttempt < 1 || p.Limits.MaxModelCallsPerAttempt > 128 || p.Limits.MaxOutputTokens < 1 || p.Limits.MaxOutputTokens > 200000 || validateWorkerTelegram(p.Telegram) != nil {
 		return errors.New("invalid config projection")
 	}
 	for _, m := range p.Models {
@@ -902,6 +1044,83 @@ func validateProjectionFor(p ConfigProjection, approvalOnly bool) error {
 	}
 	return nil
 }
+
+const maxTelegramRecipients = 16
+
+func validOperatorIDs(ids []int64) bool {
+	if len(ids) == 0 || len(ids) > 16 {
+		return false
+	}
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
+
+func validateWorkerTelegram(t WorkerTelegram) error {
+	if !bounded(t.TokenFile, 1024) || t.ApprovalTTLMS <= 0 {
+		return errors.New("invalid telegram projection")
+	}
+	if t.ChannelName == "" && len(t.Recipients) == 0 {
+		if t.Recipients != nil {
+			return errors.New("legacy telegram projection forbids recipients")
+		}
+		return nil
+	}
+	if t.TokenFile == "" || t.ChannelName == "" || !bounded(t.ChannelName, 128) || t.ChatID != 0 || t.OperatorUserID != 0 || len(t.Recipients) == 0 || len(t.Recipients) > maxTelegramRecipients {
+		return errors.New("invalid named telegram recipients")
+	}
+	seen := map[int64]bool{}
+	for _, r := range t.Recipients {
+		if r.ChatID == 0 || seen[r.ChatID] || !validOperatorIDs(r.OperatorUserIDs) {
+			return errors.New("invalid telegram recipient")
+		}
+		seen[r.ChatID] = true
+	}
+	return nil
+}
+
+func validNotificationTargets(targets []NotificationTarget) bool {
+	if len(targets) == 0 || len(targets) > maxTelegramRecipients {
+		return false
+	}
+	seen := map[int64]bool{}
+	for _, t := range targets {
+		if t.ChatID == 0 || seen[t.ChatID] || t.CardID <= 0 || len(t.MessageIDs) == 0 || len(t.MessageIDs) > 32 || !validOperatorIDs(t.OperatorUserIDs) {
+			return false
+		}
+		seen[t.ChatID] = true
+		for _, id := range t.MessageIDs {
+			if id <= 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validAutoNotificationTargets(targets []AutoNotificationTarget) bool {
+	if len(targets) == 0 || len(targets) > maxTelegramRecipients {
+		return false
+	}
+	seen := map[int64]bool{}
+	for _, t := range targets {
+		if t.ChatID == 0 || seen[t.ChatID] || t.NoticeID <= 0 || len(t.MessageIDs) == 0 || len(t.MessageIDs) > 32 {
+			return false
+		}
+		seen[t.ChatID] = true
+		for _, id := range t.MessageIDs {
+			if id <= 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
 func validateInspectRequest(r InspectRequest) error {
 	if r.Type != "inspect_request" || len(r.Payload) == 0 {
 		return errors.New("invalid inspect_request")
@@ -925,6 +1144,30 @@ func validateInspectRequest(r InspectRequest) error {
 		err = strictUnmarshalWorker(r.Payload, &p)
 		if err == nil {
 			err = validateSearchPathRequest(p)
+		}
+	case "stat_path":
+		var p StatPathRequest
+		err = strictUnmarshalWorker(r.Payload, &p)
+		if err == nil && !validDirectPath(p.Base, p.Path) {
+			err = errors.New("invalid stat_path request")
+		}
+	case "find_path":
+		var p FindPathRequest
+		err = strictUnmarshalWorker(r.Payload, &p)
+		if err == nil && (!validDirectPath(p.Base, p.Path) || !bounded(p.Glob, 256) || p.Glob == "" || !bounded(p.Cursor, 128)) {
+			err = errors.New("invalid find_path request")
+		}
+		if err == nil {
+			_, err = path.Match(p.Glob, "test")
+			if err == nil && (strings.Contains(p.Glob, "/") || strings.Contains(p.Glob, "..")) {
+				err = errors.New("invalid find_path glob")
+			}
+		}
+	case "mount_info":
+		var p MountInfoRequest
+		err = strictUnmarshalWorker(r.Payload, &p)
+		if err == nil && !validDirectPath("host", p.Path) {
+			err = errors.New("invalid mount_info request")
 		}
 	default:
 		return errors.New("invalid inspect operation")

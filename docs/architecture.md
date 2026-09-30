@@ -90,9 +90,11 @@ reads no configuration file; everything it may know arrives in the one
 immutable `bootstrap` message on its private pipe. It talks to the broker
 over that pipe (its stdin/stdout), to configured model endpoints over HTTP(S),
 and to the Telegram Bot API. The model receives no shell, process-execution,
-file-write, browser, MCP or delegation tools. Three path tools
-(`read_path`, `list_path`, `search_path`) request bounded filesystem work
-through the broker for model-chosen paths; final-review submission runs in
+file-write, browser, MCP or delegation tools. Six path tools
+(`read_path`, `list_path`, `search_path`, `stat_path`, `find_path`, `mount_info`)
+request bounded filesystem work through the broker for model-chosen paths;
+optional `webfetch` inspects public HTTP(S) resources when enabled. Final-review
+submission runs in
 trusted worker code. The model chooses which candidate files to inspect; the
 broker enforces access policy, credential masking and read limits on every
 call and discloses what it withheld to the operator; it does not choose or
@@ -266,9 +268,10 @@ One pass through the pipeline per job (`internal/broker/job.go`):
      verbatim argv (no shell), an explicit minimal environment
    (`PATH=/usr/bin:/bin`, `HOME=/root`, `LANG=C.UTF-8`, plus
      `ASKDO_BUNDLE` in bundle mode), the caller-submitted cwd bound by
-     directory identity at submission, stdin from
-      `/dev/null`, and no inherited environment or TTY. Headless root stdin is
-      not passed through from the client; synchronous stdout/stderr observation
+      directory identity at submission, stdin from `/dev/null` for ordinary
+      requests or the sealed captured input for v5, and no inherited environment
+      or TTY. Headless root stdin is not streamed live from the client;
+      synchronous stdout/stderr observation
       is not full regular-sudo parity. A confirmed launch marks
      `starting` → `running`; output drains into bounded per-stream logs from
      launch, independent of any subscriber. Foreground uses the same frozen

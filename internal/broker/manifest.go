@@ -31,6 +31,7 @@ type approvalManifest struct {
 	SuccessfulModel  string                    `json:"successful_model"`
 	ModelHistory     []proto.ModelHistoryEntry `json:"model_history"`
 	Settings         manifestSettings          `json:"settings"`
+	TelegramRoute    *manifestTelegramRoute    `json:"telegram_route,omitempty"`
 }
 
 // operationOnlyManifest deliberately has no review/report/coverage fields.
@@ -44,6 +45,7 @@ type operationOnlyManifest struct {
 	Captures            []captureRecord             `json:"captures"`
 	TrustAssumptions    manifestTrustAssumptions    `json:"trust_assumptions"`
 	Settings            manifestSettings            `json:"settings"`
+	TelegramRoute       *manifestTelegramRoute      `json:"telegram_route,omitempty"`
 	ApprovalMode        string                      `json:"approval_mode"`
 	Reason              string                      `json:"approval_reason"`
 	AvailabilityHistory []proto.AvailabilityFailure `json:"availability_history"`
@@ -73,6 +75,7 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		Captures:         append([]captureRecord{}, index.Files...),
 		TrustAssumptions: manifestTrustAssumptions{ReadRoots: append([]string(nil), j.daemon.cfg.Inspection.ReadRoots...), DenyPaths: append([]string(nil), j.daemon.cfg.Inspection.DenyPaths...), SensitiveMasks: effectiveSensitiveMasks(j.daemon.cfg.Inspection.SensitiveMasks)},
 		Settings:         manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
+		TelegramRoute:    j.manifestTelegramRoute(),
 		ApprovalMode:     "approval_only", Reason: reason, AvailabilityHistory: append([]proto.AvailabilityFailure{}, history...),
 	}
 	encoded, err := json.Marshal(manifest)
@@ -131,6 +134,18 @@ type manifestSettings struct {
 	MaxInspectedBytes int64 `json:"max_inspected_bytes"`
 }
 
+type manifestTelegramRoute struct {
+	ChannelName string                          `json:"channel_name"`
+	Recipients  []proto.WorkerTelegramRecipient `json:"recipients"`
+}
+
+func (j *jobRuntime) manifestTelegramRoute() *manifestTelegramRoute {
+	if !j.namedRoute() {
+		return nil
+	}
+	return &manifestTelegramRoute{ChannelName: j.route.ChannelName, Recipients: j.workerTelegram().Recipients}
+}
+
 type freezeError struct {
 	code   string
 	reason string
@@ -178,8 +193,9 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 			SensitiveMasks: effectiveSensitiveMasks(j.daemon.cfg.Inspection.SensitiveMasks),
 		},
 		Report: review.Report, AutoApproval: plan, WithheldRefs: refs, WithheldCount: count, SuccessfulModel: model,
-		ModelHistory: append([]proto.ModelHistoryEntry(nil), review.ModelHistory...),
-		Settings:     manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
+		ModelHistory:  append([]proto.ModelHistoryEntry(nil), review.ModelHistory...),
+		Settings:      manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
+		TelegramRoute: j.manifestTelegramRoute(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
@@ -225,6 +241,13 @@ func (j *jobRuntime) storeFrozenManifest(ctx context.Context, encoded []byte, au
 }
 
 func (j *jobRuntime) validateCaptureState(index captureIndex) error {
+	if j.req.CapturedStdinBase64 != "" {
+		file, err := j.openCapturedStdin()
+		if err != nil {
+			return err
+		}
+		_ = file.Close()
+	}
 	for _, record := range index.Files {
 		if validateCapturePath(record.Path) != nil {
 			return fmt.Errorf("invalid staged bundle path %q", record.Path)

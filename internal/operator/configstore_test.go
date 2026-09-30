@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -158,9 +159,11 @@ func TestSaveRoundTripPreservesSections(t *testing.T) {
 	if after.Review.Models[0].Model != "model-a-v2" {
 		t.Fatalf("mutation lost: %q", after.Review.Models[0].Model)
 	}
+	// TelegramConfig gained slice fields in the named-channel form, so it is no
+	// longer comparable with !=; compare it deeply.
 	if after.Inspection.ReadRoots[0] != before.Inspection.ReadRoots[0] ||
 		after.Limits != before.Limits ||
-		after.Telegram != before.Telegram ||
+		!reflect.DeepEqual(after.Telegram, before.Telegram) ||
 		after.Review.RequestTimeout != before.Review.RequestTimeout ||
 		after.Review.Models[0].APIKeyFile != before.Review.Models[0].APIKeyFile ||
 		after.Review.Models[0].DataBoundary != before.Review.Models[0].DataBoundary {
@@ -269,6 +272,124 @@ func TestOptimisticConcurrency(t *testing.T) {
 	}
 	if string(current) != string(external) {
 		t.Fatal("conflicted save overwrote the other writer's content")
+	}
+}
+
+// namedFixtureConfig renders a whole-valid named-channel v4 document
+// (approval_only mode so the empty model list is legal): one "ops" channel
+// with one recipient, plus a route from the test runner's own login (which
+// real NSS can resolve) to that channel.
+func namedFixtureConfig(t *testing.T) []byte {
+	t.Helper()
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(fmt.Sprintf(`{
+  "config_version": 4,
+  "inspection": {"read_roots": ["/"], "trusted_executable_roots": []},
+  "review": {"mode": "approval_only", "models": []},
+  "limits": {},
+  "telegram": {"default_channel": "ops", "channels": [{"name": "ops", "token_file": "/keys/ops.token", "recipients": [{"chat_id": 21, "operator_user_ids": [111]}]}], "routes": {%q: "ops"}, "approval_ttl": "10m"}
+}`, current.Username))
+}
+
+// TestNamedChannelSectionRoundTripSave: the mutation writer handles the named
+// telegram form with no extra seams — a channels/routes mutation validates via
+// Save(SectionTelegram), marshals with the omitempty legacy fields absent (so
+// the strict decoder never sees a mixed form), and the saved file still passes
+// whole-file config.Load while unrelated sections stay semantically unchanged.
+func TestNamedChannelSectionRoundTripSave(t *testing.T) {
+	stubConfigCredentialChecks(t)
+	stubOwnership(t)
+	path := writeFixture(t, namedFixtureConfig(t))
+
+	before, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("named fixture must be whole-valid: %v", err)
+	}
+	store, err := LoadForMutation(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := &store.Config().Telegram
+	if tg.DefaultChannel != "ops" || len(tg.Channels) != 1 || len(tg.Routes) != 1 {
+		t.Fatalf("named form lost on mutation decode: %+v", tg)
+	}
+	tg.Channels = append(tg.Channels, config.TelegramChannel{
+		Name: "alice", TokenFile: "/keys/alice.token",
+		Recipients: []config.TelegramRecipient{{ChatID: 11, OperatorUserIDs: []int64{111}}},
+	})
+	tg.DefaultChannel = "alice"
+	for login := range tg.Routes {
+		tg.Routes[login] = "alice"
+	}
+	if err := store.Save(SectionTelegram); err != nil {
+		t.Fatalf("named channel save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The omitempty legacy fields must not be pinned into the saved named form.
+	// token_file/chat_id legitimately appear inside channel/recipient objects;
+	// only their bare zero-value spellings (legacy pinning) are forbidden.
+	for _, forbidden := range []string{`"token_file": ""`, `"operator_user_id": 0`, `"chat_id": 0`} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("save pinned a legacy field %q: %s", forbidden, data)
+		}
+	}
+
+	after, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("saved named config no longer passes config.Load: %v", err)
+	}
+	if len(after.Telegram.Channels) != 2 || after.Telegram.DefaultChannel != "alice" {
+		t.Fatalf("named mutation lost on reload: %+v", after.Telegram)
+	}
+	for _, route := range after.Telegram.Routes {
+		if route != "alice" {
+			t.Fatalf("route mutation lost: %v", after.Telegram.Routes)
+		}
+	}
+	if !reflect.DeepEqual(after.Inspection, before.Inspection) || after.Limits != before.Limits ||
+		after.Review.Mode != before.Review.Mode || after.Review.RequestTimeout != before.Review.RequestTimeout {
+		t.Fatal("unmutated sections changed across named save")
+	}
+}
+
+// TestNamedSectionSaveRollbackOnValidationError: a mutation that fails
+// section validation never touches the file on disk — the original bytes
+// remain byte-identical (Save is atomic; a validation error returns before
+// any write).
+func TestNamedSectionSaveRollbackOnValidationError(t *testing.T) {
+	stubConfigCredentialChecks(t)
+	stubOwnership(t)
+	path := writeFixture(t, namedFixtureConfig(t))
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := LoadForMutation(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two channels claiming the same token file: duplicate token_file must
+	// block the save in-section.
+	store.Config().Telegram.Channels = append(store.Config().Telegram.Channels, config.TelegramChannel{
+		Name: "dup", TokenFile: "/keys/ops.token",
+		Recipients: []config.TelegramRecipient{{ChatID: 12, OperatorUserIDs: []int64{112}}},
+	})
+	if err := store.Save(SectionTelegram); err == nil {
+		t.Fatal("duplicate channel token_file passed section validation")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != string(original) {
+		t.Fatal("failed validation changed the config file")
 	}
 }
 

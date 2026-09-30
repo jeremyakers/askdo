@@ -100,19 +100,20 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 		}
 	}
 	modelOperation := struct {
-		Mode          string            `json:"mode"`
-		Argv          []string          `json:"argv,omitempty"`
-		Entry         string            `json:"entry,omitempty"`
-		Args          []string          `json:"args,omitempty"`
-		CWD           string            `json:"cwd"`
-		Reason        string            `json:"reason"`
-		TargetUID     uint32            `json:"target_uid"`
-		SubmitterUID  uint32            `json:"submitter_uid"`
-		SubmitterName string            `json:"submitter_name"`
-		Host          string            `json:"host"`
-		Container     string            `json:"container,omitempty"`
-		Environment   map[string]string `json:"environment"`
-	}{Mode: l.Bootstrap.Operation.Mode, Argv: l.Bootstrap.Operation.Argv, Entry: l.Bootstrap.Operation.Entry, Args: l.Bootstrap.Operation.Args, CWD: l.Bootstrap.Operation.CWD, Reason: l.Bootstrap.Operation.Reason, TargetUID: l.Bootstrap.TargetUID, SubmitterUID: l.Bootstrap.SubmitterUID, SubmitterName: l.Bootstrap.SubmitterName, Host: l.Bootstrap.Host, Container: l.Bootstrap.Container, Environment: environment}
+		Mode          string               `json:"mode"`
+		CapturedStdin *proto.CapturedInput `json:"captured_stdin,omitempty"`
+		Argv          []string             `json:"argv,omitempty"`
+		Entry         string               `json:"entry,omitempty"`
+		Args          []string             `json:"args,omitempty"`
+		CWD           string               `json:"cwd"`
+		Reason        string               `json:"reason"`
+		TargetUID     uint32               `json:"target_uid"`
+		SubmitterUID  uint32               `json:"submitter_uid"`
+		SubmitterName string               `json:"submitter_name"`
+		Host          string               `json:"host"`
+		Container     string               `json:"container,omitempty"`
+		Environment   map[string]string    `json:"environment"`
+	}{Mode: l.Bootstrap.Operation.Mode, CapturedStdin: l.Bootstrap.Operation.CapturedStdin, Argv: l.Bootstrap.Operation.Argv, Entry: l.Bootstrap.Operation.Entry, Args: l.Bootstrap.Operation.Args, CWD: l.Bootstrap.Operation.CWD, Reason: l.Bootstrap.Operation.Reason, TargetUID: l.Bootstrap.TargetUID, SubmitterUID: l.Bootstrap.SubmitterUID, SubmitterName: l.Bootstrap.SubmitterName, Host: l.Bootstrap.Host, Container: l.Bootstrap.Container, Environment: environment}
 	operation, err := json.Marshal(modelOperation)
 	if err != nil {
 		return proto.ReviewComplete{}, err
@@ -123,16 +124,23 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 		choice = l.Bootstrap.ConfigProjection.Models[0]
 	}
 	maxCalls := l.Bootstrap.ConfigProjection.Limits.MaxModelCallsPerAttempt
+	// The webfetch tool is only ever offered when the root-owned config
+	// projected it; submit_review stays terminal either way.
+	tools := DefinitionsWithWebfetch(l.Bootstrap.ConfigProjection.Limits.WebfetchEnabled)
 	for turn := 0; turn < maxCalls; turn++ {
 		if !now().Before(deadline) {
 			return proto.ReviewComplete{}, context.DeadlineExceeded
 		}
 		requestCtx, requestCancel := context.WithTimeout(ctx, time.Duration(choice.RequestTimeoutMS)*time.Millisecond)
-		response, callErr := l.Model.ChatTurn(requestCtx, ModelRequest{Model: choice.Model, Messages: append([]Message{}, messages...), Tools: Definitions(), MaxOutputTokens: l.Bootstrap.ConfigProjection.Limits.MaxOutputTokens})
+		response, callErr := l.Model.ChatTurn(requestCtx, ModelRequest{Model: choice.Model, Messages: append([]Message{}, messages...), Tools: tools, MaxOutputTokens: l.Bootstrap.ConfigProjection.Limits.MaxOutputTokens})
 		requestCancel()
 		if callErr != nil {
 			return proto.ReviewComplete{}, callErr
 		}
+		// This successful ChatTurn included the preceding batch's tool results
+		// in its request. Reads issued by the response below are not yet visible
+		// to the model and must not qualify a same-batch submit_review.
+		l.Tools.pendingCapturedRead = false
 		messages = append(messages, Message{Role: "assistant", Content: response.Content, ToolCalls: append([]ToolCall{}, response.ToolCalls...)})
 		if len(response.ToolCalls) == 0 {
 			return proto.ReviewComplete{}, errors.New("model turn returned no tool calls; submit_review is required")

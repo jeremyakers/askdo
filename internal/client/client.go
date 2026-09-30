@@ -33,7 +33,10 @@ type Options struct {
 	SocketPath string
 	Stdout     io.Writer
 	Stderr     io.Writer
-	Interrupt  <-chan os.Signal
+	// Stdin overrides the process stdin for capture; only regular files and
+	// pipes are read. The caller retains ownership of this descriptor.
+	Stdin     *os.File
+	Interrupt <-chan os.Signal
 	// HasControllingTTY overrides the /dev/tty probe in tests only.
 	HasControllingTTY func() bool
 	// launchHelper is a test-only replacement for the fixed sudo invocation.
@@ -145,6 +148,27 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 		fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
 		return 125
 	}
+	// Only an explicit --timeout bounds capture. There is no default capture
+	// timer: a pipe with no writer close waits indefinitely unless the caller
+	// supplies a deadline (via Run's context) or Ctrl-C.
+	var captureDeadline time.Time
+	if timeout > 0 {
+		captureDeadline = started.Add(timeout)
+	}
+	captured, interrupted, err := captureStdinGuarded(ctx, options.Stdin, captureDeadline, options.Interrupt)
+	if interrupted {
+		fmt.Fprintln(options.Stderr, "interrupted; no command submitted")
+		return 130
+	}
+	if err != nil {
+		if timeout > 0 && !time.Now().Before(captureDeadline) {
+			return usageErrorCode(options, "stdin capture timed out; no command submitted", 124)
+		}
+		return usageError(options, "askdo: stdin capture failed: "+err.Error())
+	}
+	if len(captured) > 0 && bundle != "" {
+		return usageError(options, "askdo: captured stdin cannot be combined with --bundle")
+	}
 	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.CanonicalProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review)}
 	if bundle == "" {
 		if entry != "" || len(rest) == 0 {
@@ -174,12 +198,16 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	if len(invocationDir) > 4096 || !utf8.ValidString(invocationDir) || strings.ContainsRune(invocationDir, 0) || !filepath.IsAbs(invocationDir) || filepath.Clean(invocationDir) != invocationDir {
 		return usageError(options, "askdo: invalid working directory")
 	}
+	if len(captured) > 0 {
+		request.ProtocolVersion = proto.CapturedStdinProtocolVersion
+		request.CapturedStdinBase64 = base64.StdEncoding.EncodeToString(captured)
+	}
 	hasTTY := options.HasControllingTTY
 	if hasTTY == nil {
 		hasTTY = hasControllingTTY
 	}
 	controllingTTY := hasTTY()
-	if detach || !controllingTTY {
+	if detach || !controllingTTY || len(captured) > 0 {
 		request.Lifecycle = proto.LifecycleDetached
 	} else {
 		request.Lifecycle = proto.LifecycleForeground
@@ -721,6 +749,9 @@ func withDefaults(options Options) Options {
 	if options.Stderr == nil {
 		options.Stderr = os.Stderr
 	}
+	if options.Stdin == nil {
+		options.Stdin = os.Stdin
+	}
 	if options.Interrupt == nil {
 		interrupt := make(chan os.Signal, 1)
 		signal.Notify(interrupt, os.Interrupt)
@@ -737,4 +768,75 @@ func usageError(options Options, message string) int {
 func usageErrorCode(options Options, message string, code int) int {
 	fmt.Fprintln(options.Stderr, message)
 	return code
+}
+
+// captureStdinGuarded scopes the existing --timeout deadline and Ctrl-C to
+// stdin capture only. captureStdin already honors the context for pipes; the
+// watcher is torn down and joined before returning, so the later eventLoop
+// still receives every subsequent interrupt. Regular redirected files can
+// still block on the filesystem and are not claimed to be hard-interruptible.
+func captureStdinGuarded(ctx context.Context, input *os.File, deadline time.Time, interrupt <-chan os.Signal) (data []byte, interrupted bool, err error) {
+	var cancelCapture context.CancelFunc
+	captureCtx := ctx
+	if !deadline.IsZero() {
+		captureCtx, cancelCapture = context.WithDeadline(ctx, deadline)
+	} else {
+		captureCtx, cancelCapture = context.WithCancel(ctx)
+	}
+	defer cancelCapture()
+
+	// Ctrl-C can only abort a pipe capture: regular redirected files may block
+	// in the filesystem (documented, not hard-interruptible) and other inputs
+	// return immediately. Watching only pipes also ensures an interrupt that
+	// arrives before capture does cannot be stolen from the event loop on the
+	// fast/empty path.
+	if !stdinIsPipe(input) {
+		data, err = captureStdin(captureCtx, input)
+		if err != nil {
+			return nil, false, err
+		}
+		return data, false, nil
+	}
+
+	// A single buffered slot so the watcher never blocks; it is drained after
+	// the watcher exits. watcherDone joins the goroutine, guaranteeing it can
+	// no longer consume an interrupt once capture returns.
+	capturedInterrupt := make(chan struct{}, 1)
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-captureCtx.Done():
+		case <-interrupt:
+			capturedInterrupt <- struct{}{}
+			// Cancel only the capture context, never the caller's ctx.
+			cancelCapture()
+		}
+	}()
+
+	data, err = captureStdin(captureCtx, input)
+
+	// Stop the watcher immediately and wait for it to exit so a later
+	// interrupt always reaches the event loop. A real interrupt that races
+	// the stop may still be buffered and is reported as capture-interrupted
+	// (fail safe, before reservation).
+	cancelCapture()
+	<-watcherDone
+	select {
+	case <-capturedInterrupt:
+		return nil, true, nil
+	default:
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, false, nil
+}
+
+func stdinIsPipe(input *os.File) bool {
+	info, err := input.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeNamedPipe != 0
 }

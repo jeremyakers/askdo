@@ -10,8 +10,8 @@ durations are quoted Go duration strings (`"2m"`, `"30s"`). The daemon and
 **You rarely edit this file by hand.** For a fresh installation, inspect the
 checkout's `install.sh` and run `./install.sh` only with the machine owner's
 approval;
-it does not enable or start the service (see the README "Install and onboard"
-section and [clean installation guide](clean-cutover.md)). The onboarding
+it does not enable or start the service (see [Get started](../README.md#get-started)
+and the [clean installation guide](clean-cutover.md)). The onboarding
 wizards own the common writes and apply the credential ownership/mode rules for
 you:
 `askdo reviewer add|edit|delete|moveup|movedown` manage `review.models` and
@@ -128,7 +128,8 @@ Inspection requires `STATX_MNT_ID` (normally Linux 5.8+), in addition to
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
 | `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. A human Telegram decision remains mandatory for **NO AI REVIEW**; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
 | `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. |
-| `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. |
+| `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
+| `webfetch_enabled` | no | `false` | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. See [review tools](review-tools.md#optional-webfetch). |
 | `models` | yes | — | Ordered fallback list. May be empty only with explicit `approval_only` or `required` plus nonempty `approval_only_users`; non-exempt/forced-review submitters then fail closed. Adding a model does not itself change `approval_only` policy. |
 | `request_timeout` | no | `"2m"` | Per-request provider timeout; Go duration > 0. |
 | `total_timeout` | no | `"20m"` | Whole-review budget across all fallback choices; > 0 and ≥ `request_timeout`. Becomes the worker's `review_deadline_unix_ms`. |
@@ -143,8 +144,8 @@ UID. Only a reviewed job with both a root-owned UID grant and that UID's
 preference is eligible. The administrator's `max_risk` cap is authoritative.
 Effective threshold is `min(preference, cap + 1)`: only a valid AI report
 scored 1–4 and strictly below that threshold is eligible. Score 5, `unknown`,
-and **NO AI REVIEW**
-always require the ordinary human decision.
+**NO AI REVIEW**, and any job with captured stdin (a piped or redirected
+script submitted for review) always require the ordinary human decision.
 
 Example grant (add to the `review` object; retain other existing fields):
 
@@ -162,6 +163,21 @@ prelaunch checks, and an atomic audit write (`kind:auto`) with the
 `StateStarting` transition. Delivery failure, cancellation/revocation, or a
 digest change fails closed; this is not silent auto-execution. No human
 operator or approval-card ID is fabricated.
+
+To permit public-page inspection for a reviewed job, add this field inside the
+existing version 4 `review` object (retain its `models` and other fields):
+
+```json
+"webfetch_enabled": true
+```
+
+Omitting it leaves web fetching off. `review.local_only` still governs the
+configured **model** inference location; it does not disable this independent
+public-web opt-in. Fetched text becomes model-visible evidence, and an external
+model provider may receive it. Fetched pages are untrusted data, not verified
+instructions or proof that a remote script is safe to execute. This is a
+configuration reference, not an instruction to install from source or restart
+an installed service.
 
 ### `review.models[]`
 
@@ -224,20 +240,146 @@ configuration is always required.
 ### `telegram`
 
 Telegram is the mandatory decision interface; there is no approval path
-without it.
+without it. One configuration uses exactly one of two forms:
+
+- **Legacy single-bot form** (the original shape): the flat
+  `token_file`/`operator_user_id`/`chat_id` fields below. Still fully
+  supported, unchanged. Every submitting UID reaches that one bot in its one
+  chat.
+- **Named multi-channel form**: `default_channel`, `channels[]`, and the
+  optional `routes{}` map, described after the shared fields. It supports
+  several bots, several recipient chats per bot, and per-login routing. The
+  two forms never mix: a config that carries both fails validation
+  (`telegram mixed legacy and named fields`).
+
+Shared field:
 
 | Field | Required | Default | Rules and meaning |
+|---|---|---|---|
+| `approval_ttl` | no | `"10m"` | At least 30 s. Approval lifetime, measured from the moment the complete Telegram request is sent, and additionally capped by the client's remaining pre-dispatch deadline. The 30 s minimum remains to allow a usable decision window; `review.request_timeout` and `review.total_timeout` are separate review budgets. With a per-channel `approval_ttl` set, that value overrides this one for the channel's jobs. |
+
+Each daemon handles review and approval one request at a time. While a card
+waits for a decision, later requests stay queued; a longer approval lifetime
+also means they may wait longer.
+
+#### Legacy single-bot form
+
+| Field | Required (in this form) | Default | Rules and meaning |
 |---|---|---|---|
 | `token_file` | yes | — | Absolute path to a file containing only the bot token; same credential-file requirements as `api_key_file`, plus ≤ 4096 bytes, non-empty after trimming, no `/` or NUL. |
 | `operator_user_id` | yes | — | Integer > 0. The sole numeric Telegram user ID allowed to decide; `0` (the shipped placeholder) is invalid. Usernames and group membership are never authentication. |
 | `chat_id` | yes | — | Integer ≠ 0. The private chat the approval card is sent to; callbacks from any other chat are rejected. |
-| `approval_ttl` | no | `"10m"` | At least 30 s; no one-hour upper limit. Approval lifetime, measured from the moment the complete Telegram request is sent, and additionally capped by the client's remaining pre-dispatch deadline. The 30 s minimum remains to allow a usable decision window; `review.request_timeout` and `review.total_timeout` are separate review budgets. |
+
+#### Named multi-channel form
+
+A **channel** is one bot token plus one or more **recipients**. A
+**recipient** is one chat (private or group) plus the numeric Telegram user
+IDs allowed to decide in that chat — one shared group chat with several
+authorized admins, or several private chats, both work. A job uses exactly
+one channel (its bot); the channel's recipients all receive the request card,
+and **the first valid Approve or Deny from any authorized user in any
+recipient chat wins** — there is no quorum, and a later decision cannot
+revoke an already launched command. Remaining cards are closed best-effort
+and their buttons become inert.
+
+Route selection is made by the root daemon from the **authenticated
+submitting OS UID** — never a client-supplied name. `routes` keys are OS
+login names, resolved to UIDs at config load; unknown accounts fail
+validation and a numeric UID is rejected as a key. Unlisted submitters use
+`default_channel`. The submitting user cannot choose a route.
+
+| Field | Required (in this form) | Default | Rules and meaning |
+|---|---|---|---|
+| `default_channel` | yes | — | Must name an entry in `channels`. The route for every submitting UID without a `routes` entry. |
+| `channels` | yes | — | Array of 1–8 objects, each: `name` (non-empty, unique, ≤ 128 bytes, no surrounding whitespace), `token_file` (absolute path, distinct per channel, same credential-file requirements as above), `recipients` (1–8 objects of `chat_id` ≠ 0 plus 1–8 distinct positive `operator_user_ids`), and optional `approval_ttl` (≥ 30 s, overrides the shared value). A chat ID may appear once per channel. |
+| `routes` | no | — | Map of OS login → channel name for per-user routing, at most 128 entries. Keys must be login names, not numeric UIDs; each must resolve to an existing account at load, and two logins resolving to one UID are rejected. |
+
+The daemon enforces the same bounds at load, so a config that passes
+`askdo config check` behaves identically at service start.
+
+CLI ownership of these fields:
+
+```sh
+# Add one bot + one recipient chat as a named channel (never touches a
+# legacy config; on a fresh config it becomes the default channel).
+# With flags, --operator-user-id takes one ID; interactively (omit the
+# flag) you can enter the list of authorized IDs comma-separated:
+sudo askdo channel add telegram ops \
+  --token-file /root/ops-bot.token --chat-id 123456789 \
+  --operator-user-id 100111
+
+# List channels, chats, operator users and routes (token values are never printed):
+sudo askdo channel list
+
+# Pin a submitting login to a channel; everything else uses default_channel:
+sudo askdo channel route set alice ops
+sudo askdo channel route set deploy-agent ops
+```
+
+`channel add telegram NAME` writes one recipient with one chat ID; to give a
+channel further chats or more operators, edit `channels` (and back up the
+file first). `channel route set` requires a named-form config and refuses a
+login that would collide with another login on the same UID.
+
+The **untouched installer template** has a placeholder token path but zero
+operator/chat IDs, so adding the first named channel replaces that unusable
+placeholder without deleting any credential file. There is **no automatic
+migration of a configured legacy bot**: `askdo channel add telegram NAME`
+refuses that case rather than dropping a working channel. To convert one by
+hand, back up `/etc/askdo/config.json`; create one token file per bot; move
+the legacy flat fields into a `channels` entry; set `default_channel`; then
+run `askdo config check` and restart the service when the new config is ready.
+
+The CLI also refuses a channel name that could not file a token: one
+path-safe component (no `/` or `\`, not `.` or `..`), because the wizard
+derives the token path `…/credentials/telegram-<name>.token` from it.
+
+##### Example
+
+```json
+"telegram": {
+  "approval_ttl": "10m",
+  "default_channel": "ops",
+  "channels": [
+    {
+      "name": "ops",
+      "token_file": "/etc/askdo/credentials/telegram-ops.token",
+      "recipients": [
+        { "chat_id": 111111111, "operator_user_ids": [100111, 100222] },
+        { "chat_id": -100200333, "operator_user_ids": [100111, 100222, 100333] }
+      ]
+    },
+    {
+      "name": "alice",
+      "token_file": "/etc/askdo/credentials/telegram-alice.token",
+      "recipients": [
+        { "chat_id": -100444555, "operator_user_ids": [100111] }
+      ]
+    }
+  ],
+  "routes": {
+    "alice": "alice",
+    "deploy-agent": "ops"
+  }
+}
+```
+
+Read as: submissions from the OS account `alice` go to her bot; the account
+`deploy-agent` (and any other submitter, via `default_channel`) goes to the
+operations bot, which cards both `recipients` — the private chat `111111111`
+and the group `-100200333` (the negative ID marks a group). The token paths
+and IDs are placeholders: replace them with your own tokens and IDs. A private
+recipient must start a chat with that bot; for a group recipient, add the bot
+to the group with permission to send messages. The CLI flags above take one
+recipient; the additional group-chat recipient in this example is a manual
+`channels` edit. Each chat's list of `operator_user_ids` is exactly who may
+decide there.
 
 ## Credential file requirements
 
-Every credential file referenced by `telegram.token_file` or
-`review.models[].api_key_file` must, at validation time (daemon startup and
-`config check`):
+Every credential file referenced by `telegram.token_file`,
+`telegram.channels[].token_file`, or `review.models[].api_key_file` must, at
+validation time (daemon startup and `config check`):
 
 - be an absolute path to an existing **regular file**;
 - be owned by **root** (UID 0);
@@ -269,17 +411,38 @@ install -m 0640 -o root -g askdo-review /dev/stdin \
   /etc/askdo/credentials/openai.key
 ```
 
+A named channel's token file follows the same ownership and mode: owner
+**root** (the broker/daemon reads it), group **`askdo-review`** readable at
+most `0640` — never group- or world-writable, never owned by a submitting
+account.
+
 The Codex OAuth token file is not installed by hand — `sudo askdo auth
 login openai-codex` writes `/etc/askdo/credentials/openai-codex.json`
 as root:root `0600` itself.
 
-Contents are read exactly once (the Telegram token at client construction,
+Contents are read exactly once (each Telegram token at client construction,
 each API key at provider-session construction), held in memory, and attached
 only to requests against the configured endpoint. Configured provider API key
 and Codex access-token values are redacted from error diagnostics. Already-bounded
 HTTP and SSE error payloads are retained in the root-only reviewer log; arbitrary
 secret detection in provider responses is not guaranteed. Treat the reviewer
 log as sensitive even though socket clients cannot read it.
+
+**One bot token per running service.** Never reuse a bot token in another
+running host or service while askdo polls it: Telegram's `getUpdates` is a
+polling API, so two active pollers on one token steal each other's updates
+and a decision may reach the wrong process (see
+[clean installation and cutover](clean-cutover.md)). With named channels this
+applies per bot: each channel needs its own token, distinct from every other
+running service's tokens. The recommended per-channel layout keeps root
+ownership and the `askdo-review` group read:
+
+```sh
+install -m 0640 -o root -g askdo-review /dev/stdin \
+  /etc/askdo/credentials/telegram-ops.token
+install -m 0640 -o root -g askdo-review /dev/stdin \
+  /etc/askdo/credentials/telegram-alice.token
+```
 
 ## Worked example
 
@@ -293,7 +456,9 @@ Choose the explicit approval-only policy above if no reviewer is needed, or run
 `askdo reviewer add` once per model (each entry lands in
 `review.models` with its credential file installed under
 `/etc/askdo/credentials/`), `askdo channel add telegram` for the
-bot token and IDs. Add each submitting user to the `askdo` socket group.
+bot token and IDs (or `askdo channel add telegram NAME` for the named
+multi-channel form with several bots and admins). Add each submitting user to
+the `askdo` socket group.
 If your agent's scripts live outside the shipped
 `inspection.read_roots`, add that directory to the file directly. Then run
 `askdo config check`.
@@ -352,3 +517,8 @@ create the token file with the ownership and mode above. Plaintext
 `http` to a non-loopback host (e.g. a LAN inference server) is accepted with
 a validation warning; use `https` whenever the content may leave a trusted
 network segment.
+
+The example above uses the legacy single-bot form. If several admins should
+decide, or different submitters should reach different bots, use the
+[named multi-channel form](#named-multi-channel-form) instead — the rest of
+this example is unchanged.

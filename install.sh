@@ -104,7 +104,7 @@ fi
 [ -f "$SRC/cmd/askdo/main.go" ] && [ -f "$SRC/cmd/askdo-launch/main.go" ] || die 'source does not contain both commands'
 if ! command -v go >/dev/null 2>&1 && [ -x /usr/local/go/bin/go ]; then PATH=$PATH:/usr/local/go/bin; fi
 command -v go >/dev/null 2>&1 || die 'Go toolchain required'
-(cd "$SRC" && CGO_ENABLED=0 go build -trimpath -o "$TMP/$ASSET" ./cmd/askdo && CGO_ENABLED=0 go build -trimpath -o "$TMP/$HELPER" ./cmd/askdo-launch) || die 'source build failed'
+(cd "$SRC" && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$TMP/$ASSET" ./cmd/askdo && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$TMP/$HELPER" ./cmd/askdo-launch) || die 'source build failed'
 for FILE in askdo-config.example.json contrib/askdo.service contrib/askdo.sudoers; do
   repo_file "$FILE" "$TMP/$(basename "$FILE")" || die "missing $FILE"
 done

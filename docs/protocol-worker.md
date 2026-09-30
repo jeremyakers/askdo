@@ -66,7 +66,7 @@ The immutable job bootstrap; the first and only message of its kind.
 | `submitter_uid` | uint32 (kernel-authenticated submitting peer UID) |
 | `submitter_name` | string ≤ 256 (host account name looked up from that UID; display only) |
 | `container` | string ≤ 128 (best-effort container label observed by the daemon; empty when unavailable) |
-| `request_id` | 32 hex (job ID) |
+| `request_id` | canonical `YYYY-MM-DD_#N` job ID; legacy 32-hex IDs remain valid for historical status |
 | `operation` | object, below |
 | `config_projection` | object, below |
 | `deadline_unix_ms` | int64 ≥ 0 (0 = no client deadline) |
@@ -79,6 +79,7 @@ The immutable job bootstrap; the first and only message of its kind.
 | Field | Type — bounds |
 |---|---|
 | `mode` | enum `"argv"` \| `"bundle"` |
+| `captured_stdin` | optional argv-mode v5 metadata: logical bundle `path: "stdin"`, byte `size`, SHA-256 digest; no script contents |
 | `argv` | argv mode: array 1–64 of strings, each ≤ 4096; must be absent/empty in bundle mode |
 | `entry` | bundle mode: string ≤ 1024; must be empty in argv mode |
 | `args` | bundle mode: array ≤ 64 of strings, each ≤ 4096; must be empty in argv mode |
@@ -91,7 +92,8 @@ The bootstrap also carries `execution_environment`: exactly the non-secret
 entries for reviewed jobs. The broker derives them from the actual launch
 environment. Private `ASKDO_BUNDLE` staging paths are not projected.
 
-The bootstrap carries no capture records and no content hashes. In argv mode
+The bootstrap carries no raw capture contents. For captured stdin it carries
+only the logical path, byte size and SHA-256 digest. In argv mode
 the broker performs metadata-only `argv[0]` resolution as execution preflight
 and reads no host content eagerly; host bytes cross to the model only through
 model-chosen `inspect_request` exchanges. `bundle_dir` is broker-private
@@ -133,12 +135,26 @@ value and **forbidden** for every other api value, and the codex
 never appear in any worker message.
 
 **`limits`:** `max_model_calls_per_attempt` 1–128; `max_output_tokens`
-1–200000. The inspected-file/byte budgets (`limits.max_inspected_files`,
-`limits.max_inspected_bytes`) are broker-only — they bound bundle staging and
+1–200000; optional `webfetch_enabled` bool (omitted/false unless the root-owned
+`review.webfetch_enabled` setting is true). The inspected-file/byte budgets
+(`limits.max_inspected_files`, `limits.max_inspected_bytes`) are broker-only — they bound bundle staging and
 broker-side search — and are never projected to the unprivileged reviewer.
 
-**`telegram`:** `token_file` ≤ 1024; `operator_user_id` int64; `chat_id`
-int64; `approval_ttl_ms` int64 > 0.
+**`telegram`:** The broker projects the job's one selected channel. Two
+shapes, mirroring the config's two forms:
+
+- *Legacy projection* (legacy flat config): `token_file` ≤ 1024;
+  `operator_user_id` int64; `chat_id` int64; `approval_ttl_ms` int64 > 0;
+  `channel_name` and `recipients` absent.
+- *Named projection* (named multi-channel config): `token_file` ≤ 1024;
+  `approval_ttl_ms` int64 > 0; `channel_name` non-empty ≤ 128;
+  `recipients` array 1–16 of {`chat_id` int64 ≠ 0;
+  `operator_user_ids` array 1–16 of distinct positive int64}, unique per
+  `chat_id`; `operator_user_id`/`chat_id` flat fields absent.
+
+The projected `recipients` are the selected channel's configured recipients
+(config allows 1–8 chats with 1–8 users each). The projection carries the
+token *path*, never the token value.
 
 ### `inspect_request` (W→B)
 
@@ -150,14 +166,14 @@ monotonically increasing uint32 starting at 0, assigned by the worker's
 |---|---|
 | `type` | `"inspect_request"` |
 | `request_seq` | uint32 |
-| `op` | enum `"read_path"` \| `"list_path"` \| `"search_path"`; selects the payload shape |
+| `op` | enum `"read_path"` \| `"list_path"` \| `"search_path"` \| `"stat_path"` \| `"find_path"` \| `"mount_info"`; selects the payload shape |
 | `payload` | object matching `op`, required |
 
 There is no `required` or importance flag: the model chooses paths, and JSON
 Schema `required` lists in the tool definitions describe argument shape only.
 
-**Payloads by `op`:** `base` is always enum `"host"` \| `"bundle"`. A host
-`path` is a clean absolute path; a bundle `path` is a clean relative path
+**Payloads by `op`:** except for host-only `mount_info`, `base` is enum
+`"host"` \| `"bundle"`. A host `path` is a clean absolute path; a bundle `path` is a clean relative path
 confined to the bundle root, with `"."` selecting the root. Every `path` is
 ≤ 4096.
 
@@ -166,6 +182,16 @@ confined to the bundle root, with `"."` selecting the root. Every `path` is
 | `read_path` | `base`; `path`; `offset` int64 ≥ 0; `max_bytes` 1–16384 |
 | `list_path` | `base`; `path`; `cursor` ≤ 128 (empty = first page, opaque thereafter) |
 | `search_path` | `base`; `path` (explicit scope, never empty/global); `pattern` ≤ 1024, non-empty, must compile as a Go regular expression; `cursor` ≤ 128 |
+| `stat_path` | `base`; `path`; `resolve` bool (false inspects the final link itself; true resolves a host symlink under policy, forbidden for staged bundles) |
+| `find_path` | `base`; `path` (explicit directory scope); `glob` non-empty basename glob ≤ 256, valid `path.Match` syntax, no `/` or `..`; `cursor` ≤ 128 |
+| `mount_info` | `path` clean absolute host path, ≤ 4096; no `base` |
+
+The host directory walker used by `find_path` and directory `search_path` is
+bounded to depth 8 and 2048 raw entries; directory symlinks are not followed.
+Host single-file and directory searches can scan up to
+`min(limits.max_inspected_bytes, 1 MiB)` per call rather than a 16 KiB
+whole-file ceiling. Paginated host directory observations use digest-bound
+cursors, not an atomic filesystem snapshot.
 
 ### `inspect_result` (B→W)
 
@@ -185,20 +211,19 @@ string, never payload bytes or broker internals.
 
 - `withheld` is the broker's payload-free answer at the credential boundary:
   the requested (or resolved) name matched the sensitive-mask policy, or a
-  staged bundle file is masked. It is valid for all three ops. In `list_path`
-  and subtree `search_path` results, masked entries *below* the scope are
-  instead omitted and counted in the payload's `skipped_masked`.
+  staged bundle file is masked. It is valid for all six ops. In `list_path`,
+  `find_path`, and subtree `search_path` results, masked entries *below* the
+  scope are instead omitted and counted in the payload's `skipped_masked`.
 - `binary` is valid only for `read_path`: the target's bytes are not valid
   UTF-8 or contain NUL, so no content is returned.
-- `inspection_denied` means policy refused the operation (for example a host
-  `search_path` scope that is a directory — host search accepts only an
-  explicit regular file). It is an ordinary tool result; the model can still
-  complete its report.
+- `inspection_denied` means policy refused the operation (for example a
+  `find_path` scope that is a file). It is an ordinary tool result; the model
+  can still complete its report.
 - `not_found`, `changed_during_capture` (the object or path mapping changed
   around the bounded read, or staged bundle bytes no longer match the capture
-  index), `limit_exceeded` (for example a host search target larger than the
-  16 KiB EOF-complete bound, or a search match whose path exceeds the 1024-byte
-  result bound), `unresolved` (indeterminate, e.g. a malformed
+  index), `limit_exceeded` (for example a host search exceeding its 1 MiB
+  per-call ceiling, a walker exceeding depth/entry limits, or a search match
+  whose path exceeds the 1024-byte result bound), `unresolved` (indeterminate, e.g. a malformed
   cursor or non-text search content), and `unknown` (a supported check ran
   but produced an indeterminate result) disclose uncertainty, never verified
   safety.
@@ -215,6 +240,26 @@ string, never payload bytes or broker internals.
   last page); `skipped_masked` int ≥ 0.
 - `search_path`: `matches` array ≤ 200 of {`path` ≤ 1024, non-empty; `line`
   int ≥ 0; `excerpt` ≤ 256}; `next_cursor` ≤ 128; `skipped_masked` int ≥ 0.
+- `stat_path`: `source` enum `"host"` | `"bundle_staged"`; `type` enum
+  `"file"` | `"dir"` | `"symlink"`; `mode` ≤ 07777 (including special bits),
+  `uid`, `gid`, `nlink`, `size` ≥ 0, `atime_unix_ns`, `mtime_unix_ns`,
+  `ctime_unix_ns`, `device`, `inode`; optional `target` ≤ 4096 for symlinks
+  and `resolved_path` clean absolute path ≤ 4096. A bundle result is always
+  `bundle_staged`/`file` without target or resolved path: it describes the
+  staged object, not the original host metadata.
+- `find_path`: `matches` array ≤ 200 of non-empty paths ≤ 1024;
+  `next_cursor` ≤ 128; `skipped_masked` int ≥ 0. The glob matches basenames,
+  not an unbounded recursive pattern.
+- `mount_info`: `mount_id` positive integer; `mount_point` clean absolute
+  host path; `fs_type` non-empty string ≤ 64; `read_only` bool. This reports
+  one allowed object's mount, never the entire mount table or pseudo-paths;
+  it is not evidence of container isolation.
+
+`webfetch` is **not** an `inspect_request` operation: when enabled by the
+projected flag, it executes in the unprivileged reviewer worker and returns
+bounded public HTTP(S) text as a model tool result (or a fixed error category).
+There is no `webfetch` pipe request/result; the tool does not execute code or
+automatically follow remote dependencies. See [review tools](review-tools.md#optional-webfetch).
 
 ### `progress` (W→B)
 
@@ -351,9 +396,24 @@ before any polling begins.
 | `card_id` | int64 (approval-card message ID) |
 | `digest` | 64 hex (must equal the `frozen` manifest digest) |
 | `expiry_unix_ms` | int64 (absolute approval expiry) |
+| `targets` | optional array 1–16; named projection only, below |
 
 The broker rejects an expiry that is not in the future, exceeds
 `approval_ttl` (+1 s slack), or exceeds the client deadline (+1 s slack).
+
+The legacy projection reports only the flat `card_id`/`message_ids` shape
+(`targets` must then be absent — `targets: null` is rejected, `message_ids`
+is required). The named projection instead reports `targets`, one entry per
+recipient chat, each: `chat_id`; `card_id` (positive — Telegram message IDs
+are per-chat, so message IDs are *not* flattened across chats);
+`message_ids` array 1–32 of positive int64 (that chat's summary parts);
+`operator_user_ids` (the chat's authorized deciders). When `targets` is
+present, `card_id` must be 0 and `message_ids` empty, the reported set must
+exactly match the projected recipients (same count, same chats, same user
+lists) — an incomplete or mismatched set is rejected. Delivering every
+recipient happens before `notification_sent` at all: a partial send failure
+removes the already-sent cards' keyboards best-effort and fails closed, so no
+approval poll is opened and nothing executes.
 
 ### `auto_notification_sent` (W→B)
 
@@ -369,6 +429,14 @@ it does not poll callbacks or create a human `decision`.
 | `message_ids` | 1–32 positive int64 summary-part IDs |
 | `notice_id` | positive int64 Bot API message ID |
 | `time_unix_ms` | positive int64 send time |
+| `targets` | optional array 1–16; named projection only, below |
+
+The named projection reports every recipient chat in `targets`, each:
+`chat_id`; `notice_id` (positive, that chat's button-free notice ID);
+`message_ids` array 1–32 of positive int64 (that chat's summary parts). The
+set must exactly cover the projected recipients (every configured chat
+delivered, each once); an incomplete fan-out fails closed like the human
+path. The auto notice never polls callbacks and never carries an operator ID.
 
 The broker validates the digest, IDs and recent send time, waits for clean
 worker exit, repeats the normal prelaunch checks, and calls the store's atomic
@@ -390,11 +458,20 @@ a validated Telegram callback.
 | `message_id` | int64 (the approval-card message the decision was made on) |
 | `action` | enum `"approve"` \| `"deny"` |
 | `time_unix_ms` | int64 |
+| `channel_name` | optional string ≤ 128; non-empty exactly for the named projection (with non-empty `chat_id`; `channel_name`/`chat_id` must be set or empty together), and it must equal the projected channel |
+| `chat_id` | optional int64 ≠ 0; the recipient chat the deciding card was made in |
 
 Trusted reviewer code validates the Telegram callback's operator ID, chat,
-card ID, nonce, expiry and first-use status. The broker does **not** poll
+card ID, nonce, expiry and first-use status — in the named form against every
+projected `(chat, message, operator)` target, in the legacy form against the
+single card. The **first valid decision wins**; once a decision is consumed
+the poller rejects later presses on the pending request ("already decided"),
+so a second admin's button cannot revoke an approved or denied job. The
+broker does **not** poll
 Telegram independently: it trusts the worker's `decision`, re-checks digest,
-operator ID, message ID against the recorded card ID, pending state,
+channel name, operator ID and message ID against the recorded card binding
+(legacy: the single card ID; named: the deciding chat's recorded target),
+pending state,
 `time_unix_ms` ≤ expiry and the client deadline under its dispatch lock, and
 consumes the decision exactly once. Its checks do not independently prove the
 Telegram callback was authentic.

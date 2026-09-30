@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
@@ -24,6 +25,8 @@ import (
 type jobRuntime struct {
 	daemon             *daemon
 	uid                uint32
+	route              config.TelegramRoute // detached at admission from authenticated peer UID
+	namedTelegram      bool
 	req                proto.SubmitRequest
 	spool              spoolFiles
 	identity           inspection.SubmitterIdentity
@@ -52,6 +55,13 @@ type jobRuntime struct {
 	freezeMu          sync.Mutex
 	manifestFrozen    bool
 	nextInspectSeq    uint64
+	// stdinReadBits records broker-delivered read_path bytes for the logical
+	// captured input. Only successful correlated bundle:stdin results count;
+	// each bit represents one byte (at most 128 KiB for the 1 MiB cap).
+	stdinReadBits  []byte
+	stdinReadSize  int64
+	stdinReadCount int64
+	stdinReadEOF   bool
 	// withheldPaths records the normalized (filepath.Clean) requested
 	// spellings of credential-like paths whose content the broker withheld
 	// from the worker. Guarded by mu.
@@ -79,6 +89,8 @@ type foregroundPeer struct {
 // freeze/configuration, and the card/message/expiry come from the worker's
 // notification_sent report after validation.
 type approvalBinding struct {
+	channelName    string
+	targets        []proto.NotificationTarget
 	digest         string
 	cardID         int64
 	messageIDs     []int64
@@ -90,11 +102,13 @@ type approvalBinding struct {
 // approvalRecord is the durable approval metadata persisted via
 // store.RecordApproval when the worker reports notification_sent.
 type approvalRecord struct {
-	CardID         int64   `json:"card_id"`
-	MessageIDs     []int64 `json:"message_ids"`
-	Digest         string  `json:"digest"`
-	OperatorUserID int64   `json:"operator_user_id"`
-	ExpiryUnixMS   int64   `json:"expiry_unix_ms"`
+	ChannelName    string                     `json:"channel_name,omitempty"`
+	Targets        []proto.NotificationTarget `json:"targets,omitempty"`
+	CardID         int64                      `json:"card_id"`
+	MessageIDs     []int64                    `json:"message_ids"`
+	Digest         string                     `json:"digest"`
+	OperatorUserID int64                      `json:"operator_user_id"`
+	ExpiryUnixMS   int64                      `json:"expiry_unix_ms"`
 }
 
 func newJobRuntime(d *daemon, uid uint32, req proto.SubmitRequest, spool spoolFiles, identity inspection.SubmitterIdentity, cwd *cwdBinding, submitterName string) *jobRuntime {
@@ -102,7 +116,7 @@ func newJobRuntime(d *daemon, uid uint32, req proto.SubmitRequest, spool spoolFi
 	if err != nil || host == "" {
 		host = "localhost"
 	}
-	return &jobRuntime{daemon: d, uid: uid, req: req, spool: spool, identity: identity, submitterName: submitterName, cwd: cwd, executionHost: host, executionContainer: d.containerEnvironment(), state: store.StateQueued, done: make(chan struct{}), handoffReady: make(chan proto.ForegroundReadyEvent, 1), subscribers: make(map[chan []byte]struct{})}
+	return &jobRuntime{daemon: d, uid: uid, route: d.cfg.Telegram.RouteForUID(uid), namedTelegram: len(d.cfg.Telegram.Channels) != 0, req: req, spool: spool, identity: identity, submitterName: submitterName, cwd: cwd, executionHost: host, executionContainer: d.containerEnvironment(), state: store.StateQueued, done: make(chan struct{}), handoffReady: make(chan proto.ForegroundReadyEvent, 1), subscribers: make(map[chan []byte]struct{})}
 }
 
 func (j *jobRuntime) subscribe() (chan []byte, func()) {
@@ -406,6 +420,14 @@ func (j *jobRuntime) run(ctx context.Context) {
 		frozen = proto.ApprovalOnlyFrozen{Type: "approval_only_frozen", ManifestDigest: digest, Reason: reason, History: history}
 	} else {
 		var encoded []byte
+		if j.req.CapturedStdinBase64 != "" && !j.capturedStdinFullyRead(review.ModelHistory) {
+			if len(review.Report.Warnings) >= 32 || len(review.Report.MissingContext) >= 16 {
+				j.fail("review report has no room for broker-observed captured stdin uncertainty")
+				return
+			}
+			review.Report.Warnings = append(review.Report.Warnings, proto.ReviewWarning{Message: "Broker cannot verify that the AI read all captured stdin script bytes; inspect before approval.", Evidence: "Broker-observed read_path bundle:stdin coverage for the final review was incomplete."})
+			review.Report.MissingContext = append(review.Report.MissingContext, "Broker could not verify complete AI inspection of captured stdin script.")
+		}
 		// Validate the report before deciding whether the human card may be
 		// omitted. The manifest binds the resulting broker policy decision.
 		if proto.ValidateReviewComplete(*review) == nil {
@@ -450,14 +472,20 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	if autoPlan != nil {
 		notification, ok := message.(*proto.AutoNotificationSent)
-		if !ok || notification.Digest != digest || notification.NoticeID <= 0 ||
-			len(notification.MessageIDs) == 0 || len(notification.MessageIDs) > 32 {
+		if !ok || notification.Digest != digest || (!j.namedRoute() && (notification.NoticeID <= 0 ||
+			len(notification.MessageIDs) == 0 || len(notification.MessageIDs) > 32)) {
 			j.fail("invalid auto notification")
 			return
 		}
 		for _, id := range notification.MessageIDs {
 			if id <= 0 {
 				j.fail("invalid auto notification message ID")
+				return
+			}
+		}
+		if j.namedRoute() {
+			if err := j.validateAutoTargets(notification.Targets); err != nil {
+				j.fail("invalid auto notification targets")
 				return
 			}
 		}
@@ -488,7 +516,8 @@ func (j *jobRuntime) run(ctx context.Context) {
 			UID: j.uid, RequestID: j.req.RequestID, ManifestDigest: digest,
 			Score: autoPlan.Score, AdminMaxRisk: cap, NoticeID: notification.NoticeID,
 			SummaryMessageIDs: append([]int64(nil), notification.MessageIDs...),
-			NotifiedAtUTC:     notified, NowUTC: time.Now().UTC(),
+			ChannelName:       j.selectedChannelName(), Targets: append([]proto.AutoNotificationTarget(nil), notification.Targets...),
+			NotifiedAtUTC: notified, NowUTC: time.Now().UTC(),
 		})
 		if changed && commitErr == nil {
 			j.state = store.StateStarting
@@ -540,7 +569,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 // autoPlanFor selects a broker-authored plan only for a validated reviewed
 // report. A zero cap or preference always preserves the human approval path.
 func (j *jobRuntime) autoPlanFor(report proto.ReviewReport) (*proto.AutoApprovalPlan, error) {
-	if j.req.Lifecycle == proto.LifecycleForeground {
+	if j.req.Lifecycle == proto.LifecycleForeground || j.req.CapturedStdinBase64 != "" {
 		return nil, nil
 	}
 	score, err := strconv.Atoi(report.Risk)
@@ -596,7 +625,7 @@ func (j *jobRuntime) readApprovalMessage(session WorkerSession) (any, error) {
 func (j *jobRuntime) recordApproval(ctx context.Context, notification *proto.NotificationSent) error {
 	now := time.Now()
 	expiry := time.UnixMilli(notification.ExpiryUnixMS)
-	ttl := j.daemon.cfg.Telegram.ApprovalTTL.Value()
+	ttl := j.route.ApprovalTTL.Value()
 	if !expiry.After(now) {
 		return errors.New("approval expiry is not in the future")
 	}
@@ -608,12 +637,24 @@ func (j *jobRuntime) recordApproval(ctx context.Context, notification *proto.Not
 	if deadline := j.deadline(); !deadline.IsZero() && expiry.After(deadline.Add(time.Second)) {
 		return errors.New("approval expiry exceeds the client deadline")
 	}
+	if j.namedRoute() {
+		if err := j.validateTargets(notification.Targets); err != nil {
+			return err
+		}
+	}
 	record := approvalRecord{
 		CardID:         notification.CardID,
 		MessageIDs:     append([]int64{}, notification.MessageIDs...),
 		Digest:         notification.Digest,
 		OperatorUserID: j.daemon.cfg.Telegram.OperatorUserID,
 		ExpiryUnixMS:   notification.ExpiryUnixMS,
+	}
+	if j.namedRoute() {
+		record.ChannelName = j.route.ChannelName
+		record.Targets = notification.Targets
+		record.OperatorUserID = 0
+		record.CardID = 0
+		record.MessageIDs = nil
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -631,6 +672,8 @@ func (j *jobRuntime) recordApproval(ctx context.Context, notification *proto.Not
 	}
 	j.mu.Lock()
 	j.pendingApproval = &approvalBinding{
+		channelName:    j.route.ChannelName,
+		targets:        append([]proto.NotificationTarget(nil), notification.Targets...),
 		digest:         notification.Digest,
 		cardID:         notification.CardID,
 		messageIDs:     append([]int64{}, notification.MessageIDs...),
@@ -654,8 +697,8 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	lapsed := pending != nil && !pending.consumed && !time.Now().Before(pending.expiry)
 	valid := j.state == store.StateAwaitingHuman && pending != nil && !pending.consumed &&
 		decision.Digest == pending.digest &&
-		decision.OperatorUserID == pending.operatorUserID &&
-		decision.MessageID == pending.cardID &&
+		j.matchesDecision(pending, decision) &&
+		(decision.Action == "approve" || decision.Action == "deny") &&
 		decision.TimeUnixMS > 0 && decision.TimeUnixMS <= pending.expiry.UnixMilli() &&
 		!lapsed
 	if !valid {
@@ -664,7 +707,10 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 			j.expireApproval(ctx)
 			return
 		}
-		j.fail("invalid decision")
+		// A stale/duplicate callback cannot cancel a committed approval.
+		if !j.namedRoute() && pending != nil && !pending.consumed {
+			j.fail("invalid decision")
+		}
 		return
 	}
 	// Consume exactly once, before any commit: a losing cancel/expiry race or
@@ -674,6 +720,18 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	j.mu.Unlock()
 
 	if action == "deny" {
+		if j.namedRoute() {
+			changed, err := j.daemon.store.CommitNamedDecision(ctx, j.uid, j.req.RequestID, *decision, time.Now().UTC())
+			if changed && err == nil {
+				j.mu.Lock()
+				j.state = store.StateDenied
+				j.mu.Unlock()
+				j.finishTerminal(store.StateDenied, store.Result{})
+			} else {
+				j.fail("commit denial")
+			}
+			return
+		}
 		if changed, _ := j.transition(ctx, store.StateAwaitingHuman, store.StateDenied); changed {
 			j.finishTerminal(store.StateDenied, store.Result{})
 		}
@@ -693,7 +751,23 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 		return
 	}
 	if j.foreground != nil {
-		j.createHandoff(ctx, pending)
+		j.createHandoff(ctx, pending, decision)
+		return
+	}
+	if j.namedRoute() {
+		changed, err := j.daemon.store.CommitNamedDecision(ctx, j.uid, j.req.RequestID, *decision, time.Now().UTC())
+		if err != nil || !changed {
+			j.fail("commit dispatch")
+			return
+		}
+		j.mu.Lock()
+		j.state = store.StateStarting
+		j.mu.Unlock()
+		if hook := j.daemon.afterCommitHook; hook != nil {
+			hook()
+		}
+		j.progress("starting", "dispatch committed")
+		j.execute(ctx)
 		return
 	}
 	// This guarded durable transition is the single dispatch boundary; it is
@@ -714,7 +788,7 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 
 // createHandoff records the human decision before atomically creating the
 // unclaimed grant. No daemon-owned executor path is reachable from here.
-func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding) {
+func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding, decision *proto.Decision) {
 	peer := j.foreground
 	evidence, err := j.daemon.ttyEvidence(peer.pid)
 	if err != nil || evidence != peer.tty {
@@ -734,10 +808,14 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 		Kind     string `json:"kind"`
 		Decision string `json:"decision"`
 		approvalRecord
+		DecidingUserID    int64 `json:"deciding_user_id,omitempty"`
+		DecidingChatID    int64 `json:"deciding_chat_id,omitempty"`
+		DecidingMessageID int64 `json:"deciding_message_id,omitempty"`
 	}{Kind: "human", Decision: "approved", approvalRecord: approvalRecord{
 		CardID: pending.cardID, MessageIDs: pending.messageIDs, Digest: pending.digest,
 		OperatorUserID: pending.operatorUserID, ExpiryUnixMS: pending.expiry.UnixMilli(),
-	}})
+		ChannelName: j.approvalChannel(pending), Targets: pending.targets,
+	}, DecidingUserID: decision.OperatorUserID, DecidingChatID: decision.ChatID, DecidingMessageID: decision.MessageID})
 	if err != nil {
 		j.fail("encode human approval")
 		return
@@ -969,6 +1047,7 @@ func (j *jobRuntime) receiveReviewOutcome(session WorkerSession) (*proto.ReviewC
 			if err := writeWorker(session, result, proto.BrokerToWorker); err != nil {
 				return nil, nil, err
 			}
+			j.recordCapturedStdinRead(*value, result)
 		case *proto.ReviewComplete:
 			return value, nil, nil
 		case *proto.ReviewUnavailable:
@@ -1029,6 +1108,15 @@ func (j *jobRuntime) execute(ctx context.Context) {
 	}
 	operation := j.operation()
 	operation.CWDFd = j.cwdFD()
+	if j.req.CapturedStdinBase64 != "" {
+		operation.Stdin, err = j.openCapturedStdin()
+		if err != nil {
+			recorder.close()
+			j.recordLaunchFailure(ctx)
+			return
+		}
+		defer operation.Stdin.Close()
+	}
 	execution, err := j.daemon.executor.Start(operation, recorder.stdout, recorder.stderr)
 	if err != nil {
 		recorder.close()
@@ -1177,6 +1265,11 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		argv = j.resolvedArgv
 	}
 	operation := proto.WorkerOperation{Mode: j.req.Mode, Argv: append([]string{}, argv...), Entry: j.req.Entry, Args: append([]string{}, j.req.Args...), CWD: j.req.CWD, Reason: j.req.Reason}
+	if j.req.CapturedStdinBase64 != "" {
+		data, _ := base64.StdEncoding.DecodeString(j.req.CapturedStdinBase64)
+		digest := sha256.Sum256(data)
+		operation.CapturedStdin = &proto.CapturedInput{Path: "stdin", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
+	}
 	if j.req.Mode == "bundle" {
 		operation.BundleDir = j.spool.bundle
 	}
@@ -1200,8 +1293,8 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
-			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.daemon.cfg.Review.MaxOutputTokens},
-			Telegram: proto.WorkerTelegram{TokenFile: j.daemon.cfg.Telegram.TokenFile, OperatorUserID: j.daemon.cfg.Telegram.OperatorUserID, ChatID: j.daemon.cfg.Telegram.ChatID, ApprovalTTLMS: j.daemon.cfg.Telegram.ApprovalTTL.Value().Milliseconds()},
+			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.daemon.cfg.Review.MaxOutputTokens, WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled},
+			Telegram: j.workerTelegram(),
 		},
 	}
 }
