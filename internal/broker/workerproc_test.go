@@ -154,11 +154,15 @@ func openWorkerFDCanary(t *testing.T) *os.File {
 }
 
 func TestWorkerHelperFDProbe(t *testing.T) {
+	// A runner setting must not override the probe's controlled runtime.
+	t.Setenv("GODEBUG", "containermaxprocs=1")
 	binary := buildWorkerHelper(t)
 	canary := openWorkerFDCanary(t)
+	wantEnv := []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir(), "LANG=C.UTF-8"}
 	for _, inherit := range []bool{false, true} {
 		t.Run(fmt.Sprintf("inherit=%t", inherit), func(t *testing.T) {
 			command := exec.Command(binary)
+			command.Env = append([]string{}, wantEnv...)
 			if inherit {
 				command.ExtraFiles = []*os.File{canary}
 			}
@@ -169,6 +173,9 @@ func TestWorkerHelperFDProbe(t *testing.T) {
 			var state helperProcessState
 			if err := json.Unmarshal(data, &state); err != nil {
 				t.Fatalf("helper output=%q: %v", data, err)
+			}
+			if strings.Join(state.Env, "\x00") != strings.Join(wantEnv, "\x00") {
+				t.Fatal("direct helper inherited the runner environment")
 			}
 			err = unexpectedWorkerFD(state)
 			if !inherit {
