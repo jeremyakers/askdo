@@ -1,7 +1,10 @@
 # Configuration reference
 
 One file: `/etc/askdo/config.json` (override with `--config`), schema
-`config_version: 4`, plus the credential files it references. Decoding is
+`config_version: 4`, plus the credential files it references. (Fleet hosts
+instead use `config_version: 5` — see [below](#fleet-host-config-version-5);
+the optional central gateway has its own separate
+[version 1 file](#gateway-server-config-version-1).) Decoding is
 strict: unknown fields are rejected at every nesting level, and
 durations are quoted Go duration strings (`"2m"`, `"30s"`). The daemon and
 `askdo config check` run the identical validation
@@ -522,3 +525,80 @@ The example above uses the legacy single-bot form. If several admins should
 decide, or different submitters should reach different bots, use the
 [named multi-channel form](#named-multi-channel-form) instead — the rest of
 this example is unchanged.
+
+## Fleet host config (version 5)
+
+**Fleet mode is implemented in source; it is not in the `v1.0.0-rc.1` release
+binaries.** A host that uses the optional shared gateway sets
+`config_version: 5` and a `fleet` object. `askdo gateway connect` writes this
+document; the rules below are what it and the daemon enforce. Mixed mode is
+rejected: a v5 file must **not** contain `telegram` or `review.models` (no
+local provider credentials or bots on a fleet host), and fleet fields are
+forbidden in a v4 file. `inspection`, `limits`, review mode/exemptions,
+auto-approval grants and preferences keep exactly their version 4 meanings
+and remain local — the gateway cannot widen them.
+
+### `fleet`
+
+| Field | Required | Default | Rules and meaning |
+|---|---|---|---|
+| `url` | yes | — | Gateway base URL. Absolute `https` only, no userinfo, query or fragment; normal hostname/certificate verification. No insecure or trust-on-first-use mode exists. |
+| `host_id` | yes | — | This host's individual enrollment identity, issued by `askdo gateway hosts add`. |
+| `enrollment_file` | yes | — | Bearer credential file for this host only. **Broker-only**: root:root, exactly `0600`. |
+| `verification_key_file` | yes | — | The gateway's **public** Ed25519 verification key (base64). Root-owned, non-writable trust file. |
+| `ca_file` | no | system roots | Additional CA for the gateway connection, explicitly supplied by the operator; same root-owned non-writable trust rule. |
+| `enrollment_bundle_files` | no | omitted | Up to 128 unique absolute clean paths of retained enrollment imports. `connect` records each source and preserves earlier paths. These are hard-protected inspection paths, not files needed for TLS or authentication; a recorded file may have been deleted. |
+| `approval_ttl` | no | `600` | **Integer seconds** (≥ 30), matching the gateway's ticket lifetime units. Note this differs from version 4 `telegram.approval_ttl`, which is a quoted Go duration string. |
+
+`enrollment_file`, `verification_key_file`, `ca_file` and every recorded
+`enrollment_bundle_files` path join the protected credential/trust paths: the
+broker hard-denies host inspection of them, including original private bundles
+outside a `credentials` directory. Other backups/copies must be explicitly
+protected by the operator; importing one file does not discover every copy.
+
+### `review.gateway_profiles`
+
+Replaces `review.models` in fleet mode: an explicit ordered selection of
+gateway profile IDs (at most 16; the gateway catalog itself is bounded at
+128). An empty array is valid with explicitly configured human-only mode or
+the existing required-mode approval-only exemptions; forced AI review still
+requires a selected model. `review.local_only`
+keeps its meaning but is enforced against the **actual upstream** each
+selected profile routes to, as declared in the signed catalog snapshot — not
+against the gateway's address: a LAN gateway fronting a cloud model is not
+local. As in version 4, `data_boundary` declarations are operator trust
+statements; askdo does not detect hidden forwarding by an upstream.
+
+The normal reviewer uses an effective output-token ceiling no higher than
+either the host's `review.max_output_tokens` or any frozen selected upstream
+limit. A host ceiling above the gateway limit does not rewrite local policy
+and does not make a legitimate review request over-budget.
+
+Example: [`examples/fleet/host-config.example.json`](../examples/fleet/host-config.example.json)
+(installed read-only at `/etc/askdo/examples/host-config.example.json`).
+
+## Gateway server config (version 1)
+
+The optional central gateway reads a separate server-only file — default
+`/etc/askdo-gateway/config.json` as written by `askdo gateway init`. It
+contains **no execution policy**. Decoding is strict (unknown/duplicate
+fields rejected at every depth). Example:
+[`examples/fleet/gateway-config.example.json`](../examples/fleet/gateway-config.example.json).
+
+| Field | Required | Default | Rules and meaning |
+|---|---|---|---|
+| `config_version` | yes | — | Must equal `1`. |
+| `listen` | yes | — | `host:port`, port 1–65535. |
+| `public_url` | yes | — | Absolute `https` URL hosts dial; no userinfo/query/fragment. |
+| `tls_cert_file` | yes | — | Operator-provisioned certificate. Root-owned, non-writable. |
+| `tls_key_file` | yes | — | Operator-provisioned key. Root:root, exactly `0600`. |
+| `signing_key_file` | yes | — | Gateway Ed25519 signing key, distinct from every host enrollment credential. Created by `gateway init` at `<config parent>/credentials/signing.seed` (the matching public key lands in `verification.pub` beside it). Root:root `0600`. |
+| `database` | yes | — | Absolute clean path of the gateway SQLite store (enrollments, ticket/delivery bookkeeping only — never host job databases or raw model conversations). `askdo gateway init` defaults it to `/var/lib/askdo-gateway/gateway.db`; an explicitly chosen custom path is the operator's own responsibility (uninstall never deletes custom paths). |
+| `profiles` | yes | — | Explicit array (empty means approval-only: human Telegram decisions, no model). At most 128 entries; each entry uses the standalone [`review.models[]`](#reviewmodels) schema. Provider credential files are root:root `0600`. |
+| `bots` | yes | — | 1–128 entries: `name` plus `token_file` (root:root `0600`). One update listener per actual bot-token identity. |
+| `channels` | yes | — | 1–128 entries: `name`, `bot`, `approval_ttl` in **integer seconds** (≥ 30), and 1–8 `recipients` of `chat_id` plus 1–8 `operator_user_ids` — the same routing model as the standalone [named channels](#named-multi-channel-form). |
+
+Gateway credential and key files are validated at load with the same
+root-ownership rules as host fleet files. Provider configuration is manual
+server-side JSON only; there is no host-side provider upload and no new admin
+UI.

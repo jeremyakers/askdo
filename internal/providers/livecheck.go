@@ -60,9 +60,24 @@ type CodexLiveToken struct {
 // refresh token) is an invalid-config failure naming the recovery command;
 // other issuer/transport refresh failures classify as transport errors.
 func CodexLivePrepare(ctx context.Context, client *codexauth.Client, path string, asRoot bool) CodexLiveToken {
+	var result CodexLiveToken
+	err := codexauth.WithTokenLock(ctx, path, func() error {
+		result = codexLivePrepareLocked(ctx, client, path, asRoot)
+		return nil
+	})
+	if err != nil {
+		return CodexLiveToken{Err: errors.Join(result.Err, fmt.Errorf("%w: prepare codex credentials: %w", ErrInvalidConfig, err))}
+	}
+	return result
+}
+
+func codexLivePrepareLocked(ctx context.Context, client *codexauth.Client, path string, asRoot bool) CodexLiveToken {
 	store, err := codexauth.Load(path)
 	if err != nil {
-		return CodexLiveToken{Err: fmt.Errorf("%w: load codex token file: %v (run `askdo auth login openai-codex` as root, and run this check as root)", ErrInvalidConfig, err)}
+		return CodexLiveToken{Err: fmt.Errorf("%w: load codex token file: %w (run `askdo auth login openai-codex` as root, and run this check as root)", ErrInvalidConfig, err)}
+	}
+	if store.RefreshPending {
+		return CodexLiveToken{Err: fmt.Errorf("%w: %w: previous codex refresh outcome is uncertain; re-login required", ErrInvalidConfig, codexauth.ErrReLoginRequired)}
 	}
 	needsRefresh := true
 	if expiry, err := codexauth.AccessTokenExpiry(store.AccessToken); err == nil && expiry.After(time.Now().Add(codexauth.RefreshWindow)) {
@@ -76,9 +91,9 @@ func CodexLivePrepare(ctx context.Context, client *codexauth.Client, path string
 	}
 	if _, err := client.RefreshIfNeeded(ctx, store, time.Now()); err != nil {
 		if errors.Is(err, codexauth.ErrReLoginRequired) {
-			return CodexLiveToken{Err: fmt.Errorf("%w: codex credentials rejected by the issuer; re-login required (run `askdo auth login openai-codex` as root): %v", ErrInvalidConfig, err)}
+			return CodexLiveToken{Err: fmt.Errorf("%w: codex credentials rejected by the issuer; re-login required (run `askdo auth login openai-codex` as root): %w", ErrInvalidConfig, err)}
 		}
-		return CodexLiveToken{Err: fmt.Errorf("%w: refresh codex access token: %v", ErrTransport, err)}
+		return CodexLiveToken{Err: fmt.Errorf("%w: refresh codex access token: %w", ErrTransport, err)}
 	}
 	return CodexLiveToken{AccessToken: store.AccessToken, AccountID: store.AccountID}
 }

@@ -26,6 +26,13 @@
 - [`review-tools.md`](review-tools.md) — six filesystem inspection tools,
   optional webfetch, the report schema, and inspection boundaries.
 
+**Optional fleet mode (implemented in source; not in the `v1.0.0-rc.1` release binaries):**
+
+- [`fleet-setup.md`](fleet-setup.md) — concrete gateway/host operations:
+  TLS, enrollment, revocation, checks, cutover and rollback.
+- [`fleet-gateway.md`](fleet-gateway.md) — the agreed design objectives and
+  boundaries the implementation follows.
+
 **Historical design context:**
 
 - [`future-foreground.md`](future-foreground.md) — superseded foreground

@@ -39,6 +39,9 @@ func (j *jobRuntime) matchesDecision(p *approvalBinding, d *proto.Decision) bool
 func (j *jobRuntime) namedRoute() bool { return j.namedTelegram }
 
 func (j *jobRuntime) workerTelegram() proto.WorkerTelegram {
+	if j.fleet != nil {
+		return proto.WorkerTelegram{}
+	}
 	projected := proto.WorkerTelegram{TokenFile: j.route.TokenFile, ApprovalTTLMS: j.route.ApprovalTTL.Value().Milliseconds()}
 	if j.namedRoute() {
 		projected.ChannelName = j.route.ChannelName

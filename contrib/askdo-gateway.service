@@ -1,0 +1,12 @@
+[Unit]
+Description=askdo fleet gateway (optional central model and Telegram approval authority)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/askdo gateway serve --config /etc/askdo-gateway/config.json
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

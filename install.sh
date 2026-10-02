@@ -105,7 +105,7 @@ fi
 if ! command -v go >/dev/null 2>&1 && [ -x /usr/local/go/bin/go ]; then PATH=$PATH:/usr/local/go/bin; fi
 command -v go >/dev/null 2>&1 || die 'Go toolchain required'
 (cd "$SRC" && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$TMP/$ASSET" ./cmd/askdo && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o "$TMP/$HELPER" ./cmd/askdo-launch) || die 'source build failed'
-for FILE in askdo-config.example.json contrib/askdo.service contrib/askdo.sudoers; do
+for FILE in askdo-config.example.json contrib/askdo.service contrib/askdo.sudoers contrib/askdo-gateway.service examples/fleet/gateway-config.example.json examples/fleet/host-config.example.json; do
   repo_file "$FILE" "$TMP/$(basename "$FILE")" || die "missing $FILE"
 done
 command -v visudo >/dev/null 2>&1 || die 'visudo required to verify effective sudoers policy'
@@ -162,6 +162,8 @@ MIGRATING=
 INSTALL_DONE=
 ROLLBACK_BINARIES=1
 SERVICE_UPDATED=
+GATEWAY_UNIT_NEW=
+EXAMPLES_NEW=
 if [ -e "$OLD_SUDOERS" ]; then
   MIGRATING=1
   install -m 0600 -o root -g root "$OLD_SUDOERS" "$TMP/rollback-policy" || die 'could not protect legacy policy'
@@ -209,6 +211,26 @@ rollback_service() {
     [ -f /etc/systemd/system/askdo.service ] && rm -f /etc/systemd/system/askdo.service || return 1
   fi
 }
+# Only assets this run installed are rolled back, and only while they still
+# byte-match the staged copies; operator edits survive a failed install.
+rollback_gateway_unit() {
+  [ "$GATEWAY_UNIT_NEW" = 1 ] || return 0
+  GW=/etc/systemd/system/askdo-gateway.service
+  [ ! -L "$GW" ] || return 1
+  if [ -e "$GW" ]; then
+    [ -f "$GW" ] && cmp -s "$GW" "$TMP/askdo-gateway.service" && rm -f "$GW" || return 1
+  fi
+}
+rollback_examples() {
+  for NAME in $EXAMPLES_NEW; do
+    F=/etc/askdo/examples/$NAME
+    [ ! -L "$F" ] || return 1
+    if [ -e "$F" ]; then
+      [ -f "$F" ] && cmp -s "$F" "$TMP/$NAME" && rm -f "$F" || return 1
+    fi
+  done
+  rmdir /etc/askdo/examples 2>/dev/null || :
+}
 finish_install() {
   RESULT=$?
   trap - EXIT
@@ -219,7 +241,11 @@ finish_install() {
     rollback_binaries || BINARIES_OK=0
     SERVICE_OK=1
     rollback_service || SERVICE_OK=0
-    if [ "$POLICY_OK" != 1 ] || [ "$BINARIES_OK" != 1 ] || [ "$SERVICE_OK" != 1 ]; then
+    GATEWAY_OK=1
+    rollback_gateway_unit || GATEWAY_OK=0
+    EXAMPLES_OK=1
+    rollback_examples || EXAMPLES_OK=0
+    if [ "$POLICY_OK" != 1 ] || [ "$BINARIES_OK" != 1 ] || [ "$SERVICE_OK" != 1 ] || [ "$GATEWAY_OK" != 1 ] || [ "$EXAMPLES_OK" != 1 ]; then
       printf 'install.sh: ERROR: rollback incomplete; protected originals retained in %s; inspect policy and binaries manually\n' "$TMP" >&2
       exit 1
     fi
@@ -270,6 +296,29 @@ if [ -e "$OLD_SUDOERS" ]; then
 fi
 SERVICE_UPDATED=1
 install -m 0644 -o root -g root "$TMP/askdo.service" /etc/systemd/system/askdo.service || die 'service unit installation failed'
+# Optional fleet gateway unit: installed inert like askdo.service (never
+# enabled or started), but never overwrites a differing operator unit.
+GWUNIT=/etc/systemd/system/askdo-gateway.service
+if [ -e "$GWUNIT" ] || [ -L "$GWUNIT" ]; then
+  [ ! -L "$GWUNIT" ] && [ -f "$GWUNIT" ] &&
+    [ "$(stat -c %a:%u:%g "$GWUNIT")" = 644:0:0 ] || die 'unsafe existing gateway unit'
+  cmp -s "$GWUNIT" "$TMP/askdo-gateway.service" || die 'existing askdo-gateway.service differs; refusing to overwrite'
+else
+  install -m 0644 -o root -g root "$TMP/askdo-gateway.service" "$GWUNIT" || die 'gateway unit installation failed'
+  GATEWAY_UNIT_NEW=1
+fi
+# Read-only fleet configuration examples; a differing operator copy is kept.
+install -d -m 0755 -o root -g root /etc/askdo/examples
+for NAME in gateway-config.example.json host-config.example.json; do
+  F=/etc/askdo/examples/$NAME
+  if [ -e "$F" ] || [ -L "$F" ]; then
+    if [ -f "$F" ] && [ ! -L "$F" ] && cmp -s "$F" "$TMP/$NAME"; then continue; fi
+    printf 'install.sh: WARNING: preserving existing %s (differs from shipped example)\n' "$F" >&2
+    continue
+  fi
+  install -m 0444 -o root -g root "$TMP/$NAME" "$F" || die "example install failed: $NAME"
+  EXAMPLES_NEW="$EXAMPLES_NEW $NAME"
+done
 if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || :; fi
 INSTALL_DONE=1
 if [ "$MIGRATING" = 1 ]; then
@@ -287,6 +336,6 @@ if [ "$MIGRATING" = 1 ]; then
     printf 'WARNING: could not enumerate askdo-foreground group; no group deletion attempted\n' >&2
   fi
 fi
-printf 'askdo installed; service was NOT enabled or started. Configure /etc/askdo/config.json, then explicitly enable askdo.service.\n'
+printf 'askdo installed; service was NOT enabled or started. Configure /etc/askdo/config.json, then explicitly enable askdo.service. Optional fleet gateway: read-only examples in /etc/askdo/examples; askdo-gateway.service installed but NOT enabled or started; no gateway keys or credentials were created.\n'
 
 # askdo install.sh end-of-file

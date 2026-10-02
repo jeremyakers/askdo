@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/codexauth"
+	"github.com/jeremyakers/askdo/internal/operator"
 )
 
 // defaultCredentialsDir holds the broker-only credential files, including the
@@ -45,6 +47,7 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("auth "+sub, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	credDir := flags.String("credentials-dir", defaultCredentialsDir, "directory holding the provider credential files")
+	tokenFile := flags.String("token-file", "", "explicit root-private Codex token path (central gateway credentials)")
 	// Accept flags and the optional positional provider in any order (the
 	// stdlib flag package alone stops at the first positional).
 	var positional []string
@@ -72,6 +75,18 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	path := filepath.Join(*credDir, codexCredentialsFile)
+	if *tokenFile != "" {
+		if !filepath.IsAbs(*tokenFile) || filepath.Clean(*tokenFile) != *tokenFile {
+			fmt.Fprintln(stderr, "auth: --token-file must be an absolute clean path")
+			return 125
+		}
+		if err := operator.TrustedDirectory(filepath.Dir(*tokenFile), false); err != nil {
+			fmt.Fprintln(stderr, "auth: unsafe token parent:", err)
+			return 125
+		}
+		path = *tokenFile
+		*credDir = filepath.Dir(path)
+	}
 	switch sub {
 	case "login":
 		return authLogin(path, *credDir, stdout, stderr)
@@ -96,7 +111,18 @@ func authLogin(path, credDir string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "credentials directory not ready: %v\ninstall it with:\n  install -d -m 0750 -o root -g askdo-review %s\n", err, credDir)
 		return 125
 	}
-	set, err := newCodexClient().Login(context.Background(), func(auth codexauth.DeviceAuth) {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	code := 1
+	if err := codexauth.WithTokenLock(ctx, path, func() error { code = authLoginLocked(ctx, path, stdout, stderr); return nil }); err != nil {
+		fmt.Fprintln(stderr, "auth login:", err)
+		return 1
+	}
+	return code
+}
+
+func authLoginLocked(ctx context.Context, path string, stdout, stderr io.Writer) int {
+	set, err := newCodexClient().Login(ctx, func(auth codexauth.DeviceAuth) {
 		fmt.Fprintf(stdout, "\nTo authorize askdo with your ChatGPT account:\n\n  1. Open %s\n  2. Enter code:  %s\n\nWaiting for authorization (device code expires after 15 minutes)...\n", auth.VerificationURL, auth.UserCode)
 	})
 	if err != nil {
@@ -134,6 +160,9 @@ func authStatus(path string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "provider:      openai-codex\n")
 	fmt.Fprintf(stdout, "account:       %s\n", store.AccountID)
+	if store.RefreshPending {
+		fmt.Fprintln(stdout, "refresh:       previous outcome uncertain; re-login required")
+	}
 	if expiry, err := codexauth.AccessTokenExpiry(store.AccessToken); err != nil {
 		fmt.Fprintf(stdout, "access token:  expiry unknown (%v)\n", err)
 	} else {
@@ -153,12 +182,27 @@ func authStatus(path string, stdout, stderr io.Writer) int {
 // authLogout revokes the refresh token best-effort and removes the credential
 // file. Revocation failure is a warning; local logout proceeds regardless.
 func authLogout(path string, stdout, stderr io.Writer) int {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	code := 1
+	if err := codexauth.WithTokenLock(ctx, path, func() error { code = authLogoutLocked(ctx, path, stdout, stderr); return nil }); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stdout, "openai-codex: already logged out (no credential file at %s)\n", path)
+			return 0
+		}
+		fmt.Fprintln(stderr, "auth logout:", err)
+		return 1
+	}
+	return code
+}
+
+func authLogoutLocked(ctx context.Context, path string, stdout, stderr io.Writer) int {
 	store, err := codexauth.Load(path)
 	if err != nil && !codexauth.IsNotExist(err) {
 		fmt.Fprintf(stderr, "auth logout: read credentials: %v (continuing with local removal)\n", err)
 	}
 	if store != nil && store.RefreshToken != "" {
-		if err := newCodexClient().Revoke(context.Background(), store.RefreshToken); err != nil {
+		if err := newCodexClient().Revoke(ctx, store.RefreshToken); err != nil {
 			fmt.Fprintf(stderr, "warning: token revocation failed (continuing): %v\n", err)
 		}
 	}

@@ -1,0 +1,29 @@
+{
+  "config_version": 5,
+  "inspection": {
+    "read_roots": ["/usr/bin", "/usr/local/bin"],
+    "deny_paths": []
+  },
+  "review": {
+    "mode": "required",
+    "local_only": true,
+    "gateway_profiles": ["local"],
+    "request_timeout": "2m",
+    "total_timeout": "20m",
+    "max_model_calls_per_attempt": 32,
+    "max_output_tokens": 8192
+  },
+  "limits": {
+    "max_inspected_files": 256,
+    "max_inspected_bytes": 8388608,
+    "max_log_bytes_per_stream": 33554432
+  },
+  "fleet": {
+    "url": "https://gateway.example.com:8443",
+    "host_id": "<host_id from: askdo gateway hosts add>",
+    "enrollment_file": "/etc/askdo/credentials/fleet-enrollment",
+    "verification_key_file": "/etc/askdo/fleet-verify.key",
+    "ca_file": "/etc/askdo/fleet-ca.crt",
+    "approval_ttl": 600
+  }
+}

@@ -384,6 +384,44 @@ The broker could not freeze the review; the job fails.
 | `code` | enum `"invalid_report"` \| `"evidence_changed"` \| `"broker_error"` |
 | `reason` | string ≤ 512 |
 
+### `model_turn_request` (W→B) — fleet mode only
+
+*Implemented in source; not in the `v1.0.0-rc.1` release binaries.*
+
+In fleet mode the worker holds no provider, OAuth, enrollment, Telegram or
+signing secrets, so its model traffic is mediated by the root broker through
+correlated frames on this private pipe. One ordered turn per message; the
+broker owns the network attempt/turn binding, enforces sequence, budget, the
+selected model, the output bound and the fixed tool registry.
+
+| Field | Type — bounds |
+|---|---|
+| `type` | `"model_turn_request"` |
+| `request_seq` | uint64 ≥ 1, strictly increasing across all choices on this pipe |
+| `choice_name` | string ≤ 128; immutable bootstrap choice name |
+| `request` | typed model request: `model` (≤ 256), `max_output_tokens` 1–200000, 1–4096 typed `messages` (`system`/`user`/`assistant`/`tool`; tool messages carry `tool_call_id` ≤ 256), 1–32 tool definitions (name ≤ 128, description ≤ 16384, JSON schema ≤ 65536) |
+
+### `model_turn_result` (B→W) — fleet mode only
+
+Exactly one variant per request. A `failure` carries only a closed,
+secret-free code (`auth`, `gateway_transport`, `signature`, `protocol`,
+`session`, `revision`, `revoked`, `expired`, `delivery`, `safety`,
+`upstream_quota_rate`, `upstream_transport`, `upstream_timeout`,
+`upstream_invalid_config`, `upstream_malformed_wire`,
+`upstream_codex_relogin`) so infrastructure failures can never masquerade as
+ordinary provider exhaustion.
+
+| Field | Type — bounds |
+|---|---|
+| `type` | `"model_turn_result"` |
+| `request_seq` | uint64 matching an outstanding request |
+| `response` | typed model response (exactly one of `response`/`failure`) |
+| `failure` | `{ "code": <enum above> }` |
+
+No pipe message can mint or substitute a fleet approval: these frames carry
+model turns only, never notification or decision authority. Direct (non-fleet)
+mode does not use them, and its frames remain unchanged.
+
 ### `notification_sent` (W→B)
 
 Binds the completed Telegram approval card to the frozen manifest. Sent
@@ -527,3 +565,8 @@ the honest `expired` state when the recorded expiry has passed.
 - **Correlation.** `inspect_result.request_seq` must match an outstanding
   request; `notification_sent.digest` and `decision.digest` must equal the
   digest the broker itself froze. Anything else fails the job closed.
+- **Fleet mode carries no Telegram authority on this pipe.** A fleet worker
+  never receives `frozen`-followed notification/decision exchanges: after the
+  frozen review it exits cleanly and the root broker performs gateway ticket
+  submission, signed-receipt/decision verification and dispatch itself. A
+  worker claiming a fleet decision or receipt is rejected.

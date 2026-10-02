@@ -68,10 +68,16 @@ func (j *jobRuntime) projectModelsWithFailures(ctx context.Context) ([]proto.Pro
 		// The token file is broker-only config: it is not projected, so the
 		// reviewer never learns even its path.
 		projected.APIKeyFile = ""
-		store, err := codexauth.Load(model.APIKeyFile)
-		if err == nil {
+		var store *codexauth.TokenStore
+		err := codexauth.WithTokenLock(ctx, model.APIKeyFile, func() error {
+			var err error
+			store, err = codexauth.Load(model.APIKeyFile)
+			if err != nil {
+				return err
+			}
 			_, err = j.daemon.codex.RefreshIfNeeded(ctx, store, time.Now())
-		}
+			return err
+		})
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()

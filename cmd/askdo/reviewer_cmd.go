@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -58,6 +60,8 @@ func runReviewer(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
 // wizard prompt. No secret ever travels in argv: keys come from --key-file
 // or the hidden prompt.
 type reviewerWizardFlags struct {
+	ctx        context.Context
+	commit     *operator.Commit
 	configPath string
 	credDir    string
 	provider   string
@@ -100,7 +104,7 @@ type reviewerWizardResult struct {
 }
 
 // reviewerAdd implements `askdo reviewer add [<name>]`.
-func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
+func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) (exitCode int) {
 	fs := flag.NewFlagSet("reviewer add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var fl reviewerWizardFlags
@@ -128,6 +132,16 @@ func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
 		printNameTaken(stderr, fl.name)
 		return 1
 	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	commit := new(operator.Commit)
+	fl.ctx, fl.commit = ctx, commit
+	defer func() {
+		if err := commit.Rollback(); err != nil {
+			fmt.Fprintln(stderr, "reviewer add: credential cleanup:", err)
+			exitCode = 1
+		}
+	}()
 	res, err := runReviewerWizard(prompt.New(r, stderr), fl, nil, stdout, stderr)
 	if err != nil {
 		return wizardError("reviewer add", err, stderr)
@@ -136,7 +150,6 @@ func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
 		printNameTaken(stderr, res.entry.Name)
 		return 1
 	}
-	commit := new(operator.Commit)
 	if res.credPath != "" {
 		if err := commit.WriteCredential(filepath.Dir(res.credPath), filepath.Base(res.credPath), res.credData, res.credKind, res.credForce); err != nil {
 			fmt.Fprintf(stderr, "reviewer add: write credential: %v\n", err)
@@ -145,11 +158,14 @@ func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
 	}
 	store.Config().Review.Models = append(store.Config().Review.Models, res.entry)
 	if err := store.Save(operator.SectionReview); err != nil {
-		_ = commit.Rollback()
+		err = errors.Join(err, commit.Rollback())
 		fmt.Fprintf(stderr, "reviewer add: save config: %v\n(any credential file created by this run was removed; the config was not written)\n", err)
 		return 1
 	}
-	commit.Success()
+	if err := commit.Success(); err != nil {
+		fmt.Fprintln(stderr, "reviewer add: release credentials:", err)
+		return 1
+	}
 	position := len(store.Config().Review.Models)
 	if position == 1 {
 		fmt.Fprintf(stdout, "added reviewer %q (api %s, model %s, boundary %s) as primary reviewer\n",
@@ -171,7 +187,7 @@ func printNameTaken(stderr io.Writer, name string) {
 // reviewerEdit implements `askdo reviewer edit <name>`: the same wizard
 // with current values as defaults; empty answers keep the current values.
 // The name is the entry's identity and cannot be changed here.
-func reviewerEdit(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
+func reviewerEdit(args []string, r prompt.Reader, stdout, stderr io.Writer) (exitCode int) {
 	fs := flag.NewFlagSet("reviewer edit", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var fl reviewerWizardFlags
@@ -199,12 +215,21 @@ func reviewerEdit(args []string, r prompt.Reader, stdout, stderr io.Writer) int 
 		return 1
 	}
 	existing := models[idx]
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	commit := new(operator.Commit)
+	fl.ctx, fl.commit = ctx, commit
+	defer func() {
+		if err := commit.Rollback(); err != nil {
+			fmt.Fprintln(stderr, "reviewer edit: credential cleanup:", err)
+			exitCode = 1
+		}
+	}()
 	res, err := runReviewerWizard(prompt.New(r, stderr), fl, &existing, stdout, stderr)
 	if err != nil {
 		return wizardError("reviewer edit", err, stderr)
 	}
 	res.entry.Name = existing.Name // rename is not an edit operation
-	commit := new(operator.Commit)
 	if res.credPath != "" {
 		if err := commit.WriteCredential(filepath.Dir(res.credPath), filepath.Base(res.credPath), res.credData, res.credKind, res.credForce); err != nil {
 			fmt.Fprintf(stderr, "reviewer edit: write credential: %v\n", err)
@@ -213,11 +238,14 @@ func reviewerEdit(args []string, r prompt.Reader, stdout, stderr io.Writer) int 
 	}
 	store.Config().Review.Models[idx] = res.entry
 	if err := store.Save(operator.SectionReview); err != nil {
-		_ = commit.Rollback()
+		err = errors.Join(err, commit.Rollback())
 		fmt.Fprintf(stderr, "reviewer edit: save config: %v\n(the config was not written)\n", err)
 		return 1
 	}
-	commit.Success()
+	if err := commit.Success(); err != nil {
+		fmt.Fprintln(stderr, "reviewer edit: release credentials:", err)
+		return 1
+	}
 	fmt.Fprintf(stdout, "updated reviewer %q (api %s, model %s, boundary %s)\n", res.entry.Name, res.entry.API, res.entry.Model, res.entry.DataBoundary)
 	return 0
 }
@@ -277,7 +305,16 @@ func reviewerDelete(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "deleted reviewer %q\n", entry.Name)
 	if *deleteKey && entry.APIKeyFile != "" {
-		if err := os.Remove(entry.APIKeyFile); err != nil {
+		remove := func() error { return os.Remove(entry.APIKeyFile) }
+		var err error
+		if entry.API == "openai_codex" {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			err = codexauth.WithTokenLock(ctx, entry.APIKeyFile, remove)
+			cancel()
+		} else {
+			err = remove()
+		}
+		if err != nil {
 			fmt.Fprintf(stderr, "warning: remove credential %s: %v\n", entry.APIKeyFile, err)
 		} else {
 			fmt.Fprintf(stdout, "removed credential %s\n", entry.APIKeyFile)
@@ -681,6 +718,12 @@ func codexCredential(p *prompt.Prompt, fl reviewerWizardFlags, existing *config.
 	if existing != nil && existing.APIKeyFile != "" {
 		tokenPath = existing.APIKeyFile
 	}
+	if fl.commit == nil || fl.ctx == nil {
+		return res, identity, errors.New("codex credential requires an operator transaction")
+	}
+	if err := fl.commit.LockCodex(fl.ctx, tokenPath); err != nil {
+		return res, identity, err
+	}
 	_, statErr := os.Stat(tokenPath)
 	exists := statErr == nil
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -699,10 +742,13 @@ func codexCredential(p *prompt.Prompt, fl reviewerWizardFlags, existing *config.
 		if err != nil {
 			return res, identity, fmt.Errorf("load existing codex login %s: %w", tokenPath, err)
 		}
+		if set.RefreshPending {
+			return res, identity, fmt.Errorf("%w: previous codex refresh outcome is uncertain", codexauth.ErrReLoginRequired)
+		}
 		identity.accessToken = set.AccessToken
 		identity.accountID = set.AccountID
 	} else {
-		set, err := newCodexClient().Login(context.Background(), func(auth codexauth.DeviceAuth) {
+		set, err := newCodexClient().Login(fl.ctx, func(auth codexauth.DeviceAuth) {
 			fmt.Fprintf(stdout, "\nTo authorize askdo with your ChatGPT account:\n\n  1. Open %s\n  2. Enter code:  %s\n\nWaiting for authorization (device code expires after 15 minutes)...\n", auth.VerificationURL, auth.UserCode)
 		})
 		if err != nil {

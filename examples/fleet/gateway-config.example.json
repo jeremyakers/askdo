@@ -1,0 +1,35 @@
+{
+  "config_version": 1,
+  "listen": "0.0.0.0:8443",
+  "public_url": "https://gateway.example.com:8443",
+  "tls_cert_file": "/etc/askdo-gateway/tls.crt",
+  "tls_key_file": "/etc/askdo-gateway/tls.key",
+  "signing_key_file": "/etc/askdo-gateway/credentials/signing.seed",
+  "database": "/var/lib/askdo-gateway/gateway.db",
+  "profiles": [
+    {
+      "name": "local",
+      "api": "openai_chat",
+      "base_url": "http://192.0.2.10:11434/v1",
+      "model": "<your-local-model-id>",
+      "data_boundary": "local",
+      "request_timeout": "5m"
+    }
+  ],
+  "bots": [
+    {
+      "name": "ops",
+      "token_file": "/etc/askdo-gateway/credentials/telegram-ops.token"
+    }
+  ],
+  "channels": [
+    {
+      "name": "ops",
+      "bot": "ops",
+      "approval_ttl": 600,
+      "recipients": [
+        { "chat_id": 111111111, "operator_user_ids": [100111, 100222] }
+      ]
+    }
+  ]
+}

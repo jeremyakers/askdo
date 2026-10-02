@@ -34,6 +34,9 @@ for arch in amd64 arm64; do
     (cd "$OUT" && sha256sum -c --status "$asset.sha256")
     readelf -h "$OUT/$asset" | grep -F "Machine:                           $machine" >/dev/null
     go version -m "$OUT/$asset" | grep -F 'CGO_ENABLED=0' >/dev/null
+    if go version -m "$OUT/$asset" | grep -F 'askdo_fleet_fixture' >/dev/null; then
+      echo "release asset carries the test-only fleet fixture tag: $asset" >&2; exit 1;
+    fi
     echo "verified $asset $asset.sha256"
   done
 done

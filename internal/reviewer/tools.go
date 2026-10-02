@@ -9,22 +9,15 @@ import (
 	"regexp"
 	"sync"
 
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
 // ToolDefinition describes one fixed model-visible function tool.
-type ToolDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Schema      json.RawMessage `json:"parameters"`
-}
+type ToolDefinition = modelwire.ToolDefinition
 
 // ToolCall is one provider-normalized model tool call.
-type ToolCall struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
+type ToolCall = modelwire.ToolCall
 
 // ToolResult is returned to the model under the matching CallID.
 type ToolResult struct {
@@ -39,18 +32,29 @@ type BrokerClient interface {
 }
 
 type asyncBroker struct {
-	writer     io.Writer
-	writeMu    sync.Mutex
-	requestMu  sync.Mutex
-	tracker    proto.RequestTracker
-	results    chan proto.InspectResult
-	terminals  chan any
-	readErrors chan error
+	modelMu      sync.Mutex
+	modelSeq     uint64
+	modelWaiters map[uint64]chan proto.ModelTurnResult
+	modelClosed  bool
+	writer       io.Writer
+	writeMu      sync.Mutex
+	requestMu    sync.Mutex
+	tracker      proto.RequestTracker
+	results      chan proto.InspectResult
+	terminals    chan any
+	readErrors   chan error
 }
 
 func newAsyncBroker(ctx context.Context, reader io.Reader, writer io.Writer, cancel context.CancelCauseFunc) *asyncBroker {
-	client := &asyncBroker{writer: writer, results: make(chan proto.InspectResult, 1), terminals: make(chan any, 1), readErrors: make(chan error, 1)}
+	client := &asyncBroker{writer: writer, modelWaiters: make(map[uint64]chan proto.ModelTurnResult), results: make(chan proto.InspectResult, 1), terminals: make(chan any, 1), readErrors: make(chan error, 1)}
 	go func() {
+		stop := context.AfterFunc(ctx, func() {
+			if closer, ok := reader.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		})
+		defer stop()
+		defer client.closeModelWaiters()
 		for {
 			body, err := proto.ReadFrame(reader, proto.MaxFrameLength)
 			if err != nil {
@@ -71,6 +75,11 @@ func newAsyncBroker(ctx context.Context, reader io.Reader, writer io.Writer, can
 				return
 			}
 			switch value := message.(type) {
+			case *proto.ModelTurnResult:
+				if err := client.deliverModelResult(*value); err != nil {
+					cancel(err)
+					return
+				}
 			case *proto.InspectResult:
 				select {
 				case client.results <- *value:
@@ -78,6 +87,7 @@ func newAsyncBroker(ctx context.Context, reader io.Reader, writer io.Writer, can
 					return
 				}
 			case *proto.Cancel:
+				client.closeModelWaiters()
 				select {
 				case client.terminals <- value:
 				default:
@@ -85,6 +95,7 @@ func newAsyncBroker(ctx context.Context, reader io.Reader, writer io.Writer, can
 				cancel(fmt.Errorf("review cancelled: %s", value.Reason))
 				return
 			case *proto.Frozen, *proto.ApprovalOnlyFrozen, *proto.ReviewRejected:
+				client.closeModelWaiters()
 				select {
 				case client.terminals <- value:
 				case <-ctx.Done():

@@ -140,6 +140,57 @@ func TestCodexLivePrepare(t *testing.T) {
 	})
 }
 
+func TestCodexLivePrepareConcurrentSingleRefresh(t *testing.T) {
+	// Given sixteen live checks sharing a rotating credential file.
+	rotated := liveMintJWT(t, map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
+	client, calls := liveIssuer(t, 200, rotated)
+	path := liveTokenFile(t, codexauth.TokenSet{AccessToken: liveMintJWT(t, map[string]any{"exp": time.Now().Unix()}), RefreshToken: "old"})
+	start := make(chan struct{})
+	results := make(chan CodexLiveToken, 16)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for range 16 {
+		go func() { <-start; results <- CodexLivePrepare(ctx, client, path, true) }()
+	}
+	close(start)
+	// When the checks run concurrently, each must load after acquiring ownership.
+	for range 16 {
+		result := <-results
+		if result.Err != nil {
+			t.Fatal(result.Err)
+		}
+		if result.AccessToken != rotated {
+			t.Fatal("stale access token projected")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("refresh calls=%d, want one", calls.Load())
+	}
+	stored, err := codexauth.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.RefreshToken != "rt-rotated" || stored.RefreshPending {
+		t.Fatal("rotation not committed")
+	}
+}
+
+func TestCodexLivePrepareUncertainRefreshNeverReusesOldToken(t *testing.T) {
+	client, calls := liveIssuer(t, 500, "")
+	path := liveTokenFile(t, codexauth.TokenSet{AccessToken: liveMintJWT(t, map[string]any{"exp": time.Now().Unix()}), RefreshToken: "old"})
+	first := CodexLivePrepare(context.Background(), client, path, true)
+	if !errors.Is(first.Err, ErrTransport) || first.AccessToken != "" {
+		t.Fatalf("first result: %v", first.Err)
+	}
+	second := CodexLivePrepare(context.Background(), client, path, true)
+	if !errors.Is(second.Err, codexauth.ErrReLoginRequired) || second.AccessToken != "" {
+		t.Fatalf("second result: %v", second.Err)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("uncertain one-time token retried")
+	}
+}
+
 // TestLiveCheckCodexPaths pins the `config check --live` codex behavior:
 // prepare failures surface as classified per-model lines without any network
 // call against the backend, and a model with no prepared token fails

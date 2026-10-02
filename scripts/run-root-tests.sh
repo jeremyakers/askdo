@@ -7,6 +7,8 @@
 # identity. Only the source tree is mounted from the host, read-only; the bind
 # mount inspection test requires CAP_SYS_ADMIN and an unrestricted mount syscall.
 # Nothing is installed on the host.
+# The test-only askdo_fleet_fixture tag enables loopback Telegram wire injection
+# and includes every RootFleet case by default; normal builds have no such hook.
 #
 # Usage: scripts/run-root-tests.sh [extra go test args...]
 set -eu
@@ -25,5 +27,5 @@ exec docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
 		useradd -r -g askdo-review -s /usr/sbin/nologin askdo-review
 		# Disposable login for UID-bound auto-approval grants; no host accounts change.
 		useradd -u 1000 -g askdo -M -s /usr/sbin/nologin askdo-grantee
-		go test -race -count=1 -run "TestRoot|TestProcessWorkerBoundary" -v ./internal/broker ./internal/inspection "$@"
+		go test -race -tags askdo_fleet_fixture -shuffle=on -count=1 -timeout=300s -run "TestRoot|TestProcessWorkerBoundary" -v ./internal/broker ./internal/inspection "$@"
 	' -- "$@"

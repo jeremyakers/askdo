@@ -1,13 +1,70 @@
 package operator
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jeremyakers/askdo/internal/codexauth"
 )
+
+func TestCodexCommitOwnsSnapshotWriteAndRollback(t *testing.T) {
+	for _, success := range []bool{false, true} {
+		t.Run(map[bool]string{false: "rollback", true: "commit"}[success], func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "codex.json")
+			c := new(Commit)
+			if err := c.LockCodex(context.Background(), path); err != nil {
+				t.Fatal(err)
+			}
+			defer c.Rollback()
+			alias := filepath.Join(t.TempDir(), "alias")
+			if err := os.Symlink(dir, alias); err != nil {
+				t.Fatal(err)
+			}
+			ctxAlias, cancelAlias := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			if err := c.LockCodex(ctxAlias, filepath.Join(alias, "codex.json")); err != nil {
+				cancelAlias()
+				t.Fatal("nested alias lock:", err)
+			}
+			cancelAlias()
+			// Given ownership before the first snapshot, a new file can be
+			// atomically installed without reacquiring our own flock.
+			if err := c.WriteCredential(dir, "codex.json", []byte(`{"access_token":"fixture"}`), CredentialCodexToken, false); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			err := codexauth.WithTokenLock(ctx, path, func() error { t.Fatal("transaction released lock before finalization"); return nil })
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal(err)
+			}
+			if success {
+				err = c.Success()
+			} else {
+				err = c.Rollback()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := codexauth.WithTokenLock(context.Background(), path, func() error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			_, err = os.Stat(path)
+			if success && err != nil {
+				t.Fatal(err)
+			}
+			if !success && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rollback left created credential: %v", err)
+			}
+		})
+	}
+}
 
 // stubGroup replaces the askdo-review group lookup; gid of "42".
 func stubGroup(t *testing.T, lookupErr error) {

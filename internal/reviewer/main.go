@@ -66,12 +66,17 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 	if err != nil {
 		return err
 	}
-	if factory == nil && !bootstrap.ApprovalOnly {
+	if factory == nil && !bootstrap.ApprovalOnly && !bootstrap.FleetMode {
 		return errors.New("no reviewer model provider factory is configured")
 	}
 	reviewCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	broker := newAsyncBroker(reviewCtx, in, out, cancel)
+	if bootstrap.FleetMode {
+		factory = func(choice proto.ProjectedModel) (ModelTurn, error) {
+			return &pipeModel{broker: broker, choice: choice, maxOutputTokens: bootstrap.ConfigProjection.Limits.MaxOutputTokens}, nil
+		}
+	}
 	if bootstrap.ApprovalOnly {
 		terminal, err := waitTerminal(reviewCtx, broker)
 		if err != nil {
@@ -79,6 +84,9 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 		}
 		switch value := terminal.(type) {
 		case *proto.ApprovalOnlyFrozen:
+			if bootstrap.FleetMode {
+				return nil
+			}
 			return notifyAvailabilityApproval(reviewCtx, broker, *bootstrap, value, bootstrap.PreflightFailures)
 		case *proto.ReviewRejected:
 			return fmt.Errorf("review rejected (%s): %s", value.Code, value.Reason)
@@ -110,6 +118,9 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 		}
 		switch value := terminal.(type) {
 		case *proto.ApprovalOnlyFrozen:
+			if bootstrap.FleetMode {
+				return nil
+			}
 			return notifyAvailabilityApproval(reviewCtx, broker, *bootstrap, value, failures)
 		case *proto.ReviewRejected:
 			return fmt.Errorf("review rejected (%s): %s", value.Code, value.Reason)
@@ -125,6 +136,9 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 	}
 	switch value := terminal.(type) {
 	case *proto.Frozen:
+		if bootstrap.FleetMode {
+			return nil
+		}
 		// The broker froze the manifest; run the design §9 Telegram
 		// notify/decide stage before this worker exits.
 		if value.AutoApproval != nil {
@@ -163,9 +177,24 @@ func waitTerminal(reviewCtx context.Context, broker *asyncBroker) (any, error) {
 	select {
 	case terminal := <-broker.terminals:
 		return terminal, nil
+	default:
+	}
+	select {
+	case terminal := <-broker.terminals:
+		return terminal, nil
 	case err := <-broker.readErrors:
+		select {
+		case terminal := <-broker.terminals:
+			return terminal, nil
+		default:
+		}
 		return nil, err
 	case <-reviewCtx.Done():
+		select {
+		case terminal := <-broker.terminals:
+			return terminal, nil
+		default:
+		}
 		return nil, context.Cause(reviewCtx)
 	}
 }
@@ -205,6 +234,9 @@ func MainWithFactory(ctx context.Context, args []string, in io.Reader, out, stde
 }
 
 func requiredBootstrap(bootstrap proto.Bootstrap) error {
+	if err := proto.ValidateFleetBootstrap(bootstrap); err != nil {
+		return err
+	}
 	if bootstrap.Host == "" || bootstrap.RequestID == "" || bootstrap.Operation.Mode == "" || (len(bootstrap.ConfigProjection.Models) == 0 && !bootstrap.ApprovalOnly) {
 		return errors.New("bootstrap is missing required fields")
 	}
@@ -214,7 +246,7 @@ func requiredBootstrap(bootstrap proto.Bootstrap) error {
 		}
 	}
 	tg := bootstrap.ConfigProjection.Telegram
-	if tg.TokenFile == "" || (tg.ChannelName == "" && (tg.OperatorUserID <= 0 || tg.ChatID == 0)) || (tg.ChannelName != "" && len(tg.Recipients) == 0) {
+	if !bootstrap.FleetMode && (tg.TokenFile == "" || (tg.ChannelName == "" && (tg.OperatorUserID <= 0 || tg.ChatID == 0)) || (tg.ChannelName != "" && len(tg.Recipients) == 0)) {
 		return errors.New("bootstrap contains incomplete Telegram configuration")
 	}
 	if time.UnixMilli(bootstrap.ReviewDeadlineUnixMS).Before(time.Now()) {
