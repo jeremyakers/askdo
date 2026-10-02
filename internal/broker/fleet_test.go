@@ -2,12 +2,20 @@ package broker
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +27,109 @@ import (
 	"github.com/jeremyakers/askdo/internal/reviewer"
 	"github.com/jeremyakers/askdo/internal/store"
 )
+
+func TestRootFleetPrepareHumanOnlySelection(t *testing.T) {
+	requireRootTest(t)
+	for _, tc := range []struct {
+		name         string
+		missing      bool
+		external     bool
+		approvalOnly bool
+		wantCode     fleetproto.ErrorCode
+	}{
+		{"human_missing", true, false, true, ""},
+		{"human_external", false, true, true, ""},
+		{"human_local", false, false, true, ""},
+		{"required_missing", true, false, false, fleetproto.ErrCodeRevision},
+		{"required_external", false, true, false, fleetproto.ErrCodeSafety},
+		{"required_local", false, false, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given authenticated signed metadata and a configured profile, when
+			// root prepares the job, then only review-required jobs select models.
+			j, _ := fleetTurnFixture()
+			profiles := j.fleet.selection.Profiles
+			if tc.missing {
+				profiles = []fleetproto.ProfileMetadata{}
+			} else if tc.external {
+				profiles[0].Upstreams[0].DataBoundary = fleetproto.External
+				profiles[0].Revision, _ = fleetproto.HashProfile(profiles[0])
+			}
+			route := fleetproto.RouteSnapshot{Version: 1, Kind: fleetproto.KindRoute, ChannelID: "ops", BotID: 42, TTLSeconds: 60, Recipients: []fleetproto.Recipient{{ChatID: 11, OperatorUserIDs: []int64{101}}}}
+			route.Revision, _ = fleetproto.HashRoute(route)
+			catalog := fleetproto.Catalog{Version: 1, Kind: fleetproto.KindCatalog, HostID: "host", SubmitterUID: 0, Profiles: profiles, Route: route, ExpiresAt: time.Now().Add(time.Minute).Unix()}
+			pub, key, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bearer := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+			var otherCalls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/catalog" {
+					otherCalls.Add(1)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.Header.Get("X-Askdo-Host") != "host" || r.Header.Get("Authorization") != "Bearer "+bearer || r.URL.Query().Get("submitter_uid") != "0" {
+					t.Error("catalogue authentication or root UID missing")
+				}
+				wire, err := fleetproto.Sign(key, catalog)
+				if err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write(wire)
+			}))
+			t.Cleanup(server.Close)
+			root := t.TempDir()
+			j.daemon.store, err = store.Open(filepath.Join(root, "jobs.sqlite3"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { j.daemon.store.Close() })
+			write := func(name string, data []byte, mode os.FileMode) string {
+				path := filepath.Join(root, name)
+				if err := os.WriteFile(path, data, mode); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}
+			j.daemon.cfg.Fleet = &config.FleetConfig{URL: server.URL, HostID: "host", EnrollmentFile: write("enrollment", []byte(bearer), 0600), VerificationKeyFile: write("verify", []byte(base64.StdEncoding.EncodeToString(pub)), 0400), CAFile: write("ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0400), ApprovalTTL: 60}
+			j.daemon.cfg.Review.GatewayProfiles = []string{"local"}
+			j.daemon.cfg.Review.LocalOnly = true
+			j.daemon.cfg.Review.TotalTimeout = config.Duration(time.Minute)
+			j.daemon.fleet, err = fleetclient.New(*j.daemon.cfg.Fleet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(j.daemon.fleet.Close)
+			j.fleet = nil
+			models, err := j.prepareFleet(context.Background(), tc.approvalOnly)
+			if tc.wantCode != "" {
+				var typed *fleetclient.Error
+				if !errors.As(err, &typed) || typed.Code != tc.wantCode || j.fleet != nil {
+					t.Fatalf("selection error=%v, want=%s", err, tc.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			j.models, j.approvalOnly = models, tc.approvalOnly
+			wantModels := 1
+			if tc.approvalOnly {
+				wantModels = 0
+			}
+			if models == nil || j.fleet.selection.Profiles == nil || len(j.fleet.selection.Profiles) != wantModels || len(j.bootstrap().ConfigProjection.Models) != wantModels {
+				t.Fatal("selected profiles and worker projection do not match root policy")
+			}
+			if j.fleet.selection.Catalog.Route.Revision != route.Revision || j.route.ChannelName != "ops" || !j.fleet.selection.LocalOnly || otherCalls.Load() != 0 {
+				t.Fatal("signed route/local-only policy changed or model request sent")
+			}
+		})
+	}
+}
 
 func fleetTurnFixture() (*jobRuntime, proto.ModelTurnRequest) {
 	p := fleetproto.ProfileMetadata{Version: 1, Kind: fleetproto.KindProfile, ProfileID: "local", Upstreams: []fleetproto.Upstream{{API: fleetproto.OpenAIChat, BaseURL: "http://localhost:11434/v1", Model: "fixture", DataBoundary: fleetproto.Local, RequestTimeoutSeconds: 10, MaxOutputTokens: 100}}}

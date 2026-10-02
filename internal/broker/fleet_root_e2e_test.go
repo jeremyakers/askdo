@@ -51,6 +51,7 @@ type rootFleetFixture struct {
 	mu                sync.Mutex
 	puts              [][]byte
 	modelCalls        atomic.Int64
+	modelRequests     atomic.Int64
 	lost              chan struct{}
 	publicKey         ed25519.PublicKey
 	statuses          []int
@@ -79,6 +80,8 @@ type rootFleetOptions struct {
 	hostOutputTokens      int
 	originalBundle        bool
 	protectOriginalBundle bool
+	profileCondition      string
+	exemptRoot            bool
 }
 
 func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unreviewed bool, options ...rootFleetOptions) *rootFleetFixture {
@@ -164,6 +167,9 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 	}
 	f.publicKey = pub
 	f.server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/model-turns" {
+			f.modelRequests.Add(1)
+		}
 		if r.Method == http.MethodPut {
 			data, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -214,6 +220,12 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 		profileTimeout = 5 * time.Second
 	}
 	f.gatewayCfg = gateway.Config{ConfigVersion: 1, Listen: "127.0.0.1:8443", PublicURL: f.server.URL, TLSCertFile: write("tls.crt", cert), TLSKeyFile: write("tls.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: priv})), SigningKeyFile: write("signing", []byte(base64.StdEncoding.EncodeToString(key))), Database: filepath.Join(root, "gateway.sqlite3"), Profiles: []config.ModelConfig{{Name: "local", API: "openai_chat", BaseURL: provider.URL, Model: "fixture", DataBoundary: "local", RequestTimeout: config.Duration(profileTimeout)}}, Bots: []gateway.BotConfig{{Name: "fixture", TokenFile: write("tg.token", []byte("42:"+strings.Repeat("f", 32)))}}, Channels: []gateway.ChannelConfig{{Name: "ops", Bot: "fixture", ApprovalTTL: 120, Recipients: []config.TelegramRecipient{{ChatID: telegramChat, OperatorUserIDs: []int64{telegramOperator}}}}}}
+	if opts.profileCondition == "removed" {
+		f.gatewayCfg.Profiles = []config.ModelConfig{}
+	} else if opts.profileCondition == "external" {
+		f.gatewayCfg.Profiles[0].DataBoundary = "external"
+		f.gatewayCfg.Profiles[0].APIKeyFile = write("provider.key", []byte("disposable-provider-key"))
+	}
 	f.db, err = gateway.OpenEnrollmentStore(f.gatewayCfg.Database)
 	if err != nil {
 		t.Fatal(err)
@@ -228,6 +240,11 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 	}
 	f.active.Store(f.gateway)
 	t.Cleanup(func() { f.gateway.Close(); f.db.Close() })
+	if opts.profileCondition == "permission_revoked" {
+		if err := f.db.UpdatePolicy(context.Background(), host.HostID, gateway.EnrollmentPolicy{AllowedProfiles: []string{}, AllowedChannels: []string{"ops"}, DefaultChannel: "ops"}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := testConfig()
 	cfg.ConfigVersion = 5
 	cfg.Telegram = config.TelegramConfig{}
@@ -263,6 +280,10 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 	if unreviewed {
 		cfg.Review.Mode = "approval_only"
 	}
+	if opts.exemptRoot {
+		cfg.Review.Mode = "required"
+		cfg.Review.ApprovalOnlyUsers = []string{"root"}
+	}
 	if auto {
 		grantUser := "root"
 		if opts.foreground {
@@ -276,7 +297,7 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if opts.hostOutputTokens != 0 || opts.originalBundle {
+	if opts.hostOutputTokens != 0 || opts.originalBundle || opts.profileCondition != "" || opts.exemptRoot {
 		encoded, err := json.Marshal(cfg)
 		if err != nil {
 			t.Fatal(err)
@@ -849,6 +870,138 @@ func TestRootFleetActualChildTLSDispatch(t *testing.T) {
 			}
 			if tc.unreviewed && f.modelCalls.Load() != 0 {
 				t.Fatal("unreviewed lane sent evidence")
+			}
+		})
+	}
+}
+
+func TestRootFleetHumanOnlyProfileIndependence(t *testing.T) {
+	requireRootTest(t)
+	binary := buildFleetReviewer(t)
+	for _, tc := range []struct {
+		name, condition, action                    string
+		exempt, required, forced, revokeEnrollment bool
+		want                                       store.State
+	}{
+		{name: "global_removed_approve", condition: "removed", action: "a:", want: store.StateFinished},
+		{name: "global_permission_revoked_deny", condition: "permission_revoked", action: "d:", want: store.StateDenied},
+		{name: "global_external_approve", condition: "external", action: "a:", want: store.StateFinished},
+		{name: "exempt_removed_deny", condition: "removed", exempt: true, action: "d:", want: store.StateDenied},
+		{name: "exempt_permission_revoked_approve", condition: "permission_revoked", exempt: true, action: "a:", want: store.StateFinished},
+		{name: "exempt_external_deny", condition: "external", exempt: true, action: "d:", want: store.StateDenied},
+		{name: "forced_global_removed", condition: "removed", forced: true, want: store.StateFailed},
+		{name: "forced_global_external", condition: "external", forced: true, want: store.StateFailed},
+		{name: "forced_exempt_removed", condition: "removed", exempt: true, forced: true, want: store.StateFailed},
+		{name: "forced_exempt_external", condition: "external", exempt: true, forced: true, want: store.StateFailed},
+		{name: "required_removed", condition: "removed", required: true, want: store.StateFailed},
+		{name: "required_external", condition: "external", required: true, want: store.StateFailed},
+		{name: "global_enrollment_revoked", condition: "removed", revokeEnrollment: true, want: store.StateFailed},
+		{name: "exempt_enrollment_revoked", condition: "external", exempt: true, revokeEnrollment: true, want: store.StateFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given root policy and current gateway permissions, when the actual
+			// child exits and a signed human decision arrives, then model-free
+			// jobs retain every root dispatch gate without selecting a profile.
+			f := newRootFleetFixture(t, binary, "1", false, false, !tc.required && !tc.exempt, rootFleetOptions{profileCondition: tc.condition, exemptRoot: tc.exempt})
+			before, err := os.ReadFile(f.hostConfigFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.revokeEnrollment {
+				if err := f.gateway.RevokeHost(context.Background(), f.broker.daemon.cfg.Fleet.HostID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			id := reserveForTest(t, f.broker.socket, 0)
+			request := submitRequest(id, "human-only profile independence")
+			request.Argv = []string{"/usr/bin/id", "-u"}
+			request.ForceReview = tc.forced
+			conn, err := net.Dial("unix", f.broker.socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			sendFrame(t, conn, request)
+			readFrame(t, conn)
+			var sub fleetproto.TicketSubmission
+			if tc.action != "" {
+				job := awaitRootFleetState(t, conn, f.broker.daemon.store, id, store.StateAwaitingHuman, store.StateFailed)
+				if job.State != store.StateAwaitingHuman {
+					t.Fatalf("human route blocked by unused profile: %s", job.State)
+				}
+				data, err := os.ReadFile(filepath.Join(job.SpoolDir, "fleet-submission.json"))
+				if err != nil || json.Unmarshal(data, &sub) != nil {
+					t.Fatal("root ticket not persisted")
+				}
+				emptyHash, err := fleetproto.HashProfiles([]fleetproto.ProfileMetadata{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				binding := sub.Ticket.Binding
+				if sub.Profiles == nil || len(sub.Profiles) != 0 || binding.ProfileHash != emptyHash || binding.TicketKind != fleetproto.HumanUnreviewed || binding.HostID != fleetproto.ID(f.broker.daemon.cfg.Fleet.HostID) || binding.JobID != fleetproto.ID(id) || len(binding.Nonce) != 32 || binding.ManifestDigest != fleetproto.Hash(job.ManifestHash) || sub.Ticket.Display.Identity.SubmitterUID != 0 || binding.ExpiresAt <= time.Now().Unix() || binding.ExpiresAt > time.Now().Add(120*time.Second).Unix() {
+					t.Fatal("model-free ticket lost root identity, nonce, digest, TTL or empty profile binding")
+				}
+				if err := fleetproto.CheckTicket(sub.Ticket, sub.Profiles, sub.Route); err != nil {
+					t.Fatal(err)
+				}
+				f.broker.daemon.mu.Lock()
+				runtime := f.broker.daemon.jobs[f.broker.daemon.key(0, id)]
+				f.broker.daemon.mu.Unlock()
+				if runtime == nil || runtime.fleet.selection.Profiles == nil || len(runtime.fleet.selection.Profiles) != 0 || len(runtime.bootstrap().ConfigProjection.Models) != 0 {
+					t.Fatal("unused profile reached root snapshot or actual child bootstrap")
+				}
+				card, ok := f.bot.Card()
+				if !ok {
+					t.Fatal("human card missing")
+				}
+				f.bot.QueueCallback(1, "human-only", telegramOperator, telegramChat, card.ID, card.ButtonData(tc.action))
+			}
+			job := awaitRootFleetState(t, conn, f.broker.daemon.store, id, tc.want, store.StateFailed)
+			if job.State != tc.want {
+				t.Fatalf("root state=%s want=%s", job.State, tc.want)
+			}
+			output, err := os.ReadFile(filepath.Join(job.SpoolDir, "stdout.log"))
+			if err != nil || (tc.want == store.StateFinished && !bytes.Equal(output, []byte("0\n"))) || (tc.want != store.StateFinished && len(output) != 0) {
+				t.Fatal("root approve/deny/fail dispatch mismatch")
+			}
+			f.mu.Lock()
+			puts := append([][]byte(nil), f.puts...)
+			f.mu.Unlock()
+			if f.modelCalls.Load() != 0 || f.modelRequests.Load() != 0 {
+				t.Fatal("unused model received a request or evidence")
+			}
+			if tc.action == "" {
+				if len(puts) != 0 || len(job.ApprovalJSON) != 0 || len(f.bot.Sent()) != 0 {
+					t.Fatal("required review or revoked enrollment reached ticket/human authority")
+				}
+			} else {
+				if len(puts) == 0 {
+					t.Fatal("root ticket never reached gateway")
+				}
+				for _, put := range puts {
+					var sent fleetproto.TicketSubmission
+					if json.Unmarshal(put, &sent) != nil || sent.Ticket.Binding != sub.Ticket.Binding || sent.Profiles == nil || len(sent.Profiles) != 0 {
+						t.Fatal("TLS PUT changed model-free root ticket")
+					}
+				}
+				var audit struct {
+					FleetEvents [][]byte `json:"fleet_events"`
+				}
+				if json.Unmarshal(job.ApprovalJSON, &audit) != nil || len(audit.FleetEvents) != 2 {
+					t.Fatal("complete signed human audit missing")
+				}
+				receipt, _, err := fleetproto.Verify[fleetproto.Event](f.publicKey, audit.FleetEvents[0])
+				if err != nil || receipt.Sequence != 1 || receipt.Receipt == nil || fleetproto.CheckReceipt(*receipt.Receipt, sub.Ticket, sub.Route, time.Now().Unix()) != nil {
+					t.Fatal("signed receipt lost frozen human gates")
+				}
+				decision, _, err := fleetproto.Verify[fleetproto.Event](f.publicKey, audit.FleetEvents[1])
+				if err != nil || decision.Sequence != 2 || decision.Decision == nil || fleetproto.CheckDecision(*decision.Decision, *receipt.Receipt, sub.Ticket, sub.Route, time.Now().Unix()) != nil {
+					t.Fatal("signed decision lost frozen human gates")
+				}
+			}
+			after, err := os.ReadFile(f.hostConfigFile)
+			if err != nil || !bytes.Equal(before, after) || !f.broker.daemon.cfg.Review.LocalOnly || len(f.broker.daemon.cfg.Review.GatewayProfiles) != 1 || f.broker.daemon.cfg.Review.GatewayProfiles[0] != "local" {
+				t.Fatal("persistent root profile/local-only policy mutated")
 			}
 		})
 	}

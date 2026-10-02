@@ -73,7 +73,13 @@ func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]pro
 	if err != nil {
 		return nil, fmt.Errorf("fleet catalogue: %w", err)
 	}
-	selection, err := j.daemon.fleet.Select(catalog, j.daemon.cfg.Review.GatewayProfiles, j.daemon.cfg.Review.LocalOnly)
+	profiles := j.daemon.cfg.Review.GatewayProfiles
+	if approvalOnly {
+		// Human-only jobs still authenticate and bind the signed route, but
+		// unused reviewer profiles must not gate their approval ticket.
+		profiles = []string{}
+	}
+	selection, err := j.daemon.fleet.Select(catalog, profiles, j.daemon.cfg.Review.LocalOnly)
 	if err != nil {
 		return nil, fmt.Errorf("fleet selection: %w", err)
 	}
