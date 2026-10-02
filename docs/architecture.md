@@ -107,6 +107,26 @@ typed provider availability failures are exhausted (without `--review=yes`),
 the same worker sends a **NO AI REVIEW** Telegram request without a model
 report; it never substitutes invented risk, effects or reversibility.
 
+### Fleet gateway (root, optional central approval authority)
+
+*Implemented in source; not in the `v1.0.0-rc.1` release binaries.*
+
+A host may instead belong to a fleet (`config_version: 5`). The separate
+`askdo gateway serve` process owns shared model provider endpoints, the one
+Codex OAuth login/refresh path, Telegram bot tokens and approval cards. It
+never executes commands, never connects to hosts, and stores only enrollment
+records and ticket/delivery bookkeeping — no host job databases or raw model
+conversations. In fleet mode the reviewer worker receives **no** enrollment,
+provider/OAuth, Telegram or signing secrets: its model turns travel as narrow
+correlated `model_turn_request`/`model_turn_result` frames on the existing
+private pipe, mediated by the root broker, and the worker exits cleanly after
+the frozen review without ever polling Telegram. The root broker then submits
+the frozen ticket and later **verifies the gateway's Ed25519-signed proof**
+(receipt/decision) against its own frozen snapshots, deadline, kind and
+one-use state before dispatch — authority comes from verified signatures, not
+from trusting the worker or the network peer. See
+[fleet-gateway.md](fleet-gateway.md) and [fleet-setup.md](fleet-setup.md).
+
 ## Trust boundaries
 
 ```text
@@ -131,10 +151,13 @@ report; it never substitutes invented risk, effects or reversibility.
   dispatch checks and durable audit. Trusted
   reviewer code polls Telegram and validates the callback's operator ID, chat,
   card, nonce, expiry and first use. The root broker does **not** independently
-  poll Telegram; it trusts that code's decision message, then verifies its
-  digest, operator ID, card ID, pending state, expiry and one-use status under
-  the dispatch lock. These broker checks do not independently authenticate a
-  Telegram callback.
+   poll Telegram; it trusts that code's decision message, then verifies its
+   digest, operator ID, card ID, pending state, expiry and one-use status under
+   the dispatch lock. These broker checks do not independently authenticate a
+   Telegram callback. **In fleet mode this changes:** the worker holds no
+   Telegram secrets and sends no decision; the root broker accepts only the
+   gateway's signed proof, verified against the frozen manifest digest, host
+   identity, nonce, kind and expiry before the same one-use dispatch gates.
 - The broker trusts: the host, the installed binary, the configuration, the
   reviewer code, and the operator's Telegram account.
 - askdo is an approval gate, not confinement: an approved program runs

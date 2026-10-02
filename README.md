@@ -73,6 +73,13 @@ work the same way for local script folders. [Here's how](#review-a-script-before
   reach its own bot, one request can reach several admins at once, and the
   first valid approve or deny decides it. Set up named channels in
   [configuration](docs/configuration.md#telegram).
+- **Approve a whole fleet from one phone.** Running several servers? An
+  optional shared gateway can hold the model credentials, Codex login and one
+  Telegram bot for all of them, while each machine keeps its own inspection
+  rules, auto-approval ceiling and local root execution. Standalone mode —
+  one bot per server, configured on that server — stays the default and is
+  unchanged. See [fleet setup](docs/fleet-setup.md) (implemented in source;
+  not yet in a tagged release).
 - **Let routine work through automatically.** Opt-in risk-based auto-approval
   can run qualifying AI-reviewed headless jobs with a Telegram notice.
   It's off by default; [you choose the policy](docs/configuration.md).
@@ -219,6 +226,8 @@ askdo --reason 'Try the bundled example' \
   alongside another service, Telegram token coordination, handoffs.
 - [Architecture](docs/architecture.md) and [review tools](docs/review-tools.md)
   — trust boundaries and how model-led inspection works.
+- [Fleet setup](docs/fleet-setup.md) — optional shared gateway for several
+  hosts; [fleet gateway design](docs/fleet-gateway.md) records the objectives.
 - [Client protocol](docs/protocol-client.md) and
   [worker protocol](docs/protocol-worker.md) — wire formats for integrators.
 
@@ -233,8 +242,8 @@ CGO_ENABLED=0 go build -trimpath -o askdo-launch ./cmd/askdo-launch
 
 `./askdo --help` lists client flags, `./install.sh --help` installer options.
 Run `go vet ./...` and `go test -race ./...` for the unprivileged checks;
-`scripts/` contains container-based packaging, root and foreground-helper
-tests. See [validation](docs/validation.md) for the full list.
+`scripts/` contains container-based packaging, root, foreground-helper and
+fleet-binary tests. See [validation](docs/validation.md) for the full list.
 
 ## License
 
