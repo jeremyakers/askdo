@@ -29,7 +29,10 @@ The installer ships read-only examples in `/etc/askdo/examples/`
 (`gateway-config.example.json`, `host-config.example.json`) and an inert
 `/etc/systemd/system/askdo-gateway.service`. It does not create gateway
 signing keys, certificates, credentials or databases, and it never enables
-or starts any service.
+or starts any service. If you edit or replace `askdo-gateway.service`,
+`uninstall.sh` refuses to remove anything (including with `--purge --yes`)
+until you restore the shipped unit or remove the unit yourself, because the
+unit's `ExecStart` shares `/usr/local/bin/askdo` with the main install.
 
 ## 1. Initialize the gateway (approval-only by default)
 

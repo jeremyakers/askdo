@@ -142,15 +142,36 @@ exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
   install -d -m 0700 /var/lib/askdo-gateway
   printf "db-marker\n" > /var/lib/askdo-gateway/gateway.db
   printf "db-marker\n" > /tmp/gw-db-marker
-  # An edited (unrecognized) active unit must see no service control at all.
+  # An edited (unrecognized) gateway unit shares ExecStart=/usr/local/bin/askdo
+  # with the main install, so uninstall must refuse before ANY service control
+  # or removal, leaving every artifact byte- and metadata-identical; plain and
+  # --purge --yes are refused identically.
+  cp /etc/systemd/system/askdo.service /tmp/snap-service
+  cp /usr/local/bin/askdo /tmp/snap-client
+  cp /usr/local/libexec/askdo-launch /tmp/snap-helper
+  getent group askdo > /tmp/snap-group
   touch /tmp/gw-active
+  check_refused_uninstall() {
+    test ! -s /tmp/systemctl-calls || fail "service control attempted before gateway unit refusal"
+    cmp /etc/systemd/system/askdo.service /tmp/snap-service || fail "askdo unit changed by refused uninstall"
+    test "$(stat -c %a:%u:%g /etc/systemd/system/askdo.service)" = 644:0:0 || fail "askdo unit metadata changed"
+    cmp /usr/local/bin/askdo /tmp/snap-client || fail "client binary changed by refused uninstall"
+    test "$(stat -c %a:%u:%g /usr/local/bin/askdo)" = 755:0:0 || fail "client binary metadata changed"
+    cmp /usr/local/libexec/askdo-launch /tmp/snap-helper || fail "helper changed by refused uninstall"
+    test "$(stat -c %a:%u:%g /usr/local/libexec/askdo-launch)" = 755:0:0 || fail "helper metadata changed"
+    grep -qx "# admin edit" "$new" || fail "unknown policy changed by refused uninstall"
+    grep -qx "# admin edit" /etc/systemd/system/askdo-gateway.service || fail "foreign gateway unit changed"
+    getent group askdo | cmp -s - /tmp/snap-group || fail "askdo group changed by refused uninstall"
+    cmp /etc/askdo-gateway/signing.key /tmp/gw-marker || fail "gateway credentials changed by refused uninstall"
+    cmp /var/lib/askdo-gateway/gateway.db /tmp/gw-db-marker || fail "gateway database changed by refused uninstall"
+    test -e /tmp/gw-active || fail "gateway active state changed by refused uninstall"
+  }
   : > /tmp/systemctl-calls
-  sh /src/uninstall.sh
-  test -e "$new" || fail "uninstall deleted unknown policy"
-  grep -qx "# admin edit" /etc/systemd/system/askdo-gateway.service || fail "uninstall deleted edited gateway unit"
-  if grep -q "askdo-gateway" /tmp/systemctl-calls; then fail "foreign gateway unit received service control"; fi
-  cmp /etc/askdo-gateway/signing.key /tmp/gw-marker || fail "uninstall removed gateway credentials"
-  cmp /var/lib/askdo-gateway/gateway.db /tmp/gw-db-marker || fail "uninstall removed gateway database"
+  if sh /src/uninstall.sh; then fail "uninstall proceeded with unrecognized gateway unit"; fi
+  check_refused_uninstall
+  : > /tmp/systemctl-calls
+  if sh /src/uninstall.sh --purge --yes; then fail "purge proceeded with unrecognized gateway unit"; fi
+  check_refused_uninstall
   # A recognized (shipped, byte-identical) active unit is disabled before removal.
   cp /src/contrib/askdo.sudoers "$new"
   chmod 0440 "$new"

@@ -18,7 +18,9 @@ if [ "$PURGE" = 1 ] && [ "$YES" != 1 ]; then die 'purge requires --yes'; fi
 
 # Recognize the optional fleet gateway unit BEFORE any service control: only
 # a byte-for-byte shipped, root-owned, non-symlink unit may be stopped,
-# disabled or removed. An edited or foreign unit is left completely untouched.
+# disabled or removed. An edited or foreign unit still points its ExecStart at
+# the shared /usr/local/bin/askdo binary, so removing anything would strand a
+# unit the owner chose to keep; refuse before any service control or removal.
 GWUNIT=/etc/systemd/system/askdo-gateway.service
 GW_UNIT_CONTENT='[Unit]
 Description=askdo fleet gateway (optional central model and Telegram approval authority)
@@ -39,7 +41,7 @@ if [ -e "$GWUNIT" ] || [ -L "$GWUNIT" ]; then
      printf '%s\n' "$GW_UNIT_CONTENT" | cmp -s - "$GWUNIT"; then
     GW_RECOGNIZED=1
   else
-    printf 'WARNING: preserving unrecognized %s; not stopping, disabling or removing it\n' "$GWUNIT" >&2
+    die "unsafe or custom $GWUNIT prevents uninstall; remove the unit or restore the shipped one, then rerun (its ExecStart uses the shared askdo binary)"
   fi
 fi
 
@@ -81,8 +83,8 @@ for ENTRY in askdo askdo-foreground; do
   fi
 done
 rm -f /etc/systemd/system/askdo.service /usr/local/bin/askdo
-# Removal follows the same recognition computed above; unrecognized units
-# were neither stopped nor disabled and stay on disk.
+# Removal follows the same recognition computed above; an unrecognized unit
+# already aborted the uninstall before any service control or removal.
 if [ "$GW_RECOGNIZED" = 1 ]; then rm -f "$GWUNIT"; fi
 if [ "${KEEP_HELPER:-0}" != 1 ]; then rm -f /usr/local/libexec/askdo-launch; fi
 if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || :; fi
