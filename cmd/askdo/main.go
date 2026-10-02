@@ -108,6 +108,8 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 		return runReview(args[1:], os.Stdout, os.Stderr)
 	case "config":
 		return runConfig(args[1:], os.Stdout, os.Stderr)
+	case "gateway":
+		return runGateway(args[1:], os.Stdout, os.Stderr)
 	case "inspection":
 		return runInspection(args[1:], os.Stdout, os.Stderr)
 	case "auth":
@@ -143,6 +145,16 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 125
 	}
+	if cfg.Fleet != nil {
+		if getEUID() != 0 {
+			fmt.Fprintln(stderr, "fleet config check requires root")
+			return 125
+		}
+		if _, err := operator.ReadRootPrivate(*configPath, 1<<20); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 125
+		}
+	}
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintln(stderr, "warning:", warning)
 	}
@@ -153,7 +165,13 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "configuration valid")
 	if !*live {
+		if cfg.Fleet != nil {
+			return checkFleetHost(cfg, false, stdout, stderr)
+		}
 		return 0
+	}
+	if cfg.Fleet != nil {
+		return checkFleetHost(cfg, true, stdout, stderr)
 	}
 	// Design §6: --live uses the synthetic multi-turn tool fixture only,
 	// discloses possible quota use, and never sends host files. Run network

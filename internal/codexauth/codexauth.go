@@ -308,21 +308,32 @@ func (c *Client) exchangeCode(ctx context.Context, code, verifier string) (*Toke
 // refresh_token when omitted from the response) are preserved from the
 // previous set. A revoked, expired, or already-used refresh token maps to
 // ErrReLoginRequired; transport and other issuer failures are plain errors
-// and leave the stored file untouched.
+// and retain a durable refresh_pending marker. A later invocation must re-login
+// rather than retrying a possibly consumed refresh token.
 //
 // When the access token's exp claim cannot be determined (opaque or malformed
 // token), RefreshIfNeeded refreshes anyway: an unknown expiry can never be
 // proven outside the window, and a fresh token restores a known expiry.
 //
 // Downstream contract (broker refresh-at-review-start, config check --live):
-// Load the store, call RefreshIfNeeded(ctx, store, time.Now()), then project
+// Under WithTokenLock, Load the store, call RefreshIfNeeded(ctx, store, time.Now()), then project
 // store.AccessToken and store.AccountID only — never the refresh or id token.
 func (c *Client) RefreshIfNeeded(ctx context.Context, store *TokenStore, now time.Time) (bool, error) {
 	if store == nil {
 		return false, errors.New("codexauth: nil token store")
 	}
+	if store.RefreshPending {
+		return false, fmt.Errorf("%w: previous refresh outcome is uncertain", ErrReLoginRequired)
+	}
 	if expiry, err := AccessTokenExpiry(store.AccessToken); err == nil && expiry.After(now.Add(RefreshWindow)) {
 		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	store.RefreshPending = true
+	if err := store.Save(); err != nil {
+		return false, fmt.Errorf("persist refresh intent: %w", err)
 	}
 	form := url.Values{
 		"grant_type":    {"refresh_token"},

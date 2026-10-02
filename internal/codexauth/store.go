@@ -23,6 +23,10 @@ type TokenSet struct {
 	RefreshToken string    `json:"refresh_token"`
 	AccountID    string    `json:"account_id"`
 	LastRefresh  time.Time `json:"last_refresh"`
+	// RefreshPending durably records a one-time refresh attempt before network
+	// I/O. A crash or uncertain response requires login, never reuse of the old
+	// refresh token. Successful persistence clears it.
+	RefreshPending bool `json:"refresh_pending,omitempty"`
 }
 
 // TokenStore binds a TokenSet to the file it persists to. Obtain one with
@@ -108,7 +112,11 @@ func (s *TokenStore) Save() error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("rename credential file into place: %w", err)
 	}
-	return nil
+	dir, err := os.Open(filepath.Dir(s.path))
+	if err != nil {
+		return fmt.Errorf("open credential directory for sync: %w", err)
+	}
+	return errors.Join(lockError("sync credential directory", dir.Sync()), lockError("close credential directory", dir.Close()))
 }
 
 // IsNotExist reports whether a Load failure means the credential file simply

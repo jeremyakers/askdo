@@ -85,6 +85,11 @@ func (e *UnavailableError) Error() string {
 }
 
 func availabilityCode(err error) proto.AvailabilityCode {
+	// Pipe errors arrive directly from Loop.ChatTurn. Do not traverse arbitrary
+	// provider error graphs here: direct adapters may expose cyclic unwrap trees.
+	if failure, ok := err.(*pipeAvailabilityError); ok && failure.failure.Code == proto.ModelUpstreamCodexRelogin {
+		return proto.AvailabilityCodexReLogin
+	}
 	switch {
 	case errors.Is(err, ErrQuotaRate):
 		return proto.AvailabilityQuota
@@ -232,6 +237,8 @@ func historyEntry(name, outcome string, err error) proto.ModelHistoryEntry {
 			text = "invalid key, model, or endpoint"
 		case proto.AvailabilityMalformedWire:
 			text = "malformed provider response"
+		case proto.AvailabilityCodexReLogin:
+			text = "Codex re-login required"
 		}
 	case "refused":
 		text = "safety refusal"

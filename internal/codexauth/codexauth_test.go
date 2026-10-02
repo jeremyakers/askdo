@@ -386,7 +386,7 @@ func TestIssuerFailureKeepsLateDetailWithoutEchoingRequestSecrets(t *testing.T) 
 		wantReLogin       bool
 	}{
 		{"refresh", "/oauth/token", "refresh_token", func(c *Client, secret string) error {
-			store := &TokenStore{TokenSet: TokenSet{RefreshToken: secret}}
+			store := NewStore(writeStoreFile(t, TokenSet{RefreshToken: secret}), TokenSet{RefreshToken: secret})
 			_, err := c.RefreshIfNeeded(context.Background(), store, time.Now())
 			return err
 		}, true},
@@ -457,7 +457,7 @@ func TestInvalidGrantClassificationSurvivesRedaction(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
 	}))
 	t.Cleanup(server.Close)
-	store := &TokenStore{TokenSet: TokenSet{RefreshToken: "invalid_grant"}}
+	store := NewStore(writeStoreFile(t, TokenSet{RefreshToken: "invalid_grant"}), TokenSet{RefreshToken: "invalid_grant"})
 	_, err := NewClient(WithIssuer(server.URL)).RefreshIfNeeded(context.Background(), store, time.Now())
 	if !errors.Is(err, ErrReLoginRequired) || strings.Contains(err.Error(), "invalid_grant") {
 		t.Fatal("late invalid_grant must stay typed even when the value matches the sent token")

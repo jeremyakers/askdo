@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
@@ -15,28 +16,15 @@ import (
 // user, assistant, or tool. Tool results carry ToolCallID; assistant messages
 // may carry ordered ToolCalls. Content is plain text and is never interpreted
 // as a private worker-protocol message.
-type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-}
+type Message = modelwire.Message
 
 // ModelRequest is one non-streaming turn with the full current-model history,
 // the fixed tool definitions, configured model ID, and output-token bound.
-type ModelRequest struct {
-	Model           string           `json:"model"`
-	Messages        []Message        `json:"messages"`
-	Tools           []ToolDefinition `json:"tools"`
-	MaxOutputTokens int              `json:"max_output_tokens"`
-}
+type ModelRequest = modelwire.ModelRequest
 
 // ModelResponse is one completed provider turn. A response may contain text,
 // ordered tool calls, or both; only submit_review can complete a review.
-type ModelResponse struct {
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-}
+type ModelResponse = modelwire.ModelResponse
 
 // ModelTurn is the stable Wave 4 provider boundary. ChatTurn performs exactly
 // one non-streaming model request. It must return only after the HTTP request is

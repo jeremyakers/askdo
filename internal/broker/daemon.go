@@ -18,6 +18,7 @@ import (
 
 	"github.com/jeremyakers/askdo/internal/codexauth"
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/fleetclient"
 	"github.com/jeremyakers/askdo/internal/foreground"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
@@ -93,6 +94,7 @@ type daemon struct {
 	helperPeer     func(*net.UnixConn) (uint32, int64, error)
 	ttyEvidence    func(int64) (ttyIdentity, error)
 	codex          *codexauth.Client
+	fleet          *fleetclient.Client
 	queue          *jobQueue
 	policy         *inspection.Policy
 	listener       *net.UnixListener
@@ -329,6 +331,13 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail}
+	if cfg.Fleet != nil {
+		d.fleet, err = fleetclient.New(*cfg.Fleet)
+		if err != nil {
+			d.close()
+			return nil, nil, fmt.Errorf("initialize fleet client: %w", err)
+		}
+	}
 	return d, listener, nil
 }
 
@@ -374,6 +383,9 @@ func (d *daemon) close() {
 		d.deadlineWG.Wait()
 		d.connWG.Wait()
 		_ = d.policy.Close()
+		if d.fleet != nil {
+			d.fleet.Close()
+		}
 		_ = d.store.Close()
 		_ = os.Remove(d.socketPath)
 		_ = os.Remove(d.launchPath)
@@ -738,7 +750,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			return
 		}
 	}
-	if d.cfg.Review.RequiresReview(uid, request.ForceReview) && len(d.cfg.Review.Models) == 0 {
+	if d.cfg.Review.RequiresReview(uid, request.ForceReview) && len(d.cfg.Review.Models) == 0 && (d.cfg.Fleet == nil || len(d.cfg.Review.GatewayProfiles) == 0) {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "review_unavailable", Message: "AI review required but no review models are configured"})
 		return
 	}

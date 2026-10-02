@@ -424,6 +424,7 @@ type AutoStartAuthorization struct {
 	SummaryMessageIDs []int64
 	NotifiedAtUTC     time.Time
 	NowUTC            time.Time
+	FleetEvents       [][]byte
 }
 
 // CommitNamedDecision atomically consumes one recorded multi-recipient approval
@@ -581,8 +582,9 @@ func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthoriza
 		NotifiedAt         string                         `json:"notified_at"`
 		ChannelName        string                         `json:"channel_name,omitempty"`
 		Targets            []proto.AutoNotificationTarget `json:"targets,omitempty"`
+		FleetEvents        [][]byte                       `json:"fleet_events,omitempty"`
 	}{"auto", auth.Score, auth.AdminMaxRisk, threshold, effective, auth.NoticeID,
-		auth.SummaryMessageIDs, auth.ManifestDigest, auth.NotifiedAtUTC.UTC().Format(time.RFC3339Nano), auth.ChannelName, auth.Targets})
+		auth.SummaryMessageIDs, auth.ManifestDigest, auth.NotifiedAtUTC.UTC().Format(time.RFC3339Nano), auth.ChannelName, auth.Targets, auth.FleetEvents})
 	if err != nil {
 		return false, fmt.Errorf("encode auto-start audit: %w", err)
 	}

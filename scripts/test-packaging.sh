@@ -5,7 +5,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
   export GOTOOLCHAIN=local ASKDO_SOURCE_DIR=/src
   apt-get update -qq >/dev/null && apt-get install -y -qq sudo >/dev/null
-  printf "#!/bin/sh\nprintf \"%%s\\n\" \"\$*\" >> /tmp/systemctl-calls\ncase \"\$1\" in enable|start|restart|stop) exit 1;; is-active) exit 3;; esac\nexit 0\n" > /usr/local/bin/systemctl
+  printf "#!/bin/sh\nprintf \"%%s\\n\" \"\$*\" >> /tmp/systemctl-calls\nif [ \"\$1\" = is-active ] && [ \"\$3\" = askdo-gateway.service ]; then [ -e /tmp/gw-active ] && exit 0 || exit 3; fi\nif [ \"\$1\" = disable ] && [ \"\$3\" = askdo-gateway.service ]; then rm -f /tmp/gw-active; fi\ncase \"\$1\" in enable|start|restart|stop) exit 1;; is-active) exit 3;; esac\nexit 0\n" > /usr/local/bin/systemctl
   chmod +x /usr/local/bin/systemctl
   old=/etc/sudoers.d/askdo-foreground
   new=/etc/sudoers.d/askdo
@@ -16,10 +16,38 @@ exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
   test ! -e "$old" && ! getent group askdo-foreground || fail "fresh install created legacy grant/group"
   cmp "$new" /src/contrib/askdo.sudoers
   test "$(stat -c %a:%u:%g "$new")" = 440:0:0
+  cmp /etc/systemd/system/askdo-gateway.service /src/contrib/askdo-gateway.service
+  test "$(stat -c %a:%u:%g /etc/systemd/system/askdo-gateway.service)" = 644:0:0
+  cmp /etc/askdo/examples/gateway-config.example.json /src/examples/fleet/gateway-config.example.json
+  cmp /etc/askdo/examples/host-config.example.json /src/examples/fleet/host-config.example.json
+  test "$(stat -c %a:%u:%g /etc/askdo/examples/gateway-config.example.json)" = 444:0:0
+  test "$(stat -c %a:%u:%g /etc/askdo/examples/host-config.example.json)" = 444:0:0
+  test ! -e /etc/askdo-gateway || fail "installer created gateway server state"
   visudo -c >/dev/null
   test ! -s /tmp/systemctl-calls || ! grep -E "^(enable|start|restart|stop) " /tmp/systemctl-calls
+  printf "# foreign unit\n" > /etc/systemd/system/askdo-gateway.service
+  if sh /src/install.sh; then fail "differing gateway unit overwritten"; fi
+  grep -qx "# foreign unit" /etc/systemd/system/askdo-gateway.service || fail "foreign gateway unit modified"
+  cp /src/contrib/askdo-gateway.service /etc/systemd/system/askdo-gateway.service
+  install -d -m 0700 /etc/askdo-gateway
+  printf "server-state-marker\n" > /etc/askdo-gateway/config.json
+  install -d -m 0700 /var/lib/askdo-gateway
+  printf "db-marker\n" > /var/lib/askdo-gateway/gateway.db
+  mv /var/lib/askdo-gateway /var/lib/askdo-gateway.real
+  ln -s /var/lib/askdo-gateway.real /var/lib/askdo-gateway
+  if sh /src/uninstall.sh --purge --yes; then fail "symlinked gateway state dir purged"; fi
+  test -f /var/lib/askdo-gateway.real/gateway.db || fail "symlink target harmed"
+  rm /var/lib/askdo-gateway
+  chown 65534:65534 /var/lib/askdo-gateway.real
+  mv /var/lib/askdo-gateway.real /var/lib/askdo-gateway
+  if sh /src/uninstall.sh --purge --yes; then fail "foreign-owned gateway state dir purged"; fi
+  test -f /var/lib/askdo-gateway/gateway.db || fail "foreign-owned dir harmed"
+  chown 0:0 /var/lib/askdo-gateway
   sh /src/uninstall.sh --purge --yes
   test ! -e "$new"
+  test ! -e /etc/systemd/system/askdo-gateway.service || fail "recognized gateway unit retained"
+  test ! -e /etc/askdo-gateway || fail "purge kept gateway server state"
+  test ! -e /var/lib/askdo-gateway || fail "purge kept gateway database"
   mkdir -p /tmp/mock
   printf "#!/bin/sh\nprintf \"%%s\\n\" \"\$2\" >> /tmp/fetch-urls\nexit 1\n" > /tmp/mock/curl
   chmod +x /tmp/mock/curl
@@ -105,12 +133,37 @@ exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
   if sudo -l -U outsider /usr/local/libexec/askdo-launch >/dev/null 2>&1; then fail "outsider granted helper"; fi
   sh /src/install.sh
   test ! -e "$old"
+  cmp /etc/systemd/system/askdo-gateway.service /src/contrib/askdo-gateway.service || fail "reinstall changed gateway unit"
   printf "# admin edit\n" > "$new"
+  printf "# admin edit\n" > /etc/systemd/system/askdo-gateway.service
+  install -d -m 0700 /etc/askdo-gateway
+  printf "credentials-marker\n" > /etc/askdo-gateway/signing.key
+  printf "credentials-marker\n" > /tmp/gw-marker
+  install -d -m 0700 /var/lib/askdo-gateway
+  printf "db-marker\n" > /var/lib/askdo-gateway/gateway.db
+  printf "db-marker\n" > /tmp/gw-db-marker
+  # An edited (unrecognized) active unit must see no service control at all.
+  touch /tmp/gw-active
+  : > /tmp/systemctl-calls
   sh /src/uninstall.sh
   test -e "$new" || fail "uninstall deleted unknown policy"
+  grep -qx "# admin edit" /etc/systemd/system/askdo-gateway.service || fail "uninstall deleted edited gateway unit"
+  if grep -q "askdo-gateway" /tmp/systemctl-calls; then fail "foreign gateway unit received service control"; fi
+  cmp /etc/askdo-gateway/signing.key /tmp/gw-marker || fail "uninstall removed gateway credentials"
+  cmp /var/lib/askdo-gateway/gateway.db /tmp/gw-db-marker || fail "uninstall removed gateway database"
+  # A recognized (shipped, byte-identical) active unit is disabled before removal.
   cp /src/contrib/askdo.sudoers "$new"
   chmod 0440 "$new"
+  cp /src/contrib/askdo-gateway.service /etc/systemd/system/askdo-gateway.service
+  : > /tmp/systemctl-calls
+  sh /src/uninstall.sh
+  grep -qx "disable --now askdo-gateway.service" /tmp/systemctl-calls || fail "recognized active gateway unit not disabled"
+  test ! -e /etc/systemd/system/askdo-gateway.service || fail "recognized gateway unit retained"
+  cmp /var/lib/askdo-gateway/gateway.db /tmp/gw-db-marker || fail "plain uninstall removed gateway database"
+  rm -f /tmp/gw-active
   sh /src/uninstall.sh --purge --yes
   test ! -e "$new"
+  test ! -e /etc/askdo-gateway || fail "purge kept gateway credentials"
+  test ! -e /var/lib/askdo-gateway || fail "purge kept gateway database"
   echo "packaging lifecycle passed"
 '

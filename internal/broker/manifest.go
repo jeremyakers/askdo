@@ -32,6 +32,7 @@ type approvalManifest struct {
 	ModelHistory     []proto.ModelHistoryEntry `json:"model_history"`
 	Settings         manifestSettings          `json:"settings"`
 	TelegramRoute    *manifestTelegramRoute    `json:"telegram_route,omitempty"`
+	Fleet            *fleetManifest            `json:"fleet,omitempty"`
 }
 
 // operationOnlyManifest deliberately has no review/report/coverage fields.
@@ -49,6 +50,7 @@ type operationOnlyManifest struct {
 	ApprovalMode        string                      `json:"approval_mode"`
 	Reason              string                      `json:"approval_reason"`
 	AvailabilityHistory []proto.AvailabilityFailure `json:"availability_history"`
+	Fleet               *fleetManifest              `json:"fleet,omitempty"`
 }
 
 func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, history []proto.AvailabilityFailure) (string, error) {
@@ -68,6 +70,10 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		return "", &freezeError{code: "evidence_changed", reason: err.Error()}
 	}
 	op := j.operation()
+	fleet, err := j.freezeFleet(nil, nil, reason, history, nil, index)
+	if err != nil {
+		return "", &freezeError{code: "broker_error", reason: "freeze fleet approval: " + err.Error()}
+	}
 	manifest := operationOnlyManifest{
 		Version: 1, RequestID: j.req.RequestID, TargetUID: 0,
 		Context:          manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
@@ -77,6 +83,7 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		Settings:         manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
 		TelegramRoute:    j.manifestTelegramRoute(),
 		ApprovalMode:     "approval_only", Reason: reason, AvailabilityHistory: append([]proto.AvailabilityFailure{}, history...),
+		Fleet: fleet,
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
@@ -182,6 +189,10 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		return nil, "", &freezeError{code: "invalid_report", reason: err.Error()}
 	}
 	operation := j.operation()
+	fleet, err := j.freezeFleet(&review.Report, review.ModelHistory, "", nil, plan, index)
+	if err != nil {
+		return nil, "", &freezeError{code: "broker_error", reason: "freeze fleet review: " + err.Error()}
+	}
 	manifest := approvalManifest{
 		Version: 1, RequestID: j.req.RequestID, TargetUID: 0,
 		Context:   manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
@@ -196,6 +207,7 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		ModelHistory:  append([]proto.ModelHistoryEntry(nil), review.ModelHistory...),
 		Settings:      manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
 		TelegramRoute: j.manifestTelegramRoute(),
+		Fleet:         fleet,
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
@@ -321,6 +333,14 @@ func (j *jobRuntime) successfulModel(history []proto.ModelHistoryEntry) (string,
 		return "", errors.New("model history has no final successful model")
 	}
 	name := history[len(history)-1].Name
+	if j.fleet != nil {
+		for _, model := range j.models {
+			if model.Name == name {
+				return name, nil
+			}
+		}
+		return "", fmt.Errorf("successful fleet model %q is not selected", name)
+	}
 	for _, configured := range j.daemon.cfg.Review.Models {
 		if configured.Name == name {
 			return name, nil

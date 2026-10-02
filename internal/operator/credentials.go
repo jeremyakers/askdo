@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/jeremyakers/askdo/internal/codexauth"
 )
 
 // CredentialKind selects the ownership/mode rule the daemon enforces for a
@@ -23,6 +26,10 @@ const (
 	// refresh token and is broker-only, so owner root, group root, mode
 	// exactly 0600.
 	CredentialCodexToken
+	// CredentialGatewaySecret is static root-only material, without OAuth locks.
+	CredentialGatewaySecret
+	// CredentialTrust is root-only, read-only trust material.
+	CredentialTrust
 )
 
 var (
@@ -82,6 +89,21 @@ func WriteCredential(dir, name string, data []byte, kind CredentialKind, force b
 	if err := validateCredentialName(name); err != nil {
 		return false, err
 	}
+	if kind == CredentialCodexToken {
+		err = codexauth.WithTokenLock(context.Background(), filepath.Join(dir, name), func() error {
+			var err error
+			created, err = writeCredential(dir, name, data, kind, force)
+			return err
+		})
+		return created, err
+	}
+	return writeCredential(dir, name, data, kind, force)
+}
+
+func writeCredential(dir, name string, data []byte, kind CredentialKind, force bool) (created bool, err error) {
+	if err := validateCredentialName(name); err != nil {
+		return false, err
+	}
 	target := filepath.Join(dir, name)
 	if _, err := os.Lstat(target); err == nil {
 		if !force {
@@ -107,8 +129,10 @@ func WriteCredential(dir, name string, data []byte, kind CredentialKind, force b
 // early without touching the filesystem.
 func credentialOwnership(kind CredentialKind) (mode os.FileMode, uid, gid int, err error) {
 	switch kind {
-	case CredentialCodexToken:
+	case CredentialCodexToken, CredentialGatewaySecret:
 		return 0600, 0, 0, nil
+	case CredentialTrust:
+		return 0400, 0, 0, nil
 	case CredentialKey:
 		group, err := lookupGroup("askdo-review")
 		if err != nil {
@@ -135,16 +159,63 @@ func credentialOwnership(kind CredentialKind) (mode os.FileMode, uid, gid int, e
 // (WriteCredential reports created=false): rollback never removes a file the
 // run did not create.
 type Commit struct {
-	created []string
-	done    bool
+	created    []string
+	done       bool
+	tokenLocks map[string]func() error
+}
+
+// LockCodex retains the lock from the first credential snapshot or login until
+// Success/Rollback, preventing refresh from racing transaction cleanup.
+func (c *Commit) LockCodex(ctx context.Context, path string) error {
+	if c.done {
+		return errors.New("operator: credential commit already finished")
+	}
+	if c.tokenLocks == nil {
+		c.tokenLocks = make(map[string]func() error)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	parent, err = filepath.Abs(parent)
+	if err != nil {
+		return err
+	}
+	key := filepath.Join(parent, filepath.Base(path))
+	if _, ok := c.tokenLocks[key]; ok {
+		return nil
+	}
+	release, err := codexauth.AcquireTokenLock(ctx, path)
+	if err != nil {
+		return err
+	}
+	c.tokenLocks[key] = release
+	return nil
+}
+
+func (c *Commit) releaseTokenLocks() error {
+	var errs []error
+	for path, release := range c.tokenLocks {
+		errs = append(errs, release())
+		delete(c.tokenLocks, path)
+	}
+	return errors.Join(errs...)
 }
 
 // WriteCredential wraps the package-level WriteCredential and tracks the
 // file for rollback when — and only when — this call created it.
 func (c *Commit) WriteCredential(dir, name string, data []byte, kind CredentialKind, force bool) error {
-	created, err := WriteCredential(dir, name, data, kind, force)
-	if err != nil {
+	if err := validateCredentialName(name); err != nil {
 		return err
+	}
+	if kind == CredentialCodexToken {
+		if err := c.LockCodex(context.Background(), filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	created, err := writeCredential(dir, name, data, kind, force)
+	if err != nil {
+		return errors.Join(err, c.Rollback())
 	}
 	if created {
 		c.created = append(c.created, filepath.Join(dir, name))
@@ -166,12 +237,14 @@ func (c *Commit) Rollback() error {
 		}
 	}
 	c.created = nil
-	return errors.Join(errs...)
+	c.done = true
+	return errors.Join(errors.Join(errs...), c.releaseTokenLocks())
 }
 
 // Success disarms the commit: the run's files are now referenced by a saved
 // config and must survive. Rollback becomes a no-op.
-func (c *Commit) Success() {
+func (c *Commit) Success() error {
 	c.done = true
 	c.created = nil
+	return c.releaseTokenLocks()
 }

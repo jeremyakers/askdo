@@ -79,6 +79,7 @@ func (t *RequestTracker) Match(result InspectResult) error {
 
 // Bootstrap is the immutable broker-to-worker job bootstrap message.
 type Bootstrap struct {
+	FleetMode     bool            `json:"fleet_mode,omitempty"`
 	Type          string          `json:"type"`
 	Host          string          `json:"host"`
 	TargetUID     uint32          `json:"target_uid"`
@@ -124,7 +125,7 @@ type CapturedInput struct {
 type ConfigProjection struct {
 	Models   []ProjectedModel `json:"models"`
 	Limits   WorkerLimits     `json:"limits"`
-	Telegram WorkerTelegram   `json:"telegram"`
+	Telegram WorkerTelegram   `json:"telegram,omitempty"`
 }
 
 // ProjectedModel describes one reviewer model without its credential contents.
@@ -142,6 +143,7 @@ type ProjectedModel struct {
 	RequestTimeoutMS int64  `json:"request_timeout_ms"`
 	AccessToken      string `json:"access_token,omitempty"`
 	AccountID        string `json:"account_id,omitempty"`
+	DataBoundary     string `json:"data_boundary,omitempty"`
 }
 
 // WorkerLimits contains the worker-relevant configured limits. The
@@ -467,6 +469,26 @@ type Cancel struct {
 func ValidateWorkerMessage(message any, direction Direction) error {
 	var expected Direction
 	switch m := message.(type) {
+	case ModelTurnRequest:
+		expected = WorkerToBroker
+		if err := validateModelTurnRequest(m); err != nil {
+			return err
+		}
+	case *ModelTurnRequest:
+		if m == nil {
+			return errors.New("nil model_turn_request")
+		}
+		return ValidateWorkerMessage(*m, direction)
+	case ModelTurnResult:
+		expected = BrokerToWorker
+		if err := validateModelTurnResult(m); err != nil {
+			return err
+		}
+	case *ModelTurnResult:
+		if m == nil {
+			return errors.New("nil model_turn_result")
+		}
+		return ValidateWorkerMessage(*m, direction)
 	case Bootstrap:
 		expected = BrokerToWorker
 		if err := validateBootstrap(m); err != nil {
@@ -667,12 +689,16 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 	// payloads carry direct path content and search excerpts — all are data,
 	// not metadata. Structural fields
 	// stay NUL-free via their field validators.
-	allowNUL := discriminator.Type == "review_complete" || discriminator.Type == "frozen" || discriminator.Type == "progress" || discriminator.Type == "inspect_result"
+	allowNUL := discriminator.Type == "review_complete" || discriminator.Type == "frozen" || discriminator.Type == "progress" || discriminator.Type == "inspect_result" || discriminator.Type == "model_turn_request" || discriminator.Type == "model_turn_result"
 	if err := scanStrictJSON(data, allowNUL); err != nil {
 		return nil, err
 	}
 	var message any
 	switch discriminator.Type {
+	case "model_turn_request":
+		message = &ModelTurnRequest{}
+	case "model_turn_result":
+		message = &ModelTurnResult{}
 	case "bootstrap":
 		message = &Bootstrap{}
 	case "inspect_request":
@@ -704,6 +730,22 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 	}
 	if err := unmarshalWorkerMessage(data, message, allowNUL); err != nil {
 		return nil, err
+	}
+	if discriminator.Type == "bootstrap" {
+		var flags struct {
+			FleetMode json.RawMessage `json:"fleet_mode"`
+		}
+		if err := json.Unmarshal(data, &flags); err != nil {
+			return nil, err
+		}
+		if string(flags.FleetMode) == "null" {
+			return nil, errors.New("null fleet mode")
+		}
+	}
+	if discriminator.Type == "model_turn_request" || discriminator.Type == "model_turn_result" {
+		if err := rejectModelNulls(data, reflect.ValueOf(message)); err != nil {
+			return nil, err
+		}
 	}
 	if err := ValidateWorkerMessage(message, direction); err != nil {
 		return nil, err
@@ -941,6 +983,9 @@ func DecodeInspectRequestPayload(request InspectRequest) (any, error) {
 }
 
 func validateBootstrap(m Bootstrap) error {
+	if err := ValidateFleetBootstrap(m); err != nil {
+		return err
+	}
 	if m.Type != "bootstrap" || !bounded(m.Host, 256) || !validKnownJobID(m.RequestID) || m.DeadlineUnixMS < 0 || m.ReviewDeadlineUnixMS <= 0 {
 		return errors.New("invalid bootstrap")
 	}
@@ -979,7 +1024,7 @@ func validateBootstrap(m Bootstrap) error {
 	if m.ApprovalOnly && len(m.ConfigProjection.Models) != 0 {
 		return errors.New("approval-only bootstrap forbids projected models")
 	}
-	return validateProjectionFor(m.ConfigProjection, m.ApprovalOnly)
+	return validateProjectionMode(m.ConfigProjection, m.ApprovalOnly, m.FleetMode)
 }
 func validateOperation(o WorkerOperation) error {
 	if o.CapturedStdin != nil && (o.Mode != "argv" || o.CapturedStdin.Path != "stdin" || o.CapturedStdin.Size < 1 || o.CapturedStdin.Size > MaxCapturedStdinBytes || !digestPattern.MatchString(o.CapturedStdin.SHA256)) {
@@ -1019,7 +1064,11 @@ func validateProjection(p ConfigProjection) error {
 }
 
 func validateProjectionFor(p ConfigProjection, approvalOnly bool) error {
-	if p.Models == nil || (!approvalOnly && len(p.Models) < 1) || len(p.Models) > 16 || p.Limits.MaxModelCallsPerAttempt < 1 || p.Limits.MaxModelCallsPerAttempt > 128 || p.Limits.MaxOutputTokens < 1 || p.Limits.MaxOutputTokens > 200000 || validateWorkerTelegram(p.Telegram) != nil {
+	return validateProjectionMode(p, approvalOnly, false)
+}
+
+func validateProjectionMode(p ConfigProjection, approvalOnly, fleet bool) error {
+	if p.Models == nil || (!approvalOnly && len(p.Models) < 1) || len(p.Models) > 16 || p.Limits.MaxModelCallsPerAttempt < 1 || p.Limits.MaxModelCallsPerAttempt > 128 || p.Limits.MaxOutputTokens < 1 || p.Limits.MaxOutputTokens > 200000 || (!fleet && validateWorkerTelegram(p.Telegram) != nil) {
 		return errors.New("invalid config projection")
 	}
 	for _, m := range p.Models {
@@ -1034,7 +1083,11 @@ func validateProjectionFor(p ConfigProjection, approvalOnly bool) error {
 		if !bounded(m.AccessToken, 4096) || !bounded(m.AccountID, 256) {
 			return errors.New("invalid projected model")
 		}
-		if m.API == "openai_codex" {
+		if fleet {
+			if !oneOf(m.DataBoundary, "local", "external") {
+				return errors.New("invalid fleet model data boundary")
+			}
+		} else if m.API == "openai_codex" {
 			if m.AccessToken == "" || m.AccountID == "" {
 				return errors.New("openai_codex projection requires access_token and account_id")
 			}

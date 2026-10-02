@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,6 +78,7 @@ type jobRuntime struct {
 	// consumeDecision/expireApproval, and never revived: a daemon restart
 	// drops it and MarkRestartAmbiguous expires the store row.
 	pendingApproval *approvalBinding
+	fleet           *fleetJob // owned by the root review/ticket lifecycle, never the worker
 }
 
 type foregroundPeer struct {
@@ -109,6 +111,7 @@ type approvalRecord struct {
 	Digest         string                     `json:"digest"`
 	OperatorUserID int64                      `json:"operator_user_id"`
 	ExpiryUnixMS   int64                      `json:"expiry_unix_ms"`
+	FleetEvents    [][]byte                   `json:"fleet_events,omitempty"`
 }
 
 func newJobRuntime(d *daemon, uid uint32, req proto.SubmitRequest, spool spoolFiles, identity inspection.SubmitterIdentity, cwd *cwdBinding, submitterName string) *jobRuntime {
@@ -328,7 +331,14 @@ func (j *jobRuntime) run(ctx context.Context) {
 	approvalOnly := !j.daemon.cfg.Review.RequiresReview(j.uid, j.req.ForceReview)
 	models := []proto.ProjectedModel{}
 	preflight := []proto.AvailabilityFailure{}
-	if !approvalOnly {
+	if j.daemon.cfg.Fleet != nil {
+		var fleetErr error
+		models, fleetErr = j.prepareFleet(ctx, approvalOnly)
+		if fleetErr != nil {
+			j.fail("prepare fleet review")
+			return
+		}
+	} else if !approvalOnly {
 		var modelsErr error
 		models, preflight, modelsErr = j.projectModelsWithFailures(ctx)
 		if modelsErr != nil {
@@ -463,6 +473,10 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	if err := writeWorker(session, frozen, proto.BrokerToWorker); err != nil {
 		j.fail("send frozen review")
+		return
+	}
+	if j.fleet != nil {
+		j.runFleetTicket(ctx, session, digest, autoPlan)
 		return
 	}
 	message, err := j.readApprovalMessage(session)
@@ -649,6 +663,9 @@ func (j *jobRuntime) recordApproval(ctx context.Context, notification *proto.Not
 		OperatorUserID: j.daemon.cfg.Telegram.OperatorUserID,
 		ExpiryUnixMS:   notification.ExpiryUnixMS,
 	}
+	if j.fleet != nil {
+		record.FleetEvents = j.fleet.proofs
+	}
 	if j.namedRoute() {
 		record.ChannelName = j.route.ChannelName
 		record.Targets = notification.Targets
@@ -815,6 +832,7 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 		CardID: pending.cardID, MessageIDs: pending.messageIDs, Digest: pending.digest,
 		OperatorUserID: pending.operatorUserID, ExpiryUnixMS: pending.expiry.UnixMilli(),
 		ChannelName: j.approvalChannel(pending), Targets: pending.targets,
+		FleetEvents: j.fleetProofs(),
 	}, DecidingUserID: decision.OperatorUserID, DecidingChatID: decision.ChatID, DecidingMessageID: decision.MessageID})
 	if err != nil {
 		j.fail("encode human approval")
@@ -1048,7 +1066,14 @@ func (j *jobRuntime) receiveReviewOutcome(session WorkerSession) (*proto.ReviewC
 				return nil, nil, err
 			}
 			j.recordCapturedStdinRead(*value, result)
+		case *proto.ModelTurnRequest:
+			if err := j.receiveFleetTurn(session, *value); err != nil {
+				return nil, nil, err
+			}
 		case *proto.ReviewComplete:
+			if j.fleet != nil && !j.fleetReviewHistory(value) {
+				return nil, nil, errors.New("review history differs from root model outcomes")
+			}
 			return value, nil, nil
 		case *proto.ReviewUnavailable:
 			// No model report exists: this is the distinct unreviewed lane.
@@ -1062,6 +1087,9 @@ func (j *jobRuntime) receiveReviewOutcome(session WorkerSession) (*proto.ReviewC
 // A worker can report only the projected choices, once each and in order.
 // Preflight failures are broker-owned and inserted back in configured order.
 func (j *jobRuntime) validUnavailableHistory(history []proto.AvailabilityFailure) bool {
+	if j.fleet != nil {
+		return len(history) == len(j.models) && len(history) != 0 && slices.Equal(history, j.fleet.failures)
+	}
 	if len(history) != len(j.preflightFailures)+len(j.models) || len(j.models) == 0 {
 		return false
 	}
@@ -1078,6 +1106,9 @@ func (j *jobRuntime) validUnavailableHistory(history []proto.AvailabilityFailure
 }
 
 func (j *jobRuntime) orderedAvailabilityHistory(unavailable *proto.ReviewUnavailable) []proto.AvailabilityFailure {
+	if j.fleet != nil {
+		return append([]proto.AvailabilityFailure{}, j.fleet.failures...)
+	}
 	all := make([]proto.AvailabilityFailure, 0, len(j.daemon.cfg.Review.Models))
 	workerIndex, preflightIndex := 0, 0
 	for _, model := range j.daemon.cfg.Review.Models {
@@ -1248,6 +1279,9 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		deadlineMS = deadline.UnixMilli()
 	}
 	reviewDeadline := time.Now().Add(j.daemon.cfg.Review.TotalTimeout.Value()).UnixMilli()
+	if j.fleet != nil {
+		reviewDeadline = j.fleet.reviewDeadline.UnixMilli()
+	}
 	j.mu.Lock()
 	models := j.models
 	j.mu.Unlock()
@@ -1287,13 +1321,13 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		}
 	}
 	return proto.Bootstrap{
-		Type: "bootstrap", Host: j.executionHost, TargetUID: 0, RequestID: j.req.RequestID,
+		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: 0, RequestID: j.req.RequestID,
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
-			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.daemon.cfg.Review.MaxOutputTokens, WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled},
+			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled},
 			Telegram: j.workerTelegram(),
 		},
 	}

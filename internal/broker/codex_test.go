@@ -292,6 +292,60 @@ func TestBrokerCodexRefreshRotationPersisted(t *testing.T) {
 	assertBootstrapContainment(t, bootstrap, issuer.refreshJWT, "acct-rotated", "rt-old-secret", "rt-rotated", idToken, staleAccess)
 }
 
+func TestBrokerCodexLockBeforeLoad(t *testing.T) {
+	issuer := newFakeCodexIssuer(t)
+	path := writeCodexTokenFile(t, codexauth.TokenSet{AccessToken: codexAccessToken(t, time.Now().Add(time.Hour))})
+	cfg := testConfig(testUID, testUID+1)
+	cfg.Review.Models = []config.ModelConfig{codexModelConfig(path)}
+	j := &jobRuntime{daemon: &daemon{cfg: cfg, codex: issuer.client()}}
+	err := codexauth.WithTokenLock(context.Background(), path, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_, _, err := j.projectModelsWithFailures(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("broker loaded before lock: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issuer.calls.Load() != 0 {
+		t.Fatal("issuer used while lock held")
+	}
+}
+
+func TestBrokerCodexConcurrentSingleRefresh(t *testing.T) {
+	issuer := newFakeCodexIssuer(t)
+	path := writeCodexTokenFile(t, codexauth.TokenSet{AccessToken: codexAccessToken(t, time.Now()), RefreshToken: "old"})
+	cfg := testConfig(testUID, testUID+1)
+	cfg.Review.Models = []config.ModelConfig{codexModelConfig(path)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	done := make(chan error, 16)
+	for range 16 {
+		go func() {
+			<-start
+			j := &jobRuntime{daemon: &daemon{cfg: cfg, codex: issuer.client()}}
+			models, failures, err := j.projectModelsWithFailures(ctx)
+			if err == nil && (len(failures) != 0 || len(models) != 1 || models[0].AccessToken != issuer.refreshJWT) {
+				err = errors.New("missing rotated projection")
+			}
+			done <- err
+		}()
+	}
+	close(start)
+	for range 16 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if issuer.calls.Load() != 1 {
+		t.Fatalf("refresh calls=%d, want one", issuer.calls.Load())
+	}
+}
+
 // countingWorker records whether the broker started a reviewer worker.
 type countingWorker struct {
 	starts *atomic.Int32
