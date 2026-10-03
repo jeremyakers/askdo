@@ -229,9 +229,24 @@ instant offline revocation.
   continuation. Fully recorded tickets/decisions replay idempotently.
 - A ticket whose Telegram send state is **unknown** after a restart fails
   closed; the gateway never resends a card it cannot account for.
-- If the Telegram **poller** fails, the gateway needs an operator
-  restart/repair; the failed poller is not automatically retried. Host ticket
-  transport reconciliation is separate and retains the original expiry.
+- Transient Telegram **polling** failures resume in the existing single listener
+  from the last committed update offset. Backoff grows from 1 to 30 seconds;
+  a valid rate-limit `retry_after` can require a longer wait. Cancellation stops
+  the wait, and a successful poll plus inbox/cursor commit resets the backoff.
+  Existing ticket expiries are never extended. This recovery is in source after
+  rc.2; already-running rc.2 gateways still require operator repair/restart if
+  their poller has latched a failure.
+- Invalid credentials, a competing-poller conflict, trust/protocol failures and
+  unexpected cursor/inbox database failures remain terminal and require operator
+  attention. Categorical outage/recovery/failure events are logged without bot
+  tokens, URLs, descriptions, update bodies or token hashes.
+- Poll recovery never retries an uncertain `sendMessage` or revives a failed
+  ticket. Host ticket transport reconciliation remains separate and retains the
+  original expiry.
+- Authenticated gateway failure events are retained as evidence and reported as
+  `fleet gateway failure: <code>` rather than being mislabeled invalid proofs.
+  They cannot authorize execution. Invalid signatures, bindings, sequences and
+  incomplete receipts are still rejected.
 - Card cleanup and callback acknowledgements are cosmetic, bounded,
   lossy and best effort; they never affect authorization.
 - Model sessions have a global capacity of 256, not per-host quotas. Capacity

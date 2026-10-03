@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -91,6 +92,71 @@ type APIError struct {
 	Method      string
 	Code        int
 	Description string
+	HTTPStatus  int
+	RetryAfter  time.Duration
+}
+
+// FailureKind identifies the stage of a failed single exchange, not a retry policy.
+type FailureKind string
+
+const (
+	FailureNetwork        FailureKind = "network"
+	FailureRead           FailureKind = "read"
+	FailureRequest        FailureKind = "request"
+	FailureOversize       FailureKind = "oversize"
+	FailureEnvelope       FailureKind = "envelope"
+	FailureResult         FailureKind = "result"
+	FailureProtocolStatus FailureKind = "protocol_status"
+)
+
+// CallError preserves machine-readable causes without formatting transport URLs.
+// The client supplies only normalized, token-redacted diagnostic text.
+type CallError struct {
+	Method     string
+	HTTPStatus int
+	Kind       FailureKind
+	Cause      error
+	detail     string
+	category   error
+}
+
+func (e *CallError) Error() string        { return e.detail }
+func (e *CallError) Unwrap() error        { return e.Cause }
+func (e *CallError) Is(target error) bool { return target == e.category }
+
+type safeCallCause struct {
+	cause  error
+	detail string
+}
+
+func (e *safeCallCause) Error() string { return e.detail }
+func (e *safeCallCause) Unwrap() error { return e.cause }
+
+func (c *Client) callError(method string, status int, kind FailureKind, category, cause error, detail string) error {
+	var urlErr *url.Error
+	for errors.As(cause, &urlErr) {
+		cause = urlErr.Err
+	}
+	if cause != nil {
+		text := strings.ReplaceAll(cause.Error(), c.baseURL+"/bot"+c.token+"/"+method, "[endpoint]")
+		cause = &safeCallCause{cause: cause, detail: diagnostic.Normalize(text, c.token)}
+		detail += ": " + cause.Error()
+	}
+	return &CallError{Method: method, HTTPStatus: status, Kind: kind, Cause: cause, category: category, detail: diagnostic.Normalize(detail, c.token)}
+}
+
+func retryAfter(parameters json.RawMessage) time.Duration {
+	var p struct {
+		RetryAfter json.RawMessage `json:"retry_after"`
+	}
+	if json.Unmarshal(parameters, &p) != nil {
+		return 0
+	}
+	var seconds int64
+	if json.Unmarshal(p.RetryAfter, &seconds) != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // Error formats the API error without any credential material.
@@ -351,17 +417,17 @@ func getUpdates(ctx context.Context, c *Client, offset int64, timeoutSeconds int
 func (c *Client) call(ctx context.Context, method string, payload any, timeout time.Duration, result any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("telegram: encode %s request: %w", method, err)
+		return c.callError(method, 0, FailureRequest, ErrTransport, err, fmt.Sprintf("telegram: encode %s request", method))
 	}
 	if len(body) > maxBodyBytes {
-		return fmt.Errorf("telegram: %s request body exceeds the 1 MiB cap", method)
+		return c.callError(method, 0, FailureOversize, ErrTransport, nil, fmt.Sprintf("telegram: %s request body exceeds the 1 MiB cap", method))
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// The token lives in the URL path; it is never placed in any error.
 	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, c.baseURL+"/bot"+c.token+"/"+method, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("%w: build %s request: %s", ErrTransport, method, diagnostic.Normalize(err.Error(), c.token))
+		return c.callError(method, 0, FailureRequest, ErrTransport, err, fmt.Sprintf("%s: build %s request", ErrTransport, method))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -376,47 +442,48 @@ func (c *Client) call(ctx context.Context, method string, payload any, timeout t
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return fmt.Errorf("%w: %s: %s", ErrTransport, method, diagnostic.Normalize(err.Error(), c.token))
+		return c.callError(method, 0, FailureNetwork, ErrTransport, err, fmt.Sprintf("%s: %s: network exchange failed", ErrTransport, method))
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
-	if err != nil {
-		return fmt.Errorf("%w: %s: read response: %s", ErrTransport, method, diagnostic.Normalize(err.Error(), c.token))
-	}
 	if len(data) > maxBodyBytes {
 		// Do not print a partial body: it may contain a secret split across
 		// the cap. The exact total size is unknown without reading past it.
-		return fmt.Errorf("%w: %s: response body exceeds the 1 MiB cap (truncated after at least %d bytes; body omitted)", ErrTransport, method, len(data))
+		return c.callError(method, resp.StatusCode, FailureOversize, ErrTransport, nil, fmt.Sprintf("%s: %s: response body exceeds the 1 MiB cap (truncated after at least %d bytes; body omitted)", ErrTransport, method, len(data)))
+	}
+	if err != nil {
+		return c.callError(method, resp.StatusCode, FailureRead, ErrTransport, err, fmt.Sprintf("%s: %s: read response failed", ErrTransport, method))
 	}
 	// Failure diagnostics are kept within the existing response size bound.
 	// These errors are for root-side diagnostics, never for a Telegram card.
 	diagnostic := func() string { return c.responseDiagnostic(data) }
 	var envelope struct {
-		OK          bool            `json:"ok"`
+		OK          *bool           `json:"ok"`
 		ErrorCode   int             `json:"error_code"`
 		Description string          `json:"description"`
 		Result      json.RawMessage `json:"result"`
+		Parameters  json.RawMessage `json:"parameters"`
 	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
+	if err := json.Unmarshal(data, &envelope); err != nil || envelope.OK == nil {
 		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return fmt.Errorf("%w: %s: HTTP status %d: response: %s", ErrTransport, method, resp.StatusCode, diagnostic())
+			return c.callError(method, resp.StatusCode, FailureEnvelope, ErrTransport, nil, fmt.Sprintf("%s: %s: HTTP status %d: response: %s", ErrTransport, method, resp.StatusCode, diagnostic()))
 		}
-		return fmt.Errorf("%w: %s: undecodable response envelope: %s", ErrMalformed, method, diagnostic())
+		return c.callError(method, resp.StatusCode, FailureEnvelope, ErrMalformed, nil, fmt.Sprintf("%s: %s: undecodable response envelope: %s", ErrMalformed, method, diagnostic()))
 	}
-	if !envelope.OK {
-		return &APIError{Method: method, Code: envelope.ErrorCode, Description: c.responseDiagnostic([]byte(envelope.Description))}
+	if !*envelope.OK {
+		return &APIError{Method: method, Code: envelope.ErrorCode, Description: c.responseDiagnostic([]byte(envelope.Description)), HTTPStatus: resp.StatusCode, RetryAfter: retryAfter(envelope.Parameters)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%w: %s: ok:true with HTTP status %d: response: %s", ErrMalformed, method, resp.StatusCode, diagnostic())
+		return c.callError(method, resp.StatusCode, FailureProtocolStatus, ErrMalformed, nil, fmt.Sprintf("%s: %s: ok:true with HTTP status %d: response: %s", ErrMalformed, method, resp.StatusCode, diagnostic()))
 	}
 	if result == nil {
 		return nil
 	}
-	if len(envelope.Result) == 0 {
-		return fmt.Errorf("%w: %s: ok:true without result: response: %s", ErrMalformed, method, diagnostic())
+	if len(envelope.Result) == 0 || string(envelope.Result) == "null" {
+		return c.callError(method, resp.StatusCode, FailureResult, ErrMalformed, nil, fmt.Sprintf("%s: %s: ok:true without result: response: %s", ErrMalformed, method, diagnostic()))
 	}
 	if err := json.Unmarshal(envelope.Result, result); err != nil {
-		return fmt.Errorf("%w: %s: undecodable result: response: %s", ErrMalformed, method, diagnostic())
+		return c.callError(method, resp.StatusCode, FailureResult, ErrMalformed, nil, fmt.Sprintf("%s: %s: undecodable result: response: %s", ErrMalformed, method, diagnostic()))
 	}
 	return nil
 }

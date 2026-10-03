@@ -373,9 +373,12 @@ ambiguity:
   `starting`/`running`. It means "inspect the host before deciding anything",
   never "safe to retry". `unknown` jobs are terminal, exempt from retention
   cleanup, and never auto-retried.
-- **No auto-retry, anywhere.** The provider adapters perform one HTTP
-  exchange per call (no retries); fallback advances rather than retries; a
-  dispatched operation runs at most once.
+- **No automatic replay of model calls or privileged operations.** Provider
+  adapters perform one HTTP exchange per call; fallback advances rather than
+  retries; a dispatched operation runs at most once. The fleet gateway can
+  recover transient, read-side Telegram polling failures from its committed
+  update offset. It never retries an uncertain message send, renews an approval
+  expiry or revives a failed job.
 - **At-most-once dispatch.** Detached `awaiting-human` → `starting` or
   foreground `awaiting-handoff` → `starting` is the durable launch gate.
   The one-use decision/grant is consumed before its dispatch commit;
@@ -389,6 +392,10 @@ ambiguity:
   acknowledged by Telegram before dispatch; failure aborts rather than
   silently running. Button removal and callback acknowledgements on the manual
   path are best-effort cleanup only, never the authorization mechanism.
+- **Failures are not approvals or invalid proofs.** After signature, stream and
+  state validation, a gateway failure event is persisted and reported using its
+  closed machine-code category. Receipt/decision checks remain the only fleet
+  authority path; a valid signed failure cannot dispatch a command.
 
 ### Conditional risk-based auto-approval
 
