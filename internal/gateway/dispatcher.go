@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -15,6 +16,8 @@ type dispatcherOptions struct {
 	baseURL string
 	// Private wire-fixture override: gates, not deadlines, order regression I/O.
 	cosmeticTimeout time.Duration
+	pollWait        func(context.Context, time.Duration) bool
+	logger          *slog.Logger
 }
 type dispatchBot struct {
 	client *telegram.Client
@@ -34,10 +37,13 @@ type dispatcher struct {
 	wg              sync.WaitGroup
 	cosmetics       chan cosmeticJob
 	cosmeticTimeout time.Duration
+	pollWait        func(context.Context, time.Duration) bool
+	logger          *slog.Logger
 }
 
 func newDispatcher(ctx context.Context, store *TicketStore, cfg Config, ids map[string]int64, options dispatcherOptions) (*dispatcher, error) {
 	d := &dispatcher{store: store, ctx: ctx, bots: map[string]*dispatchBot{}, aliases: map[string]string{}, cosmetics: make(chan cosmeticJob, cosmeticQueueCapacity), cosmeticTimeout: options.cosmeticTimeout}
+	d.pollWait, d.logger = options.pollWait, options.logger
 	for _, bot := range cfg.Bots {
 		client, err := telegram.NewClient(telegram.ClientConfig{TokenFile: bot.TokenFile, BaseURL: options.baseURL})
 		if err != nil {
@@ -81,23 +87,53 @@ func pause(ctx context.Context, duration time.Duration) bool {
 	}
 }
 func (d *dispatcher) poll(bot *dispatchBot) {
+	wait := d.pollWait
+	if wait == nil {
+		wait = pause
+	}
+	attempt := 0
+	outage := false
 	for d.ctx.Err() == nil {
 		offset, err := d.store.Offset(d.ctx, bot.hash)
 		if err != nil {
-			bot.fail()
+			d.pollFatal(bot, "offset")
 			return
 		}
 		updates, err := bot.client.GetUpdates(d.ctx, offset, 25)
 		if err != nil {
-			if d.ctx.Err() == nil {
-				bot.fail()
+			if d.ctx.Err() != nil {
+				return
 			}
-			return
+			retry, after, reason := pollFailure(err)
+			if !retry {
+				d.pollFatal(bot, reason)
+				return
+			}
+			if !outage {
+				d.pollLog().WarnContext(d.ctx, "telegram polling unavailable", "method", "getUpdates", "reason", reason)
+				outage = true
+			}
+			delay := pollBackoff(attempt)
+			if after > delay {
+				delay = after
+			}
+			if attempt < 5 {
+				attempt++
+			}
+			if !wait(d.ctx, delay) {
+				return
+			}
+			continue
 		}
 		if err = d.store.Ingest(d.ctx, bot.hash, updates); err != nil {
-			bot.fail()
+			d.pollFatal(bot, "ingest")
 			return
 		}
+		if outage {
+			d.pollLog().InfoContext(d.ctx, "telegram polling recovered", "method", "getUpdates")
+			outage = false
+		}
+		attempt = 0
 		// Fixtures and quiet servers may return immediately; avoid busy spinning.
 		if !pause(d.ctx, 10*time.Millisecond) {
 			return

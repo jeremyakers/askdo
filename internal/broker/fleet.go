@@ -428,7 +428,9 @@ func (j *jobRuntime) runFleetTicket(ctx context.Context, session WorkerSession, 
 			j.consumeDecision(lifecycleCtx, &proto.Decision{Type: "decision", Digest: digest, ChannelName: j.route.ChannelName, ChatID: d.ChatID, MessageID: d.CardMessageID, OperatorUserID: d.OperatorID, Action: string(d.Action), TimeUnixMS: d.DecidedAt * 1000})
 			return
 		} else {
-			j.fail("fleet delivery failed")
+			// Validation closed the failure-code set before preserving the
+			// signed wire. Failure is evidence only, never dispatch authority.
+			j.failFleetEvent("fleet gateway failure: " + string(event.Failure.Code))
 			return
 		}
 	}
@@ -531,7 +533,10 @@ func (j *jobRuntime) validateFleetEvent(e fleetproto.Event) error {
 		}
 		return fleetproto.CheckDecision(*e.Decision, *f.receipt, f.ticket, f.selection.Catalog.Route, time.Now().Unix())
 	}
-	return &fleetclient.Error{Code: fleetproto.ErrCodeDelivery}
+	if e.Type == fleetproto.EventFailed {
+		return nil
+	}
+	return fleetproto.ErrProtocol
 }
 
 func (j *jobRuntime) fleetNotification() *proto.NotificationSent {

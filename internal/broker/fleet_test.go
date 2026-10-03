@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -168,6 +169,8 @@ func TestFleetManualEventFailurePreservesExpiry(t *testing.T) {
 	}{
 		{"expired_empty_poll", "fleet ticket expired", true, store.StateExpired},
 		{"expired_proof", "invalid fleet event proof", true, store.StateExpired},
+		{"expired_signed_failure", "fleet gateway failure: delivery", true, store.StateExpired},
+		{"signed_failure_within_ttl", "fleet gateway failure: delivery", false, store.StateFailed},
 		{"infrastructure_within_ttl", "fleet event proof unavailable", false, store.StateFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -264,6 +267,146 @@ func TestFleetRootProofBindingMatrix(t *testing.T) {
 			tc.change(j, &e)
 			if err := j.validateFleetEvent(e); err == nil {
 				t.Fatal("forged/stale root proof accepted")
+			}
+		})
+	}
+}
+
+func TestFleetRootFailureValidation(t *testing.T) {
+	for _, kind := range []fleetproto.TicketKind{fleetproto.HumanReviewed, fleetproto.HumanUnreviewed, fleetproto.AutoNotice} {
+		for _, afterReceipt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/receipt=%t", kind, afterReceipt), func(t *testing.T) {
+				// Given a bound live ticket, when a closed failure arrives, then it
+				// is valid evidence, never a receipt or decision authorization.
+				j, receipt := rootFleetReceiptFixture()
+				j.fleet.ticket.Binding.TicketKind = kind
+				if afterReceipt {
+					j.fleet.cursor, j.fleet.receipt, j.state = 1, receipt.Receipt, store.StateAwaitingHuman
+				}
+				e := fleetproto.Event{Version: 1, Kind: fleetproto.KindEvent, HostID: j.fleet.ticket.Binding.HostID, JobID: j.fleet.ticket.Binding.JobID, Sequence: j.fleet.cursor + 1, Type: fleetproto.EventFailed, Failure: &fleetproto.Failure{Code: fleetproto.ErrCodeDelivery}}
+				if err := j.validateFleetEvent(e); err != nil {
+					t.Fatalf("valid failure rejected: %v", err)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*jobRuntime, *fleetproto.Event)
+	}{
+		{"host", func(j *jobRuntime, e *fleetproto.Event) { e.HostID = "other" }},
+		{"job", func(j *jobRuntime, e *fleetproto.Event) { e.JobID = "2026-09-30_#2" }},
+		{"sequence", func(j *jobRuntime, e *fleetproto.Event) { e.Sequence++ }},
+		{"kind", func(j *jobRuntime, e *fleetproto.Event) { e.Kind = fleetproto.KindReceipt }},
+		{"type", func(j *jobRuntime, e *fleetproto.Event) { e.Type = fleetproto.EventReceipt }},
+		{"missing_failure", func(j *jobRuntime, e *fleetproto.Event) { e.Failure = nil }},
+		{"dual_union", func(j *jobRuntime, e *fleetproto.Event) { _, r := rootFleetReceiptFixture(); e.Receipt = r.Receipt }},
+		{"unknown_code", func(j *jobRuntime, e *fleetproto.Event) { e.Failure.Code = "untrusted diagnostic" }},
+		{"expired", func(j *jobRuntime, e *fleetproto.Event) { j.fleet.ticket.Binding.ExpiresAt = time.Now().Unix() }},
+		{"starting", func(j *jobRuntime, e *fleetproto.Event) { j.state = store.StateStarting }},
+		{"finished", func(j *jobRuntime, e *fleetproto.Event) { j.state = store.StateFinished }},
+		{"cancelled", func(j *jobRuntime, e *fleetproto.Event) { j.state = store.StateCancelled }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j, _ := rootFleetReceiptFixture()
+			e := fleetproto.Event{Version: 1, Kind: fleetproto.KindEvent, HostID: j.fleet.ticket.Binding.HostID, JobID: j.fleet.ticket.Binding.JobID, Sequence: 1, Type: fleetproto.EventFailed, Failure: &fleetproto.Failure{Code: fleetproto.ErrCodeRevoked}}
+			tc.change(j, &e)
+			if err := j.validateFleetEvent(e); err == nil {
+				t.Fatal("invalid failure accepted")
+			}
+		})
+	}
+}
+
+func TestRootFleetFailureNextEventProofBoundary(t *testing.T) {
+	requireRootTest(t)
+	// This unit exercises the HTTPS verifier, not validateFleetEvent: malformed
+	// signatures and signed-but-invalid payloads must never reach root handling.
+	j, _ := rootFleetReceiptFixture()
+	e := fleetproto.Event{Version: 1, Kind: fleetproto.KindEvent, HostID: "host", JobID: j.fleet.ticket.Binding.JobID, Sequence: 1, Type: fleetproto.EventFailed, Failure: &fleetproto.Failure{Code: fleetproto.ErrCodeDelivery}}
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := fleetproto.Sign(key, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response atomic.Value
+	response.Store(valid)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(response.Load().([]byte))
+	}))
+	t.Cleanup(server.Close)
+	root := t.TempDir()
+	write := func(name string, data []byte) string {
+		p := filepath.Join(root, name)
+		mode := os.FileMode(0400)
+		if name == "enrollment" {
+			mode = 0600
+		}
+		if err := os.WriteFile(p, data, mode); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	c, err := fleetclient.New(config.FleetConfig{URL: server.URL, HostID: "host", EnrollmentFile: write("enrollment", []byte(base64.RawURLEncoding.EncodeToString(make([]byte, 32)))), VerificationKeyFile: write("verify", []byte(base64.StdEncoding.EncodeToString(pub))), CAFile: write("ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	got, wire, ok, err := c.NextEventProof(ctx, e.JobID, 0)
+	if err != nil || !ok || got.Type != fleetproto.EventFailed || !bytes.Equal(wire, valid) {
+		t.Fatal("valid signed failure unavailable", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(map[string]any)
+	}{
+		{"host", func(p map[string]any) { p["host_id"] = "other" }},
+		{"job", func(p map[string]any) { p["job_id"] = "2026-09-30_#2" }},
+		{"sequence", func(p map[string]any) { p["sequence"] = 2 }},
+		{"kind", func(p map[string]any) { p["kind"] = "receipt" }},
+		{"dual_union", func(p map[string]any) { p["decision"] = map[string]any{} }},
+		{"unknown_code", func(p map[string]any) { p["failure"] = map[string]any{"code": "untrusted diagnostic"} }},
+		{"unknown_field", func(p map[string]any) {
+			p["failure"] = map[string]any{"code": "delivery", "diagnostic": "untrusted diagnostic"}
+		}},
+		{"wrong_signature", func(p map[string]any) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := json.Marshal(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var p map[string]any
+			if err := json.Unmarshal(payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			tc.change(p)
+			payload, err = json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sig := ed25519.Sign(key, append([]byte(fleetproto.SigningDomain), payload...))
+			if tc.name == "wrong_signature" {
+				sig[0] ^= 1
+			}
+			bad, err := json.Marshal(fleetproto.Envelope{Payload: base64.StdEncoding.EncodeToString(payload), Signature: base64.StdEncoding.EncodeToString(sig)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Store(bad)
+			_, _, ok, err := c.NextEventProof(ctx, e.JobID, 0)
+			want := fleetproto.ErrCodeProtocol
+			if tc.name == "wrong_signature" {
+				want = fleetproto.ErrCodeSignature
+			}
+			var typed *fleetclient.Error
+			if !errors.As(err, &typed) || typed.Code != want || ok {
+				t.Fatalf("invalid proof crossed verifier: ok=%t err=%v want=%s", ok, err, want)
 			}
 		})
 	}
