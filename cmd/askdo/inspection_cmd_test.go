@@ -155,8 +155,8 @@ func TestInspectionCheckFleetPolicyAndAliases(t *testing.T) {
 }
 
 func TestInspectionCheckValidDirectV4(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("disposable root fixture required")
+	if os.Geteuid() != 0 || os.Getenv("ASKDO_ROOT_TEST") != "1" {
+		t.Skip("provisioned disposable root fixture required (ASKDO_ROOT_TEST=1)")
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, "sample")
