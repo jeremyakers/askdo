@@ -43,7 +43,7 @@ func runInspection(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "read config %q: %q\n", *configPath, err.Error())
 		return 125
 	}
-	cfg, err := config.DecodeForMutation(data)
+	cfg, err := config.DecodeForFleetMutation(data)
 	if err != nil {
 		fmt.Fprintf(stderr, "decode config %q: %q\n", *configPath, err.Error())
 		return 125
