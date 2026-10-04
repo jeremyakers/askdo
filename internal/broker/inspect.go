@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"unicode/utf8"
@@ -9,12 +10,20 @@ import (
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
-func (j *jobRuntime) handleInspect(request proto.InspectRequest) (proto.InspectResult, error) {
+func (j *jobRuntime) dispatchInspect(ctx context.Context, request proto.InspectRequest) (proto.InspectResult, error) {
 	payload, err := proto.DecodeInspectRequestPayload(request)
 	if err != nil {
 		return proto.InspectResult{}, err
 	}
 	switch value := payload.(type) {
+	case proto.InspectionScopeRequest:
+		return j.inspectionScope(request, value)
+	case proto.HashPathRequest:
+		return j.hashPath(ctx, request, value)
+	case proto.ServiceStatusRequest:
+		return j.serviceStatus(ctx, request, value)
+	case proto.SudoPolicyRequest:
+		return j.sudoPolicy(ctx, request, value)
 	case proto.ReadPathRequest:
 		return j.readPath(request.RequestSeq, value)
 	case proto.ListPathRequest:

@@ -22,10 +22,12 @@ import (
 )
 
 const (
-	defaultRequestTimeout = 2 * time.Minute
-	defaultTotalTimeout   = 20 * time.Minute
-	defaultApprovalTTL    = 10 * time.Minute
-	maxInspectedBytes     = int64(66060288)
+	defaultRequestTimeout   = 2 * time.Minute
+	defaultTotalTimeout     = 20 * time.Minute
+	defaultApprovalTTL      = 10 * time.Minute
+	maxInspectedBytes       = int64(66060288)
+	MaxHashFileBytes        = int64(32 << 20)
+	MaxHashedBytesPerReview = int64(64 << 20)
 )
 
 // Duration is a JSON Go-duration string.
@@ -244,8 +246,15 @@ func (c *Config) validateMode() error {
 
 // InspectionConfig controls host content inspection roots.
 type InspectionConfig struct {
-	ReadRoots []string `json:"read_roots"`
-	DenyPaths []string `json:"deny_paths"`
+	HashPathEnabled      bool `json:"hash_path_enabled,omitempty"`
+	ServiceStatusEnabled bool `json:"service_status_enabled,omitempty"`
+	SudoPolicyEnabled    bool `json:"sudo_policy_enabled,omitempty"`
+	// SudoPolicyUIDs authorizes extra numeric accounts; the caller is always
+	// eligible when sudo_policy_enabled is true. UID 0 has no special exemption
+	// when it is not the caller. At most 127 extras leave room for that caller.
+	SudoPolicyUIDs []uint32 `json:"sudo_policy_uids,omitempty"`
+	ReadRoots      []string `json:"read_roots"`
+	DenyPaths      []string `json:"deny_paths"`
 	// TrustedExecutableRoots is deprecated and inert. It is still decoded so
 	// existing version 4 configuration files that carry the field keep
 	// loading under the strict decoder, but the value is ignored entirely:
@@ -313,9 +322,11 @@ type ModelConfig struct {
 
 // LimitsConfig holds the configurable capture and output limits.
 type LimitsConfig struct {
-	MaxInspectedFiles    int   `json:"max_inspected_files"`
-	MaxInspectedBytes    int64 `json:"max_inspected_bytes"`
-	MaxLogBytesPerStream int64 `json:"max_log_bytes_per_stream"`
+	MaxHashFileBytes        int64 `json:"max_hash_file_bytes,omitempty"`
+	MaxHashedBytesPerReview int64 `json:"max_hashed_bytes_per_review,omitempty"`
+	MaxInspectedFiles       int   `json:"max_inspected_files"`
+	MaxInspectedBytes       int64 `json:"max_inspected_bytes"`
+	MaxLogBytesPerStream    int64 `json:"max_log_bytes_per_stream"`
 }
 
 // TelegramConfig configures the mandatory Telegram decision interface.
@@ -515,6 +526,32 @@ func (c *Config) CredentialPaths() []string {
 }
 
 func (c *Config) ValidateInspection() error {
+	for _, name := range []string{"hash_path_enabled", "service_status_enabled", "sudo_policy_enabled", "sudo_policy_uids"} {
+		if string(c.present.inspection[name]) == "null" {
+			return fmt.Errorf("inspection.%s must not be null", name)
+		}
+	}
+	seenUIDs := make(map[uint32]bool)
+	if len(c.Inspection.SudoPolicyUIDs) > 127 {
+		return errors.New("inspection.sudo_policy_uids must contain at most 127 additional UIDs")
+	}
+	if raw, present := c.present.inspection["sudo_policy_uids"]; present {
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return fmt.Errorf("invalid inspection.sudo_policy_uids: %w", err)
+		}
+		for _, item := range items {
+			if string(item) == "null" {
+				return errors.New("inspection.sudo_policy_uids must not contain null")
+			}
+		}
+	}
+	for _, uid := range c.Inspection.SudoPolicyUIDs {
+		if seenUIDs[uid] {
+			return errors.New("inspection.sudo_policy_uids contains duplicate UID")
+		}
+		seenUIDs[uid] = true
+	}
 	for _, item := range []struct {
 		name  string
 		paths []string
@@ -655,6 +692,12 @@ func (c *Config) Validate() error {
 		return errors.New("config is nil")
 	}
 	c.Warnings = c.Warnings[:0]
+	if c.Limits.MaxHashFileBytes == 0 && !hasField(c.present.limits, "max_hash_file_bytes") {
+		c.Limits.MaxHashFileBytes = MaxHashFileBytes
+	}
+	if c.Limits.MaxHashedBytesPerReview == 0 && !hasField(c.present.limits, "max_hashed_bytes_per_review") {
+		c.Limits.MaxHashedBytesPerReview = MaxHashedBytesPerReview
+	}
 	if len(c.Inspection.ReadRoots) == 0 {
 		c.Warnings = append(c.Warnings, "inspection.read_roots is empty; host content inspection is disabled")
 	}
@@ -682,6 +725,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxInspectedFiles < 1 {
 		return errors.New("limits.max_inspected_files must be at least 1")
+	}
+	if c.Limits.MaxHashFileBytes < 1 || c.Limits.MaxHashFileBytes > MaxHashFileBytes || c.Limits.MaxHashedBytesPerReview < c.Limits.MaxHashFileBytes || c.Limits.MaxHashedBytesPerReview > MaxHashedBytesPerReview {
+		return errors.New("limits hash byte budgets are out of range")
 	}
 	if c.Limits.MaxInspectedBytes < 1 || c.Limits.MaxInspectedBytes > maxInspectedBytes {
 		return errors.New("limits.max_inspected_bytes is out of range")
@@ -1056,6 +1102,15 @@ func validateModelList(models []ModelConfig, localOnly, checkFiles bool) error {
 }
 
 func applyDefaults(c *Config) {
+	if c.Inspection.SudoPolicyUIDs == nil && !hasField(c.present.inspection, "sudo_policy_uids") {
+		c.Inspection.SudoPolicyUIDs = []uint32{}
+	}
+	if c.Limits.MaxHashFileBytes == 0 && !hasField(c.present.limits, "max_hash_file_bytes") {
+		c.Limits.MaxHashFileBytes = MaxHashFileBytes
+	}
+	if c.Limits.MaxHashedBytesPerReview == 0 && !hasField(c.present.limits, "max_hashed_bytes_per_review") {
+		c.Limits.MaxHashedBytesPerReview = MaxHashedBytesPerReview
+	}
 	if c.Fleet != nil {
 		fields, _ := objectField(c.present.top, "fleet")
 		if !hasField(fields, "approval_ttl") && c.Fleet.ApprovalTTL == 0 {

@@ -30,7 +30,7 @@ import (
 // server returns on turn 2.
 const fixtureReportArgs = `{"risk":"1","summary":"Synthetic cross-adapter fixture review.","effects":["No host changes."],"warnings":[],"missing_context":[],"reversibility":"No changes to revert.","intent_match":"consistent"}`
 
-var fixtureToolNames = []string{"read_path", "list_path", "search_path", "stat_path", "find_path", "mount_info", "submit_review"}
+var fixtureToolNames = []string{"read_path", "list_path", "search_path", "stat_path", "find_path", "mount_info", "inspection_scope", "submit_review"}
 
 // capturePipe is the reviewer ReviewPipe test double: the fixture scripts
 // exactly one read_path inspection, answered with a typed read result; any

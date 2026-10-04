@@ -306,16 +306,16 @@ func TestSubmitReviewControlFieldsRejectedBeforePipe(t *testing.T) {
 // removed capture tools are unknown tools. JSON Schema's required-field list is
 // structural; it is not the deleted model-facing `required:true` file-importance
 // flag. The webfetch tool is opt-in and absent from this default surface.
-func TestDefinitionsAreFixedSeven(t *testing.T) {
+func TestDefinitionsIncludeScopeAndNoOptInTools(t *testing.T) {
 	defs := Definitions()
-	if len(defs) != 7 {
+	if len(defs) != 8 {
 		t.Fatalf("definitions=%d", len(defs))
 	}
 	names := make([]string, len(defs))
 	for i, d := range defs {
 		names[i] = d.Name
 	}
-	if strings.Join(names, ",") != "read_path,list_path,search_path,stat_path,find_path,mount_info,submit_review" {
+	if strings.Join(names, ",") != "read_path,list_path,search_path,stat_path,find_path,mount_info,inspection_scope,submit_review" {
 		t.Fatalf("names=%v", names)
 	}
 	for _, def := range defs {
