@@ -73,10 +73,27 @@ type Config struct {
 // MarshalJSON preserves the direct document unchanged, but omits its forbidden
 // local credential sections from a fleet document. Fleet configs must roundtrip
 // through the same strict presence checks that protect their load path.
+// Default hash budgets remain runtime values without adding new fields to an
+// older document on an unrelated save. Explicit or custom budgets are retained.
 func (c Config) MarshalJSON() ([]byte, error) {
 	type configJSON Config
+	type limitsJSON struct {
+		LimitsConfig
+		MaxHashFileBytes        *int64 `json:"max_hash_file_bytes,omitempty"`
+		MaxHashedBytesPerReview *int64 `json:"max_hashed_bytes_per_review,omitempty"`
+	}
+	limits := limitsJSON{LimitsConfig: c.Limits}
+	if hasField(c.present.limits, "max_hash_file_bytes") || (c.Limits.MaxHashFileBytes != 0 && c.Limits.MaxHashFileBytes != MaxHashFileBytes) {
+		limits.MaxHashFileBytes = &c.Limits.MaxHashFileBytes
+	}
+	if hasField(c.present.limits, "max_hashed_bytes_per_review") || (c.Limits.MaxHashedBytesPerReview != 0 && c.Limits.MaxHashedBytesPerReview != MaxHashedBytesPerReview) {
+		limits.MaxHashedBytesPerReview = &c.Limits.MaxHashedBytesPerReview
+	}
 	if c.Fleet == nil {
-		return json.Marshal(configJSON(c))
+		return json.Marshal(struct {
+			configJSON
+			Limits limitsJSON `json:"limits"`
+		}{configJSON: configJSON(c), Limits: limits})
 	}
 	if c.hasLocalFleetSections() {
 		return nil, errors.New("fleet cannot contain local review.models or telegram")
@@ -93,9 +110,10 @@ func (c Config) MarshalJSON() ([]byte, error) {
 	review := fleetReviewJSON{ReviewConfig: c.Review, GatewayProfiles: profiles}
 	return json.Marshal(struct {
 		configJSON
+		Limits   limitsJSON      `json:"limits"`
 		Telegram json.RawMessage `json:"telegram,omitempty"`
 		Review   fleetReviewJSON `json:"review"`
-	}{configJSON: configJSON(c), Review: review})
+	}{configJSON: configJSON(c), Limits: limits, Review: review})
 }
 
 func (c *Config) hasLocalFleetSections() bool {
