@@ -58,6 +58,13 @@ classic `curl … | sh` — askdo can capture it, make it available to the
 reviewer, and run those exact bytes with Bash after your approval; bundles
 work the same way for local script folders. [Here's how](#review-a-script-before-you-run-it).
 
+The source reviewer also exposes declared inspection scope, with optional
+bounded executable hashes, service state and sanitized sudo-policy metadata.
+These observations can reduce missing context, not guarantee safety or pin
+later host execution. All three optional capabilities are off by default and
+are not in published rc.2 binaries; see [review tools](docs/review-tools.md)
+and [upgrade constraints](docs/configuration.md#optional-host-evidence-and-rollout).
+
 ### Make the rest of the workflow easier, too
 
 - **Approve homelab maintenance from the sofa.** Let an agent prepare the

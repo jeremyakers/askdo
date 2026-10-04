@@ -1,9 +1,10 @@
 # Validation checks
 
 Checks you can run yourself against a source checkout or an installed askdo
-service. None of them send host file contents anywhere, and none of them prove
-a security audit; they confirm buildability, configuration validity, and
-service reachability only.
+service. Automated fixtures and `config check --live` do not send inspected
+host content to real model providers. Real reviewed operations may do so under
+the configured provider policy. None of these checks proves a security audit
+or an operation's safety.
 
 ## From a source checkout
 
@@ -90,6 +91,70 @@ cover every provider/model, or prove model risk calibration. Real issuer refresh
 rotation after natural token expiry was not forced during the short Codex smoke;
 refresh locking and uncertain-outcome handling remain covered by automated tests.
 The previously published rc.1 binaries still do not contain the fleet gateway.
+
+### Host-evidence validation
+
+`inspection_scope`, optional executable hashing, service metadata, sudo-policy
+metadata and inspection audit/manifest binding are new source additions, **not
+in the published rc.2 binaries**. The earlier fleet validation above and existing
+foreground-helper sudo hardening do not establish that these additions were
+tested or deployed.
+
+Targeted fixture checks from the current checkout:
+
+```sh
+go test -race ./internal/config ./internal/proto ./internal/inspection ./internal/hostmeta ./internal/reviewer ./internal/broker ./internal/providers
+go vet ./...
+```
+
+These packages contain checks for false/default capability flags and strict
+UID/hash-limit decoding; request/result correlation and closed reasons;
+descriptor-filtered scope, binary executable hashing and mutation/policy
+refusal; exact adapter argv and bounded parser output; independent worker/root
+gates, report completion after metadata failure, per-job accounting, redacted
+audit output and digest-bound manifest evidence. Unprivileged runs can skip
+root-only cases: success there is not proof that every root case executed.
+The default content/staging limit remains 8 MiB, independently of the 32 MiB
+file / 64 MiB review hash ceilings, two-attempt cap, 32 metadata requests,
+256 KiB aggregate metadata responses and 256 audit observations.
+
+Use `scripts/run-root-tests.sh` for the existing disposable root/container
+runner, which currently selects broker/inspection root cases, **not** the new
+hostmeta integration fixture. The separate
+`internal/hostmeta/testdata/root-fixture.sh` provisions disposable accounts and
+policy and exercises a real sudo listing with `ASKDO_HOSTMETA_ROOT_FIXTURE=1`
+and a prebuilt `/hostmeta.test`. Never set that switch or run the provisioning
+script directly on a production host. These fixtures are not a production-policy
+audit.
+
+Run the dedicated metadata lane separately:
+
+```sh
+sh scripts/test-inspection-metadata.sh
+```
+
+It uses a disposable container and a loopback-only runtime network namespace;
+never run its account/policy setup directly on a production host. The recorded
+run passed with an actual root broker, reviewer UID995, submitter UID1001
+authenticated by kernel peer credentials, private pipe, TLS gateway, SQLite,
+GNU sudo and a 21 MiB executable hash under the independent 8 MiB content limit.
+The provider fixture received the inspection results before report completion.
+Human approval then produced root UID0; tampering with the frozen service-PID
+observation changed the digest and prevented dispatch. A long/JSON-escaped hash
+result is reported as a bounded tool failure, allowing report completion rather
+than terminating the review. Privileged alias/ownership/cancellation cases run
+in the same lane.
+
+Provider and Telegram responses are wire fixtures. Service observations use a
+synthetic fixed-argv systemctl adapter, not a real systemd manager. This proves
+the new broker/tool/approval flow, not native ARM, live-model behavior, or actual
+deployed manager observations. Those remain post-merge/approved-rollout checks.
+
+Deployment still needs owner-approved per-host upgrade/configuration, queue
+drain and askdo restart after review/merge. `config check` cannot prove that an
+enabled sudo adapter has no plugin/NSS network or audit effects, that service
+state will persist, or that an observed executable hash pins later execution.
+No new capability is enabled by these instructions or shipped example defaults.
 
 ## Against an installed service
 

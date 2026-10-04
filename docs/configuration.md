@@ -73,6 +73,14 @@ when the key is absent.
 | `deny_paths` | no | `[]` | Absolute, cleaned exclusions. The most-specific component-wise match wins across allow and deny rules; ties deny, and no match denies. Allow `/`, deny `/home/user`, allow `/home/user/bin` reopens only the `bin` subtree. |
 | `trusted_executable_roots` | no | — | **Deprecated and ignored.** Still accepted by the strict decoder so existing version 4 files that carry it keep loading, but the value has no effect: no validation, no warning, no policy decision, and no record in the frozen approval manifest. There is no trusted-code category that substitutes for the model reading code, and the reviewer does not automatically discover dependencies. Omit this field in new configurations. |
 | `sensitive_masks` | no | built-in default list | Credential-like path **name** masks. Omitting the field compiles the built-in list of 31 well-known secret-name conventions; an explicit **non-empty** array **replaces** the defaults entirely (it does not extend them), so tuning out one false positive without re-listing the others silently unprotects them. An explicit empty or `null` array is invalid — never a silent disable. At most 256 masks, each ≤ 256 bytes, valid UTF-8, no backslashes, control characters, or empty/`.`/`..` components. Mask syntax and matching semantics are defined below. |
+| `hash_path_enabled` | no | `false` | Source-only opt-in to bounded executable SHA-256 metadata. Does not bypass path policy, return bytes or pin a later execution. |
+| `service_status_enabled` | no | `false` | Source-only opt-in to fixed observational metadata for one literal `.service` unit. No arbitrary properties or service actions. |
+| `sudo_policy_enabled` | no | `false` | Source-only opt-in to sanitized policy listings for the submitting UID and explicitly authorized additional UIDs. Does not grant sudo rights. |
+| `sudo_policy_uids` | no | `[]` | At most 127 additional numeric uint32 UIDs, not login names; unique integers 0–4294967295. Null array/elements, duplicates, strings, fractions and out-of-range numbers are rejected. The caller is always eligible when enabled; UID 0 has no special exemption. |
+
+The three capability flags accept JSON booleans, never `null`. These fields
+apply equally to direct v4 and fleet v5 hosts, not the separate gateway-server
+v1 configuration. An unchanged old host configuration keeps all three off.
 
 A mask is a slash-separated glob over Linux path components, matched purely
 lexically and **case-sensitively** (Linux semantics):
@@ -123,6 +131,50 @@ Telegram sections are intentionally permitted during onboarding. Run
 `askdo config check` for complete service configuration validation.
 Inspection requires `STATX_MNT_ID` (normally Linux 5.8+), in addition to
 `openat2`; missing kernel support fails closed.
+
+#### Optional host evidence and rollout
+
+These additions are implemented on the `feat/reviewer-host-evidence` source branch,
+**not in published rc.2 binaries** and not implied by the separate existing
+foreground-helper sudo hardening. Old strict config parsers reject unknown
+new fields, even if a new flag is set to false. Do not add them to an old
+installation before upgrading its parser, root broker and reviewer together.
+The broker must understand the new operations, bootstrap capability projection
+and fixed tool registry; upgrading only the reader/reviewer is insufficient.
+
+The fleet wire already relays typed tool-definition arrays (up to 32), so an
+existing compatible gateway can relay the new maximum twelve-tool registry
+without a gateway-side tool-name allowlist change. Host-local root code still
+enforces the exact offered definitions and inspection policy. No new gateway
+config flags or signing keys are needed; verify deployed version compatibility
+before rollout rather than assuming that an arbitrary old gateway works.
+
+After owner review and merge, obtain approval **per host** for the binary
+upgrade, specific flag/UID/path values, queue drain and askdo restart. This is
+not authorization to change running configuration or restart shared services;
+OpenCode/GPU services are outside this rollout. Retain existing denies,
+protected paths and all 31 default masks (plus any operator additions).
+Do not replace narrow roots with all of `/etc` merely to use sudo metadata:
+the required **additions** to existing `read_roots` are `/etc/sudoers`,
+`/etc/sudoers.d`, and `/etc/passwd`. Other configured sudo source paths and
+returned command paths remain subject to their own policy checks. Keep flags
+off until their owner-approved policy is installed and checked.
+
+If the operator chooses to inspect an additional account, an illustrative
+field is `"sudo_policy_uids": [1000]` inside the existing inspection object.
+UID 1000 is a common example, **not a deployment value**: the owner must select
+the actual numeric account. Listing UID 0 is not needed for ordinary caller
+inspection and should not be added by default. Sudo metadata queries do not
+alter the narrow foreground-helper sudoers rule or other root execution policy.
+
+The 127-entry configuration cap leaves room for the caller in the scope tool's
+128 effective authorized UID limit. Prefer only the additional accounts actually
+needed for a review; this list is authorization to observe their sudo policy,
+not a grant of their execution privileges.
+
+Use [review tools](review-tools.md) for the exact metadata contracts and
+side-effect caveats, and [validation](validation.md#host-evidence-validation)
+for the distinction between fixture checks and deployment evidence.
 
 ### `review`
 
@@ -236,9 +288,16 @@ configuration is always required.
 
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
-| `max_inspected_files` | no | `256` | ≥ 1. Bound on staged bundle files per job; also bounds the file set of one bundle-scope `search_path` call. |
+| `max_inspected_files` | no | `256` | ≥ 1. Bound on staged bundle files per job; also bounds the file set of one bundle-scope `search_path` call and caps enabled hash attempts at `min(2, max_inspected_files)` per job. |
 | `max_inspected_bytes` | no | `8388608` (8 MiB) | ≥ 1 and ≤ 66060288 (fits under the 64 MiB frame ceiling). Total staged bundle byte budget per job; also sets the daemon's effective client frame limit to `max_inspected_bytes + 1 MiB` and caps the content one broker-side bundle search will scan (further bounded to 1 MiB per search call). |
+| `max_hash_file_bytes` | no | `33554432` (32 MiB) | Source-only integer 1–33554432. Independent per-file executable hashing budget, not the content/staging budget. Zero/null are invalid when explicitly present. |
+| `max_hashed_bytes_per_review` | no | `67108864` (64 MiB) | Source-only integer ≥ `max_hash_file_bytes` and ≤ 67108864. Aggregate hashing-work budget across the job, including failed reads and an overflow-probe byte; fallback does not reset it. Zero/null are invalid when explicitly present. |
 | `max_log_bytes_per_stream` | no | `33554432` (32 MiB) | ≥ 4096. Retained-output cap per stream (stdout/stderr); a fixed truncation marker is appended at the cap and further bytes discarded while the pipe keeps draining. |
+
+Fixed broker ceilings (not additional configurable fields): 32 combined new
+metadata requests, 256 KiB aggregate successful metadata payloads, 16 KiB per
+metadata payload (1024 bytes for hashes), and 256 inspection observations per
+job across all broker tools. Hash byte ceilings may be lowered, not raised.
 
 ### `telegram`
 

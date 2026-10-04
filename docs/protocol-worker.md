@@ -3,7 +3,11 @@
 The broker (root) and the reviewer worker (`askdo-review`) communicate over a
 private pipe: the worker's stdin (broker → worker) and stdout (worker →
 broker). Nothing else shares this channel. This document is the public
-reference for the wire schema implemented in `internal/proto/worker.go`.
+reference for the wire schema implemented in `internal/proto/worker.go` and
+`internal/proto/inspection_metadata.go`. The host-evidence additions below
+are source-only, not in published rc.2 binaries; old strict decoders do not
+accept their new fields/operations. Upgrade the host broker and reviewer
+together before enabling optional capabilities.
 
 ## Process launch contract
 
@@ -136,9 +140,13 @@ never appear in any worker message.
 
 **`limits`:** `max_model_calls_per_attempt` 1–128; `max_output_tokens`
 1–200000; optional `webfetch_enabled` bool (omitted/false unless the root-owned
-`review.webfetch_enabled` setting is true). The inspected-file/byte budgets
-(`limits.max_inspected_files`, `limits.max_inspected_bytes`) are broker-only — they bound bundle staging and
-broker-side search — and are never projected to the unprivileged reviewer.
+`review.webfetch_enabled` setting is true); optional `inspection_caps` object
+with required boolean fields `hash_path_enabled`, `service_status_enabled`,
+`sudo_policy_enabled` (all false when the object is absent). The capability
+object carries no roots, UID lists, credential paths or exclusion patterns.
+The inspected-file/byte and hash budgets are enforced by the broker, not this
+bootstrap projection. Their bounded values can be observed separately through
+`inspection_scope`; do not confuse disclosure with worker-owned enforcement.
 
 **`telegram`:** The broker projects the job's one selected channel. Two
 shapes, mirroring the config's two forms:
@@ -166,13 +174,13 @@ monotonically increasing uint32 starting at 0, assigned by the worker's
 |---|---|
 | `type` | `"inspect_request"` |
 | `request_seq` | uint32 |
-| `op` | enum `"read_path"` \| `"list_path"` \| `"search_path"` \| `"stat_path"` \| `"find_path"` \| `"mount_info"`; selects the payload shape |
+| `op` | enum `"read_path"` \| `"list_path"` \| `"search_path"` \| `"stat_path"` \| `"find_path"` \| `"mount_info"` \| `"inspection_scope"` \| `"hash_path"` \| `"service_status"` \| `"sudo_policy"`; selects the payload shape |
 | `payload` | object matching `op`, required |
 
 There is no `required` or importance flag: the model chooses paths, and JSON
 Schema `required` lists in the tool definitions describe argument shape only.
 
-**Payloads by `op`:** except for host-only `mount_info`, `base` is enum
+**Payloads by `op`:** the first five filesystem operations use `base`, enum
 `"host"` \| `"bundle"`. A host `path` is a clean absolute path; a bundle `path` is a clean relative path
 confined to the bundle root, with `"."` selecting the root. Every `path` is
 ≤ 4096.
@@ -185,6 +193,18 @@ confined to the bundle root, with `"."` selecting the root. Every `path` is
 | `stat_path` | `base`; `path`; `resolve` bool (false inspects the final link itself; true resolves a host symlink under policy, forbidden for staged bundles) |
 | `find_path` | `base`; `path` (explicit directory scope); `glob` non-empty basename glob ≤ 256, valid `path.Match` syntax, no `/` or `..`; `cursor` ≤ 128 |
 | `mount_info` | `path` clean absolute host path, ≤ 4096; no `base` |
+| `inspection_scope` | `cursor` string ≤ 128 (empty = first page); no path or `base` |
+| `hash_path` | `path` clean absolute host path ≤ 4096; no `base` |
+| `service_status` | `unit` literal `.service` name ≤ 128, matching `^[A-Za-z0-9_.@][A-Za-z0-9_.@-]*\.service$`; no `base`, properties, flags or action |
+| `sudo_policy` | `uid` numeric uint32; no login name, executable or command arguments |
+
+Every listed payload field is required and non-null. Unknown fields are
+rejected. The worker offers `inspection_scope` unconditionally but does not
+automatically call it; callers should use it early to discover declared scope.
+The other three new operations are independently gated by both projected
+capabilities and root-local configuration. UID authorization for `sudo_policy`
+precedes account resolution and subprocess work: submitting UID plus explicitly
+configured additional UIDs only, with no blanket UID 0 exception.
 
 The host directory walker used by `find_path` and directory `search_path` is
 bounded to depth 8 and 2048 raw entries; directory symlinks are not followed.
@@ -205,13 +225,29 @@ consumes each result exactly once).
 | `request_seq` | uint32 |
 | `status` | enum `"ok"` \| `"withheld"` \| `"binary"` \| `"inspection_denied"` \| `"not_found"` \| `"changed_during_capture"` \| `"limit_exceeded"` \| `"unresolved"` \| `"unknown"` |
 | `payload` | object matching the request's `op`; required iff `status` is `"ok"`, forbidden otherwise |
+| `reason_code` | optional closed code; forbidden on success and on legacy operations, allowed only on a non-`ok` result for the four new operations |
 
-Every non-`ok` status is payload-free; the model receives only the status
-string, never payload bytes or broker internals.
+Every non-`ok` status is payload-free; the model receives status and, for new
+operations, an optional closed reason code, never raw command output or broker
+internals. Valid reason/status pairs are:
+
+| Status | `reason_code` values |
+|---|---|
+| `inspection_denied` | `disabled`, `outside_scope`, `unauthorized_uid` (sudo only), `not_executable` |
+| `withheld` | `policy_withheld` |
+| `not_found` | `object_not_found` |
+| `changed_during_capture` | `observation_changed` |
+| `limit_exceeded` | `hash_file_limit`, `hash_review_limit` (hash only), `file_count_limit`, `output_limit`, `request_limit` |
+| `unresolved`, `unknown` | `timeout`, `unsupported_format`, `fragment_unresolved` (service only), `dependency_unavailable`, `inspection_failed` |
+
+Malformed/unavailable new-tool exchanges are rendered by the worker as the
+fixed `unresolved` / `inspection_failed` tool error, without raw diagnostics.
+These ordinary tool failures do not veto a schema-valid final report; they do
+not justify hiding material uncertainty from its warnings/missing context.
 
 - `withheld` is the broker's payload-free answer at the credential boundary:
   the requested (or resolved) name matched the sensitive-mask policy, or a
-  staged bundle file is masked. It is valid for all six ops. In `list_path`,
+  staged bundle file is masked. It is valid for all inspection ops. In `list_path`,
   `find_path`, and subtree `search_path` results, masked entries *below* the
   scope are instead omitted and counted in the payload's `skipped_masked`.
 - `binary` is valid only for `read_path`: the target's bytes are not valid
@@ -254,6 +290,60 @@ string, never payload bytes or broker internals.
   host path; `fs_type` non-empty string ≤ 64; `read_only` bool. This reports
   one allowed object's mount, never the entire mount table or pseudo-paths;
   it is not evidence of container isolation.
+- `inspection_scope`: `read_roots` array ≤ 128 of distinct clean absolute
+  candidate paths ≤ 4096; `next_cursor` ≤ 128; `exclusions_remain: true`;
+  `capabilities` with the three boolean flags; `max_read_bytes` 1–16384;
+  `max_inspected_files` ≥ 1; `max_inspected_bytes` ≥ 1;
+  `max_hash_file_bytes` 1–33554432; `max_hashed_bytes_per_review` between that
+  per-file value and 67108864; `sudo_policy_uids` array ≤ 128 of distinct
+  uint32s, empty when disabled. Roots are descriptor-filtered configured
+  spellings, not canonical aliases or blanket grants. Exclusion details remain
+  private. An oversized effective UID list fails closed, not truncated.
+- `hash_path`: `source: "host"`; `requested_path` exactly matching the request;
+  `resolved_path` clean absolute ≤ 4096; `sha256` 64 lowercase hex;
+  `size` 0–33554432; `mode` ≤ 07777; uint32 `uid`, `gid`; uint64 `device`,
+  nonzero `inode`; int64 `mtime_ns`, `ctime_ns`; positive
+  `observed_at_unix_ms`. Only allowed regular files with an execute bit are
+  hashed, with descriptor/path revalidation; binary files need no text read.
+- `service_status`: `id` exactly matching requested `unit`; `load_state`,
+  `active_state`, `sub_state`, `unit_file_state` each matching
+  `^[a-z0-9_-]{1,32}$` (`load_state` cannot be `not-found` on success);
+  authorized `canonical_fragment_path` clean absolute ≤ 4096;
+  `main_pid` int64 ≥ 0; `umask` four octal digits; positive
+  `observed_at_unix_ms`. Alias ID mismatches and unsupported/empty fragments
+  do not become successful results.
+- `sudo_policy`: `uid` matching request; `rules` array ≤ 128; positive
+  `observed_at_unix_ms`; `complete` bool; `withheld_rule_count` uint32 (zero
+  when complete). Each rule: `run_as_users` array 1–128, `run_as_groups` array
+  0–128 (safe account names or `ALL`); `command_scope` enum `all` | `path` |
+  `restricted_withheld`; optional authorized canonical `path` only for `path`
+  scope; `arg_constraint` enum `empty_only` | `unrestricted` |
+  `restricted_withheld`; `auth` enum `required` | `not_required` | `unknown`.
+  Partial sanitized listings are valid; raw Defaults and command argument bytes
+  never cross the pipe.
+
+New metadata payloads are ≤ 16 KiB each, with an additional 1024-byte hash
+result ceiling. The root broker enforces 32 combined new-operation requests,
+256 KiB aggregate payload bytes and 256 total inspection observations per job.
+Hash defaults/hard maxima are 32 MiB per file and 64 MiB per review, separately
+from the default 8 MiB content/staging budget; enabled attempts are bounded to
+`min(2, limits.max_inspected_files)`, including denied attempts. Work includes
+failed reads and one overflow probe; fallback never resets these counters.
+
+The two metadata command adapters are fixed root-side `systemctl show` and
+`sudo -n -ll -U` invocations, never arbitrary execution. Each has a two-second
+timeout, a combined 16 KiB stdout/stderr cap and a pinned trusted executable.
+Sudo first requires inspection access to the fixed sudoers sources and pinned
+local `/etc/passwd`; configured plugins/NSS can cause audit/log writes or
+network activity. See [review tools](review-tools.md) for exact argv and policy
+checks. All returned facts are observations, not later process/file identity
+guarantees or source-byte execution pins.
+
+Sanitized observations are written to root-only `inspection-evidence.jsonl`.
+When present, the manifest's `inspection` object freezes capability flags,
+hash limits, counters and ordered observations into its digest before approval.
+Scope cursors, raw responses, regexes, URLs and denied selectors are excluded;
+this adds no independent signature or approval quorum.
 
 `webfetch` is **not** an `inspect_request` operation: when enabled by the
 projected flag, it executes in the unprivileged reviewer worker and returns

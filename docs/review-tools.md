@@ -2,12 +2,20 @@
 
 When AI review is required, the reviewer model always has the six broker-mediated
 filesystem inspection tools (`read_path`, `list_path`, `search_path`,
-`stat_path`, `find_path`, `mount_info`) plus the worker-side `submit_review`
-(`internal/reviewer/tools.go`, `Definitions()`); the six inspection tools use
-private-pipe `inspect_request`/`inspect_result` exchanges. One additional,
-worker-side `webfetch` tool is offered only when the root-owned
-`review.webfetch_enabled` setting is true (false by default). Configuration
-cannot redefine the tools. Tool calls execute strictly sequentially.
+`stat_path`, `find_path`, `mount_info`), broker-mediated `inspection_scope`,
+and worker-side `submit_review`: eight tools by default
+(`internal/reviewer/tools.go`, `DefinitionsForCapabilities`). Three independent
+root-owned inspection flags optionally add `hash_path`, `service_status`, and
+`sudo_policy`; all default to false. Worker-side `webfetch` is separately
+offered only with `review.webfetch_enabled: true` (also false by default).
+The maximum registry is twelve tools. Configuration cannot redefine tools;
+calls execute strictly sequentially. Broker operations use private-pipe
+`inspect_request`/`inspect_result` exchanges with fixed, strictly typed shapes.
+
+**Host-evidence additions are source-only, not in the published rc.2 binaries.**
+They are separate from existing foreground-helper sudo hardening. See
+[configuration and rollout](configuration.md#optional-host-evidence-and-rollout)
+before adding fields to an installed host.
 
 Under explicit `review.mode: "approval_only"`, or for an exempt OS login UID
 under `required`, no model or tools are used unless `--review=yes` is given.
@@ -41,8 +49,8 @@ references should use the explicit bundle path (for example
 `"$ASKDO_BUNDLE/helper.sh"`) rather than assuming the bundle is the process
 working directory.
 
-Every path tool except host-only `mount_info` takes `base` (enum `"host"` or
-`"bundle"`). A host path is a clean absolute path; a bundle path is a clean
+The six filesystem tools except host-only `mount_info` take `base` (enum
+`"host"` or `"bundle"`). A host path is a clean absolute path; a bundle path is a clean
 relative path confined to the
 staged bundle root, with `"."` selecting the root itself. The model chooses
 every path; there is no broker-side dependency discovery, capture-ID list, or
@@ -169,7 +177,107 @@ withholds or denies masked, excluded, or pseudo-filesystem paths; it does not
 return raw mount-table contents. Mount type does not establish container or
 host isolation.
 
-### 7. `submit_review`
+### 7. `inspection_scope`
+
+Call this tool early, preferably first, to discover the available declared host
+scope rather than guessing roots. It is always offered; the current loop does
+**not** automatically invoke it or mechanically require it before a report.
+
+- **Arguments:** required `cursor` (string ≤ 128; `""` for the first page,
+  returned `next_cursor` thereafter). No `base`, path or caller-selected policy.
+- **Result:** `read_roots` (≤ 128 per page), `next_cursor`,
+  `exclusions_remain: true`, `capabilities` (the three enabled booleans),
+  `max_read_bytes`, `max_inspected_files`, `max_inspected_bytes`,
+  `max_hash_file_bytes`, `max_hashed_bytes_per_review`, and `sudo_policy_uids`.
+  The UID list is empty when sudo inspection is disabled; otherwise it is the
+  sorted, deduplicated submitting UID plus configured additional UIDs.
+- **Disclosure:** candidate configured root spellings only, filtered through
+  descriptor authorization, masks, protected identities and revalidation.
+  Denied/masked roots, private exclusion rules, mask patterns, credential paths
+  and canonical aliases are not listed. A visible root is **not** blanket
+  permission for its descendants. Pagination uses one per-job root snapshot,
+  not a promise that the host remains unchanged.
+
+### Optional `hash_path`
+
+With `inspection.hash_path_enabled: true`, required `path` is one clean
+absolute host path ≤ 4096 bytes (no `base`). The broker hashes only a
+policy-authorized regular file with at least one execute bit; this is not an
+execute-permission shortcut around inspection policy. Requested/resolved names,
+mount aliases, masks, protected identities and multi-hardlink refusal apply.
+The pinned descriptor and named path are revalidated after bounded hashing.
+
+The result is metadata only: `source: "host"`, `requested_path`,
+`resolved_path`, lowercase `sha256`, `size`, `mode`, `uid`, `gid`, `device`,
+`inode`, `mtime_ns`, `ctime_ns`, and `observed_at_unix_ms`. No file bytes cross
+to the model. Binary executables (for example a 20 MiB file) can be hashed
+even when `read_path` returns `binary`. Default/hard ceilings are 32 MiB per
+file and 64 MiB hashing work per review, independently of the default 8 MiB
+content/staging budget. At most `min(2, limits.max_inspected_files)` enabled
+hash attempts are allowed per job, including denied attempts; failed reads and
+the single overflow-probe byte count as work. Fallback does not reset budgets.
+
+A hash is a review-time observation, **not** a source-byte pin or proof that a
+later privileged process executes the same inode or bytes. It does not attest
+dependencies or establish that the binary is safe.
+
+### Optional `service_status`
+
+With `inspection.service_status_enabled: true`, required `unit` is one literal
+`.service` name ≤ 128 bytes, matching
+`^[A-Za-z0-9_.@][A-Za-z0-9_.@-]*\.service$`. Named instances such as
+`foo@bar.service` are accepted; wildcard patterns and options are rejected.
+The root adapter uses only:
+
+```text
+/usr/bin/systemctl show --no-pager --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,FragmentPath,UMask -- <unit>
+```
+
+It returns only `id`, `load_state`, `active_state`, `sub_state`,
+`unit_file_state`, `canonical_fragment_path`, `main_pid`, `umask`, and
+`observed_at_unix_ms`. The observed `Id` must equal the requested unit exactly:
+an alias returning another canonical ID is unresolved, not silently substituted.
+The fragment and its resolved regular-file target must pass inspection policy;
+empty/unresolvable fragments fail, denied fragments are withheld. No arbitrary
+properties, environment, descriptions, `ExecStart`, command arguments or journal
+are returned. No start/stop/reload action is available. State and PID are
+observations, not guarantees about a later process or its executable identity.
+Existing `stat_path` and `mount_info` can supply complementary file/mount facts.
+
+### Optional `sudo_policy`
+
+With `inspection.sudo_policy_enabled: true`, required `uid` is a numeric uint32.
+The broker authorizes it **before** account resolution or invoking sudo: the
+authenticated submitting UID is always eligible, plus explicit
+`inspection.sudo_policy_uids`. There is no blanket root exception: UID 0 is
+eligible only when it is the submitter or an explicitly listed additional UID.
+
+Inspection policy must permit `/etc/sudoers`, `/etc/sudoers.d`, and
+`/etc/passwd`. Local account resolution uses only the pinned, root-owned,
+non-group/world-writable `/etc/passwd`, bounded to 64 KiB, with identity and
+post-read checks; it does not use NSS to resolve the requested UID. The fixed
+root adapter then lists policy with `/usr/bin/sudo -n -ll -U <local-account>`.
+No administrative command is run and no new sudo privilege is granted.
+Configured sudo plugins/NSS may nevertheless cause ancillary audit/log writes
+or network activity: this is **not** a zero-side-effect or zero-network promise.
+
+The metadata-only result has `uid`, `rules` (≤ 128), `observed_at_unix_ms`,
+`complete`, and `withheld_rule_count`. Each rule has `run_as_users`,
+`run_as_groups`, `command_scope` (`all`, `path`, `restricted_withheld`), optional
+authorized canonical `path`, `arg_constraint` (`empty_only`, `unrestricted`,
+`restricted_withheld`), and `auth` (`required`, `not_required`, `unknown`).
+Unsupported restrictions can yield a partial result (`complete: false`);
+unsafe rules are omitted or summarized as withheld. Raw Defaults, argument
+bytes and raw sudo output are never returned. Unsupported listing formats fail
+closed, not as evidence that the user lacks sudo rights.
+
+Both command adapters pin the fixed root-owned executable and require
+non-group/world-writable ancestors, use only `PATH=/usr/bin:/bin`, `LANG=C`,
+`LC_ALL=C`, cwd `/`, and no inherited stdin. Each has a two-second timeout and
+a combined stdout/stderr limit of 16 KiB; no caller-selected flags, executable
+or environment are accepted.
+
+### 8. `submit_review`
 
 Submit the final report. This is the **sole completion path** and it cannot
 approve, notify, or execute anything.
@@ -227,9 +335,10 @@ of the trust boundary — enforces:
   argument bounds, and result shape (`internal/proto/worker.go`). Non-`ok`
   statuses (`withheld`, `binary`, `inspection_denied`, `not_found`,
   `changed_during_capture`, `limit_exceeded`, `unresolved`, `unknown`) carry
-  no payload; the model receives only the fixed status string. A denied read
-  is an ordinary tool result: the model learns that the path exists outside
-  what policy permits it to see, and it can still submit its report.
+  no payload; legacy tools return only status, while the four new operations
+  can also return a closed `reason_code` (see [wire reference](protocol-worker.md#inspect_result-bw)).
+  Denial is an ordinary tool result, not proof that the guessed path exists;
+  the model can still submit its report.
 - **Inspection policy:** descriptor-relative, read-only, openat2-based access
   confined to `inspection.read_roots`, with `deny_paths` and the hard-deny
   set (`/etc/askdo`, `/var/lib/askdo`, `/var/lib/askdo-review`, `/run/askdo`, `/proc`,
@@ -258,12 +367,45 @@ of the trust boundary — enforces:
   aborts `evidence_changed`); and the final successful model in the history
   must be a configured choice. The frozen manifest binds the report, the
   ordered model history, the exact command (mode, argv/environment, cwd), the
-  caller's cwd identity, the staged bundle SHA-256 records, and the withheld
-  references. Host file selection is never cross-checked by the broker — the
+  caller's cwd identity, the staged bundle SHA-256 records, withheld
+  references, and bounded inspection observations described below. Host file
+  selection is never scored by the broker — the
   model cannot reference broker captures for host paths, it only ever
-  received bounded bytes for paths it chose — but a captured-stdin script is
+  received bounded bytes or observational metadata for paths it chose — but a
+  captured-stdin script is
   the one broker-captured artifact with broker-verified read coverage (see
   *Completeness honesty model*).
+
+### Inspection budgets and audit evidence
+
+The root broker limits the four new operations together to 32 requests and
+256 KiB of successful payloads per job (≤ 16 KiB each; hash results ≤ 1024
+bytes). A separate 256-observation cap spans all broker inspection tools.
+Disabled/denied requests consume the metadata request budget when dispatched;
+review fallback never resets job accounting. Limits, withheld information and
+adapter failures remain ordinary uncertain tool results: a schema-valid report
+can still complete, but should retain material warnings and missing context.
+
+Each recorded exchange appends a sanitized record to
+`inspection-evidence.jsonl` in the protected root-only job spool, mode `0600`.
+The writer refuses symlinks, multiply linked files and unsafe ownership/mode.
+Records contain `sequence`, `operation`, `status`, closed `reason`,
+`observed_at_unix_ms`, `selector_redacted`, and optional typed `metadata` or
+`selector` (`source`, `path`, optional `resolved_path`). Successful new metadata
+is strictly decoded and re-encoded; scope cursors are stripped. Successful legacy operations may retain
+only a whitelisted, reauthorized path selector, never content. No raw responses,
+search regexes, URLs, cursors or denied selectors enter this evidence file.
+Audit write failure is a broker failure, not a successful observation.
+
+When observations exist, the frozen manifest's `inspection` object binds their
+ordered `observations`, `capabilities`, `max_hash_file_bytes`,
+`max_hashed_bytes_per_review`, `metadata_requests`, `metadata_response_bytes`,
+`hash_attempts` and `hashed_work_bytes` into the manifest SHA-256 **before
+approval**. It does not add independent evidence
+signatures or a quorum. Existing fleet gateway Ed25519-signed approvals cover
+that manifest digest; the gateway stores approval display/ticket data, not the
+entire raw model conversation. Evidence fields are data, not model instructions
+or additional approval authority.
 
 ## Report schema
 
@@ -305,9 +447,9 @@ Honesty is structural instead:
   withheld credential content, a code-constructed notice with the count and
   withheld references leads the summary. Neither file selection nor command
   syntax causes an additional machine-authored review judgment.
-- A host executable the model never chose to read has **no source-byte pin**
-  in the frozen manifest; approving such a job is the operator's explicit
-  assumption (see the README).
+- Host reads and optional hashes provide observations, **not source-byte pins**
+  for dispatch. Even a hash in the manifest does not guarantee later executable
+  identity; approving a metadata-resolved host path remains an operator assumption.
 - A job with no model report — provider exhaustion handled as
   `review_unavailable`, or a reviewer that ended without `submit_review` —
   is never labeled reviewed. The unreviewed lane is the distinct **NO AI
@@ -339,10 +481,10 @@ it.
 
 ## What the reviewer cannot do
 
-- **No shell, no process execution.** There is no exec tool; the reviewer
-  binary itself is the only process the broker starts, and it runs as the
-  unprivileged `askdo-review` user with an empty supplementary-group list.
-  The reviewer refuses to run as root.
+- **No shell or arbitrary process-execution tool.** The reviewer runs as the
+  unprivileged `askdo-review` user with an empty supplementary-group list and
+  refuses to run as root. Optional service/sudo inspection uses the root
+  broker's fixed bounded metadata adapters, never a model-selected command.
 - **No unrestricted network tool for the model.** The optional `webfetch`
   is limited to public HTTP(S) targets under the bounds above; with the flag
   off it is neither offered nor executable. Trusted reviewer code also calls
