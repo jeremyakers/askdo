@@ -131,7 +131,7 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 	if f.turn >= uint32(j.daemon.cfg.Review.MaxModelCallsPerAttempt) || r.Request.Model != u.Model || r.Request.MaxOutputTokens < 1 || r.Request.MaxOutputTokens > min(j.fleetOutputTokenLimit(), u.MaxOutputTokens) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
-	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsWithWebfetch(j.daemon.cfg.Review.WebfetchEnabled)) {
+	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsForCapabilities(j.inspectionCapabilities(), j.daemon.cfg.Review.WebfetchEnabled)) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
 	if !time.Now().Before(f.reviewDeadline) {

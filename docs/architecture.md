@@ -90,10 +90,15 @@ reads no configuration file; everything it may know arrives in the one
 immutable `bootstrap` message on its private pipe. It talks to the broker
 over that pipe (its stdin/stdout), to configured model endpoints over HTTP(S),
 and to the Telegram Bot API. The model receives no shell, process-execution,
-file-write, browser, MCP or delegation tools. Six path tools
+file-write, browser, MCP or delegation tools. Six filesystem tools
 (`read_path`, `list_path`, `search_path`, `stat_path`, `find_path`, `mount_info`)
 request bounded filesystem work through the broker for model-chosen paths;
-optional `webfetch` inspects public HTTP(S) resources when enabled. Final-review
+always-available `inspection_scope` discloses filtered candidate roots and
+capabilities. The reviewer should call it early; the loop does not invoke it
+automatically or make it a report-completion gate. Independent root-owned
+flags (all false by default) optionally add metadata-only `hash_path`,
+`service_status` and `sudo_policy`. Optional `webfetch` separately inspects
+public HTTP(S) resources when enabled. Final-review
 submission runs in
 trusted worker code. The model chooses which candidate files to inspect; the
 broker enforces access policy, credential masking and read limits on every
@@ -106,6 +111,38 @@ the model history before freezing. If AI review is skipped by policy or all
 typed provider availability failures are exhausted (without `--review=yes`),
 the same worker sends a **NO AI REVIEW** Telegram request without a model
 report; it never substitutes invented risk, effects or reversibility.
+
+The host-evidence tools are **source-only, not in published rc.2 binaries**;
+they are separate from existing foreground-helper sudo hardening. The new
+root broker, config parser and reviewer must be upgraded together before
+using their fields. The default registry is eight tools, at most twelve with
+all four opt-ins. See [rollout constraints](configuration.md#optional-host-evidence-and-rollout).
+
+### Fixed host-metadata adapters (root, observational only)
+
+`internal/inspection` hashes an allowed executable through a pinned descriptor,
+under the same private path/mask/identity policy as other inspection. It returns
+SHA-256 and bounded metadata, never bytes, with separate 32 MiB file / 64 MiB
+review hard ceilings and at most two enabled attempts (also bounded by
+`max_inspected_files`). This permits large binary evidence without a text read,
+but neither freezes that host file for execution nor proves later identity.
+
+`internal/hostmeta` runs only fixed `systemctl show` property selection and
+`sudo -n -ll -U <local-account>` policy listing. It pins root-owned executable
+descriptors through non-writable ancestors, uses a fixed minimal environment,
+cwd `/`, no inherited stdin, a two-second timeout and combined 16 KiB output
+cap. The model cannot supply flags, environment, an executable or administrative
+command. Service fragment paths must pass inspection policy; returned state/PID
+is observational, with no `ExecStart`, descriptions, arguments or journal.
+
+Sudo UID authorization is root-local and precedes lookup/listing: caller plus
+explicit additional numeric UIDs only, with no blanket root exception. Policy
+must allow `/etc/sudoers`, `/etc/sudoers.d` and pinned, trusted local
+`/etc/passwd`. Account lookup itself reads that file, not NSS; the subsequent
+sudo listing can use configured plugins/NSS and cause network traffic or
+ancillary audit/log writes. It grants no sudo rights. Typed sanitized rules can
+be incomplete; raw Defaults, arguments and command output are never evidence
+payloads. Neither adapter is a general execution or zero-side-effect boundary.
 
 ### Fleet gateway (root, optional central approval authority)
 
@@ -253,12 +290,22 @@ One pass through the pipeline per job (`internal/broker/job.go`):
    `review_complete` or, for exhausted typed provider availability, a distinct
    `review_unavailable` outcome. Policy-exempt jobs bypass the model session.
    Interleaved `progress` frames are forwarded to client subscribers.
+   The root broker additionally enforces 32 combined new metadata requests,
+   256 KiB aggregate metadata payloads and 256 observations across broker
+   inspection tools. Sanitized records are appended/fsynced to the protected
+   job spool's `inspection-evidence.jsonl` (`0600`), with descriptor checks
+   refusing symlinks, hardlinks and unsafe owner/mode. Successful new metadata
+   is strictly decoded/re-encoded; legacy tools retain only whitelisted,
+   reauthorized selectors. Raw responses/content, regexes, URLs, scope cursors
+   and denied selectors are not copied into this audit. Write failure fails
+   the broker exchange. Accounting persists across provider fallback.
 4. **Freeze.** For reviewed jobs the broker re-validates the report and model
    history against the wire schema (the final history entry must be a
    successful configured model), re-verifies the caller's working-directory
    identity, re-hashes every staged bundle file (re-opening the staged tree
    live to detect change-after-staging), collects the withheld references it
-   observed during the job, writes exact approval-manifest bytes
+   observed during the job, binds any ordered inspection observations with
+   capability flags, hash budgets and counters, writes exact approval-manifest bytes
    to `approval.json`, fsyncs, records the SHA-256 digest durably, and sends
    `frozen` with the digest, the report, and the withheld facts. Failure sends
    `review_rejected` (`invalid_report`, `evidence_changed`, `broker_error`)
@@ -320,14 +367,21 @@ cwd and submitter name plus UID. It does not infer or claim a physical hostname.
 Denial commits `awaiting-human` → `denied` and executes nothing. A lapsed
 approval commits `awaiting-human` → `expired`.
 
-**Uninspected executables carry no source-byte pin.** Because argv-mode
-preflight is metadata-only, a host executable the reviewer never
-chose to read has no content hash in the frozen manifest: the manifest
+**Host evidence is not a source-byte execution pin.** Argv-mode preflight
+remains metadata-only. Optional `hash_path` observations can put a host
+executable digest in the manifest, but dispatch does not bind execution to that
+opened inode or re-hash it against that observation. The manifest
 binds the resolved absolute path, the exact argv, the authenticated submitter, the cwd
 identity, and the SHA-256 of every staged bundle file. Approving such a job
 is an explicit **operator assumption** that executing the metadata-resolved
-path is acceptable without reviewed bytes. The model selects its own reads;
-the approval gate does not require any file content at all.
+path is acceptable; reads, hashes and service state do not guarantee that a
+later root process sees the same host bytes or dependencies. The model selects
+its own investigation; the approval gate does not require host file content
+or promise zero uncertainty. Evidence metadata is untrusted descriptive data,
+not prompt instructions or extra authority. Existing fleet Ed25519 approvals
+bind the frozen manifest digest, including its inspection evidence; no separate
+evidence signature or quorum is introduced. The gateway retains display/ticket
+data, not all raw model conversations.
 
 ## Model fallback model
 

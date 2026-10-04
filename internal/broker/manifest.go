@@ -17,22 +17,23 @@ import (
 )
 
 type approvalManifest struct {
-	Version          int                       `json:"version"`
-	RequestID        string                    `json:"request_id"`
-	TargetUID        uint32                    `json:"target_uid"`
-	Context          manifestContext           `json:"context"`
-	Operation        manifestOperation         `json:"operation"`
-	Captures         []captureRecord           `json:"captures"`
-	TrustAssumptions manifestTrustAssumptions  `json:"trust_assumptions"`
-	Report           proto.ReviewReport        `json:"report"`
-	AutoApproval     *proto.AutoApprovalPlan   `json:"auto_approval,omitempty"`
-	WithheldRefs     []string                  `json:"withheld_refs"`
-	WithheldCount    int                       `json:"withheld_count"`
-	SuccessfulModel  string                    `json:"successful_model"`
-	ModelHistory     []proto.ModelHistoryEntry `json:"model_history"`
-	Settings         manifestSettings          `json:"settings"`
-	TelegramRoute    *manifestTelegramRoute    `json:"telegram_route,omitempty"`
-	Fleet            *fleetManifest            `json:"fleet,omitempty"`
+	Version          int                         `json:"version"`
+	RequestID        string                      `json:"request_id"`
+	TargetUID        uint32                      `json:"target_uid"`
+	Context          manifestContext             `json:"context"`
+	Operation        manifestOperation           `json:"operation"`
+	Captures         []captureRecord             `json:"captures"`
+	TrustAssumptions manifestTrustAssumptions    `json:"trust_assumptions"`
+	Report           proto.ReviewReport          `json:"report"`
+	AutoApproval     *proto.AutoApprovalPlan     `json:"auto_approval,omitempty"`
+	WithheldRefs     []string                    `json:"withheld_refs"`
+	WithheldCount    int                         `json:"withheld_count"`
+	SuccessfulModel  string                      `json:"successful_model"`
+	ModelHistory     []proto.ModelHistoryEntry   `json:"model_history"`
+	Settings         manifestSettings            `json:"settings"`
+	TelegramRoute    *manifestTelegramRoute      `json:"telegram_route,omitempty"`
+	Fleet            *fleetManifest              `json:"fleet,omitempty"`
+	Inspection       *manifestInspectionEvidence `json:"inspection,omitempty"`
 }
 
 // operationOnlyManifest deliberately has no review/report/coverage fields.
@@ -51,6 +52,7 @@ type operationOnlyManifest struct {
 	Reason              string                      `json:"approval_reason"`
 	AvailabilityHistory []proto.AvailabilityFailure `json:"availability_history"`
 	Fleet               *fleetManifest              `json:"fleet,omitempty"`
+	Inspection          *manifestInspectionEvidence `json:"inspection,omitempty"`
 }
 
 func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, history []proto.AvailabilityFailure) (string, error) {
@@ -83,7 +85,8 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		Settings:         manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
 		TelegramRoute:    j.manifestTelegramRoute(),
 		ApprovalMode:     "approval_only", Reason: reason, AvailabilityHistory: append([]proto.AvailabilityFailure{}, history...),
-		Fleet: fleet,
+		Fleet:      fleet,
+		Inspection: j.inspectionEvidence(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
@@ -208,6 +211,7 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		Settings:      manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
 		TelegramRoute: j.manifestTelegramRoute(),
 		Fleet:         fleet,
+		Inspection:    j.inspectionEvidence(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {

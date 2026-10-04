@@ -114,7 +114,7 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 	maxCalls := l.Bootstrap.ConfigProjection.Limits.MaxModelCallsPerAttempt
 	// The webfetch tool is only ever offered when the root-owned config
 	// projected it; submit_review stays terminal either way.
-	tools := DefinitionsWithWebfetch(l.Bootstrap.ConfigProjection.Limits.WebfetchEnabled)
+	tools := DefinitionsForCapabilities(l.Bootstrap.ConfigProjection.Limits.InspectionCaps, l.Bootstrap.ConfigProjection.Limits.WebfetchEnabled)
 	for turn := 0; turn < maxCalls; turn++ {
 		if !now().Before(deadline) {
 			return proto.ReviewComplete{}, context.DeadlineExceeded

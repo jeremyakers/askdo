@@ -150,8 +150,9 @@ type ProjectedModel struct {
 // inspected-file/byte bounds are broker-only (bundle staging and direct
 // search) and are never projected to the unprivileged reviewer.
 type WorkerLimits struct {
-	MaxModelCallsPerAttempt int `json:"max_model_calls_per_attempt"`
-	MaxOutputTokens         int `json:"max_output_tokens"`
+	InspectionCaps          InspectionCapabilities `json:"inspection_caps,omitzero"`
+	MaxModelCallsPerAttempt int                    `json:"max_model_calls_per_attempt"`
+	MaxOutputTokens         int                    `json:"max_output_tokens"`
 	// WebfetchEnabled gates the optional public-web webfetch tool. It is
 	// false unless the root-owned review.webfetch_enabled config is
 	// explicitly true, and the reviewer never offers or executes webfetch
@@ -257,6 +258,7 @@ type MountInfoResult struct {
 
 // InspectResult returns a result correlated to an outstanding inspect request.
 type InspectResult struct {
+	ReasonCode string          `json:"reason_code,omitempty"`
 	Type       string          `json:"type"`
 	RequestSeq uint32          `json:"request_seq"`
 	Status     string          `json:"status"`
@@ -791,6 +793,11 @@ func requireWorkerFields(raw []byte, value reflect.Value) error {
 			return errors.New("required worker object is not an object")
 		}
 		typeOf := value.Type()
+		if typeOf == reflect.TypeOf(SudoRule{}) && value.FieldByName("CommandScope").String() != "path" {
+			if _, present := object["path"]; present {
+				return errors.New("sudo rule path is only permitted for path command scope")
+			}
+		}
 		for i := 0; i < value.NumField(); i++ {
 			field := typeOf.Field(i)
 			if field.PkgPath != "" {
@@ -801,7 +808,7 @@ func requireWorkerFields(raw []byte, value reflect.Value) error {
 			if name == "" || name == "-" {
 				continue
 			}
-			optional := strings.Contains(tag, ",omitempty")
+			optional := strings.Contains(tag, ",omitempty") || strings.Contains(tag, ",omitzero")
 			child, found := object[name]
 			if !found {
 				if optional {
@@ -810,6 +817,9 @@ func requireWorkerFields(raw []byte, value reflect.Value) error {
 				return fmt.Errorf("missing required worker field %s", name)
 			}
 			if string(child) == "null" {
+				if name == "inspection_caps" || name == "reason_code" || value.Type() == reflect.TypeOf(SudoRule{}) {
+					return fmt.Errorf("worker field %s must not be null", name)
+				}
 				if optional {
 					continue
 				}
@@ -831,6 +841,9 @@ func requireWorkerFields(raw []byte, value reflect.Value) error {
 			return errors.New("required worker array is not an array")
 		}
 		for i := range items {
+			if string(items[i]) == "null" {
+				return errors.New("worker array entry is null")
+			}
 			if err := requireWorkerFields(items[i], value.Index(i)); err != nil {
 				return err
 			}
@@ -850,6 +863,13 @@ func ValidateInspectResultFor(request InspectRequest, result InspectResult) erro
 	}
 	if request.RequestSeq != result.RequestSeq {
 		return errors.New("inspect result request_seq does not match request")
+	}
+	if err := validateInspectionReason(request.Op, result); err != nil {
+		return err
+	}
+	if isMetadataOp(request.Op) && result.Status == "ok" {
+		_, err := DecodeInspectionMetadataResult(request, result)
+		return err
 	}
 	// Withheld is a payload-free answer for a masked direct path operation.
 	if result.Status == "withheld" {
@@ -938,6 +958,12 @@ func ValidateReviewComplete(message ReviewComplete) error {
 // DecodeInspectRequestPayload strictly decodes a request payload according to
 // its operation discriminator.
 func DecodeInspectRequestPayload(request InspectRequest) (any, error) {
+	if isMetadataOp(request.Op) {
+		if request.Type != "inspect_request" || len(request.Payload) == 0 {
+			return nil, errors.New("invalid inspect_request")
+		}
+		return decodeMetadataRequest(request)
+	}
 	if err := validateInspectRequest(request); err != nil {
 		return nil, err
 	}
@@ -1178,6 +1204,10 @@ func validateInspectRequest(r InspectRequest) error {
 	if r.Type != "inspect_request" || len(r.Payload) == 0 {
 		return errors.New("invalid inspect_request")
 	}
+	if isMetadataOp(r.Op) {
+		_, err := decodeMetadataRequest(r)
+		return err
+	}
 	var err error
 	switch r.Op {
 	case "read_path":
@@ -1228,6 +1258,9 @@ func validateInspectRequest(r InspectRequest) error {
 	return err
 }
 func validateInspectResult(r InspectResult) error {
+	if err := validateInspectionReason("", r); err != nil {
+		return err
+	}
 	if r.Type != "inspect_result" || !oneOf(r.Status, "ok", "inspection_denied", "not_found", "changed_during_capture", "limit_exceeded", "unresolved", "unknown", "withheld", "binary") {
 		return errors.New("invalid inspect result")
 	}

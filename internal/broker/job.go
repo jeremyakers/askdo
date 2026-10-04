@@ -46,16 +46,26 @@ type jobRuntime struct {
 	closed bool
 	// models is the projected model list computed at review start by
 	// projectModels (codex refresh-at-review-start); nil until then.
-	models            []proto.ProjectedModel
-	preflightFailures []proto.AvailabilityFailure
-	approvalOnly      bool
-	subscribers       map[chan []byte]struct{}
-	attachLive        bool
-	worker            WorkerSession
-	failureDetail     string
-	freezeMu          sync.Mutex
-	manifestFrozen    bool
-	nextInspectSeq    uint64
+	models                 []proto.ProjectedModel
+	preflightFailures      []proto.AvailabilityFailure
+	approvalOnly           bool
+	subscribers            map[chan []byte]struct{}
+	attachLive             bool
+	worker                 WorkerSession
+	failureDetail          string
+	freezeMu               sync.Mutex
+	manifestFrozen         bool
+	nextInspectSeq         uint64
+	inspectionDeadline     time.Time  // frozen once; tool calls never extend review time
+	inspectionMu           sync.Mutex // serializes reservations and durable evidence, not j.mu
+	metadataRequests       int
+	metadataResponseBytes  int
+	hashedWorkBytes        int64
+	hashAttempts           int
+	inspectionObservations []inspectionObservation
+	scopeRoots             []string
+	scopeSnapshot          bool
+	metadataReader         hostMetadataReader
 	// stdinReadBits records broker-delivered read_path bytes for the logical
 	// captured input. Only successful correlated bundle:stdin results count;
 	// each bit represents one byte (at most 128 KiB for the 1 MiB cap).
@@ -386,7 +396,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 	var review *proto.ReviewComplete
 	var unavailable *proto.ReviewUnavailable
 	if !approvalOnly {
-		review, unavailable, err = j.receiveReviewOutcome(session)
+		review, unavailable, err = j.receiveReviewOutcome(ctx, session)
 	}
 	if err != nil {
 		// Worker stderr and malformed pipe frames may contain provider text,
@@ -1034,14 +1044,14 @@ func (j *jobRuntime) expireIfApprovalLapsed(ctx context.Context) bool {
 }
 
 func (j *jobRuntime) receiveReview(session WorkerSession) (*proto.ReviewComplete, error) {
-	review, unavailable, err := j.receiveReviewOutcome(session)
+	review, unavailable, err := j.receiveReviewOutcome(context.Background(), session)
 	if unavailable != nil {
 		return nil, errors.New("review unavailable")
 	}
 	return review, err
 }
 
-func (j *jobRuntime) receiveReviewOutcome(session WorkerSession) (*proto.ReviewComplete, *proto.ReviewUnavailable, error) {
+func (j *jobRuntime) receiveReviewOutcome(ctx context.Context, session WorkerSession) (*proto.ReviewComplete, *proto.ReviewUnavailable, error) {
 	for {
 		message, err := readWorker(session, proto.WorkerToBroker)
 		if err != nil {
@@ -1055,7 +1065,7 @@ func (j *jobRuntime) receiveReviewOutcome(session WorkerSession) (*proto.ReviewC
 				return nil, nil, fmt.Errorf("inspect_request sequence %d is out of order", value.RequestSeq)
 			}
 			j.nextInspectSeq++
-			result, err := j.handleInspect(*value)
+			result, err := j.handleInspectContext(ctx, *value)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -1278,10 +1288,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	if deadline := j.deadline(); !deadline.IsZero() {
 		deadlineMS = deadline.UnixMilli()
 	}
-	reviewDeadline := time.Now().Add(j.daemon.cfg.Review.TotalTimeout.Value()).UnixMilli()
-	if j.fleet != nil {
-		reviewDeadline = j.fleet.reviewDeadline.UnixMilli()
-	}
+	reviewDeadline := j.reviewDeadline().UnixMilli()
 	j.mu.Lock()
 	models := j.models
 	j.mu.Unlock()
@@ -1327,7 +1334,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
-			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled},
+			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled, InspectionCaps: j.inspectionCapabilities()},
 			Telegram: j.workerTelegram(),
 		},
 	}

@@ -73,6 +73,9 @@ func (w *rootFixtureStatusWriter) WriteHeader(status int) {
 }
 
 type rootFleetOptions struct {
+	providerHandler       http.Handler
+	configure             func(*config.Config)
+	socketPath            string
 	foreground            bool
 	maxRisk               int
 	profileTimeout        time.Duration
@@ -111,6 +114,10 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 	}
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.modelCalls.Add(1)
+		if opts.providerHandler != nil {
+			opts.providerHandler.ServeHTTP(w, r)
+			return
+		}
 		raw, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if err != nil {
 			t.Error("read provider request failed")
@@ -294,6 +301,9 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 			t.Fatal(err)
 		}
 	}
+	if opts.configure != nil {
+		opts.configure(cfg)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -307,6 +317,9 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 	uid, gid := reviewerTestCredentials(t)
 	worker := &processWorker{binary: binary, home: "/tmp", uid: uid, gid: gid}
 	socket := filepath.Join(root, "run", "request.sock")
+	if opts.socketPath != "" {
+		socket = opts.socketPath
+	}
 	skipOwnership := true
 	if opts.foreground {
 		socket = "/run/askdo/request.sock"
