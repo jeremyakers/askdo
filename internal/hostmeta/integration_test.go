@@ -118,3 +118,34 @@ func TestRealSudoScopedRootFixture(t *testing.T) {
 		t.Fatalf("scoped defaults: %+v %s %s", result, status, reason)
 	}
 }
+
+// The deployed Ubuntu 22.04 GNU sudo 1.9 listing prints the exact canonical
+// policy here: one literal scoped Defaults! path, one KDE glob wildcard scoped
+// Defaults! line (both authentication-neutral), and the empty-argv-only grant.
+// GNU sudo prints the empty-argument marker escaped (` \"\"`); both forms must
+// resolve to the same empty_only rule with no authentication required.
+func TestRealSudoLegacyLaunchRootFixture(t *testing.T) {
+	if os.Getenv("ASKDO_HOSTMETA_ROOT_FIXTURE") != "1" {
+		t.Skip("requires disposable root fixture")
+	}
+	p, err := inspection.NewPolicy(config.InspectionConfig{ReadRoots: []string{"/etc/sudoers", "/etc/sudoers.d", "/etc/passwd", "/usr/bin", "/usr/local/libexec"}, SensitiveMasks: []string{"*.secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	result, status, reason := NewReader(p).SudoPolicy(context.Background(), 1007)
+	if status != inspection.StatusOK || reason != "" || !result.Complete || result.WithheldRuleCount != 0 || len(result.Rules) != 1 {
+		t.Fatalf("legacy launch listing: %+v %s %s", result, status, reason)
+	}
+	rule := result.Rules[0]
+	if rule.CommandScope != "path" || rule.Path != "/usr/local/libexec/askdo-launch" || rule.ArgConstraint != "empty_only" || rule.Auth != "not_required" {
+		t.Fatalf("unexpected canonical rule: %+v", rule)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "CANARY") || strings.Contains(string(data), "kdesu") || strings.Contains(string(data), `\"`) {
+		t.Fatalf("raw listing leaked: %s", data)
+	}
+}
