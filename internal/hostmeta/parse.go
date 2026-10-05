@@ -192,8 +192,7 @@ func neutralScopedDefaults(value string) bool {
 			return false
 		}
 	case strings.HasPrefix(selector, "Defaults!"):
-		path := strings.TrimPrefix(selector, "Defaults!")
-		if !cleanPath(path) || strings.ContainsAny(path, "*?[]!\\\"'(),:=") {
+		if !scopedCommandSelector(strings.TrimPrefix(selector, "Defaults!")) {
 			return false
 		}
 	default:
@@ -210,6 +209,46 @@ func neutralScopedDefaults(value string) bool {
 		}
 	}
 	return true
+}
+
+// scopedCommandSelector accepts a per-command Defaults! selector only as an
+// exact absolute pathname or as the single-wildcard form the deployed GNU sudo
+// 1.9 listing prints for the KDE helper (/usr/lib/*/libexec/kf5/kdesu_stub):
+// one bare `*` as a non-final component under a clean absolute path, with no
+// other glob metacharacter. A selector is never granted path authority.
+func scopedCommandSelector(pattern string) bool {
+	if pattern == "" || len(pattern) > 4096 || !filepath.IsAbs(pattern) {
+		return false
+	}
+	for _, c := range pattern {
+		if c < 33 || c > 126 {
+			return false
+		}
+	}
+	if !strings.Contains(pattern, "*") {
+		return cleanPath(pattern) && !strings.ContainsAny(pattern, "*?[]!\\\"'(),:=")
+	}
+	if strings.ContainsAny(pattern, "?[]!\\\"'(),:=") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(pattern, "/"), "/")
+	stars := 0
+	for i, part := range parts {
+		switch part {
+		case "*":
+			if i == len(parts)-1 {
+				return false
+			}
+			stars++
+		case "", ".", "..":
+			return false
+		default:
+			if strings.ContainsAny(part, "*?[]!\\\"'(),:=") {
+				return false
+			}
+		}
+	}
+	return stars == 1
 }
 
 func parseSudo(p *inspection.Policy, uid uint32, name string, data []byte) (proto.SudoPolicyResult, inspection.Status, string) {
@@ -260,9 +299,19 @@ func parseSudo(p *inspection.Policy, uid uint32, name string, data []byte) (prot
 				rule.ArgConstraint = "unrestricted"
 			default:
 				path := cmd
-				emptyOnly := strings.HasSuffix(path, ` ""`)
-				if emptyOnly {
+				// GNU sudo legacy display keeps the literal terminal
+				// empty-argument marker escaped. Recognize only that exact
+				// byte-for-byte suffix (space backslash quote backslash
+				// quote) as empty-only, like the canonical ` ""` form; never
+				// unescape any other command bytes.
+				emptyOnly := false
+				switch {
+				case strings.HasSuffix(path, ` ""`):
+					emptyOnly = true
 					path = strings.TrimSuffix(path, ` ""`)
+				case strings.HasSuffix(path, ` \"\"`):
+					emptyOnly = true
+					path = strings.TrimSuffix(path, ` \"\"`)
 				}
 				// Anything other than a literal pathname (digest, negation, patterns,
 				// arguments, sudoedit) stays opaque. Never return any argument bytes.

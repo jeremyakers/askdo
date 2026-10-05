@@ -100,3 +100,95 @@ func TestScopedDefaultsUnknownIsSticky(t *testing.T) {
 		}
 	}
 }
+
+// GNU sudo legacy display output keeps the literal empty-argument marker
+// escaped: byte-for-byte space, backslash, quote, backslash, quote. Only that
+// exact known terminal marker may be recognized; generalized unescaping of
+// command text stays forbidden.
+func TestSudoLegacyEscapedEmptyArgMarker(t *testing.T) {
+	root := t.TempDir()
+	p := fixturePolicy(t, root)
+	path := root + "/tool"
+	if err := os.WriteFile(path, []byte("public"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cmd           string
+		path          string
+		argConstraint string
+	}{
+		{path + ` \"\"`, path, "empty_only"},
+		{path + ` ""`, path, "empty_only"},
+		{path + ` CANARY_ARGUMENT`, "", "restricted_withheld"},
+		{path + ` \"a\"`, "", "restricted_withheld"},
+		{path + ` "" extra`, "", "restricted_withheld"},
+		{path + `\"\"`, "", "restricted_withheld"},
+		{path, path, "unrestricted"},
+	} {
+		output := "User alice may run the following commands on host:\nSudoers entry:\n    RunAsUsers: root\n    Options: !authenticate\n    Commands:\n        " + tc.cmd + "\n"
+		got, status, reason := parseSudo(p, 1000, "alice", []byte(output))
+		if status != inspection.StatusOK || reason != "" || len(got.Rules) != 1 || got.Rules[0].Path != tc.path || got.Rules[0].ArgConstraint != tc.argConstraint {
+			t.Fatalf("cmd=%q %+v %s %s", tc.cmd, got, status, reason)
+		}
+		data, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "CANARY") || strings.Contains(string(data), `\`) {
+			t.Fatalf("raw command text leaked: %s", data)
+		}
+	}
+}
+
+// The deployed Ubuntu 22.04 hosts ship GNU sudo 1.9, whose per-command
+// Defaults listing for the KDE helper carries one Unix glob wildcard. A scoped
+// selector is authentication-neutral evidence only; a single `*` component
+// under an absolute path keeps the known neutral defaults known without any
+// selector-based path authority ever deriving from it.
+func TestSudoNeutralScopedGlobSelector(t *testing.T) {
+	root := t.TempDir()
+	p := fixturePolicy(t, root)
+	path := root + "/askdo-launch"
+	if err := os.WriteFile(path, []byte("public"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		selector string
+		complete bool
+	}{
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub !use_pty", true},
+		{"Defaults!/usr/local/libexec/askdo-launch !use_pty", true},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub use_pty, !mail_badpass", true},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub env_reset", true},
+		// Any second wildcard class, unknown token or authentication setting
+		// stays opaque and sticky.
+		{"Defaults!/usr/lib/*/libexec/kf5/* !use_pty", false},
+		{"Defaults!/usr/lib/*/libexec/**/kdesu_stub !use_pty", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub authenticate", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub !authenticate", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub exempt_group=CANARY", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub unknown_token", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub", false},
+		{"Defaults!/usr/lib/*/.. /libexec !use_pty", false},
+		{"Defaults!/usr/lib/*/lib exec/kf5 !use_pty", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub ", false},
+		{"Defaults!/usr/lib/*/libexec/kf5/kdesu_stub use_pty, CANARY", false},
+	} {
+		output := "Matching Defaults entries for opencode on fixture:\n    env_reset, mail_badpass, secure_path=/usr/bin\\:/bin, use_pty\n\nRunas and Command-specific defaults for opencode:\n    " + tc.selector + "\n\nUser opencode may run the following commands on fixture:\nSudoers entry:\n    RunAsUsers: root\n    Options: !authenticate\n    Commands:\n\tALL\n"
+		got, status, reason := parseSudo(p, 1000, "opencode", []byte(output))
+		wantAuth := "not_required"
+		if !tc.complete {
+			wantAuth = "unknown"
+		}
+		if status != inspection.StatusOK || reason != "" || got.Complete != tc.complete || len(got.Rules) != 1 || got.Rules[0].Auth != wantAuth || (!tc.complete && got.WithheldRuleCount != 1) {
+			t.Fatalf("selector=%q %+v %s %s", tc.selector, got, status, reason)
+		}
+		data, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "CANARY") || strings.Contains(string(data), "kdesu") {
+			t.Fatalf("selector leaked: %s", data)
+		}
+	}
+}
