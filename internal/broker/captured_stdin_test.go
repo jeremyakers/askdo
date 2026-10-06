@@ -231,15 +231,19 @@ func runCapturedStdinRealDispatch(t *testing.T) {
 			if j == nil {
 				t.Fatal("missing reviewing job")
 			}
-			frozenInput, err := j.openCapturedStdin()
+			delivery, err := j.frozenInput.Open(context.Background(), j.inputSelector)
 			if err != nil {
 				t.Fatal(err)
 			}
-			seals, err := unix.FcntlInt(frozenInput.Fd(), unix.F_GET_SEALS, 0)
-			if err != nil || seals&unix.F_SEAL_WRITE == 0 {
-				t.Fatalf("stdin descriptor is not sealed: seals=%x err=%v", seals, err)
+			if j.capturedKind() == proto.SealedMemfd {
+				seals, err := unix.FcntlInt(delivery.ReadFile().Fd(), unix.F_GET_SEALS, 0)
+				if err != nil || seals&unix.F_SEAL_WRITE == 0 {
+					t.Fatalf("stdin descriptor is not sealed: seals=%x err=%v", seals, err)
+				}
+			} else if _, err := delivery.ReadFile().Seek(0, 0); !errors.Is(err, unix.ESPIPE) {
+				t.Fatalf("legacy stdin seek: %v", err)
 			}
-			_ = frozenInput.Close()
+			_ = delivery.Close()
 			bootstrap, err := json.Marshal(j.bootstrap())
 			if err != nil {
 				t.Fatal(err)

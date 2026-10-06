@@ -79,7 +79,7 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 	manifest := operationOnlyManifest{
 		Version: 1, RequestID: j.req.RequestID, TargetUID: 0,
 		Context:          manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
-		Operation:        manifestOperation{Mode: op.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), op.Argv...), Env: append([]string(nil), op.Env...), CWD: op.CWD},
+		Operation:        manifestOperation{Mode: op.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), op.Argv...), Env: append([]string(nil), op.Env...), CWD: op.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:         append([]captureRecord{}, index.Files...),
 		TrustAssumptions: manifestTrustAssumptions{ReadRoots: append([]string(nil), j.daemon.cfg.Inspection.ReadRoots...), DenyPaths: append([]string(nil), j.daemon.cfg.Inspection.DenyPaths...), SensitiveMasks: effectiveSensitiveMasks(j.daemon.cfg.Inspection.SensitiveMasks)},
 		Settings:         manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
@@ -97,11 +97,12 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 }
 
 type manifestOperation struct {
-	Mode      string   `json:"mode"`
-	Lifecycle string   `json:"lifecycle"`
-	Argv      []string `json:"argv"`
-	Env       []string `json:"environment"`
-	CWD       string   `json:"cwd"`
+	CapturedStdin *proto.CapturedInput `json:"captured_stdin,omitempty"`
+	Mode          string               `json:"mode"`
+	Lifecycle     string               `json:"lifecycle"`
+	Argv          []string             `json:"argv"`
+	Env           []string             `json:"environment"`
+	CWD           string               `json:"cwd"`
 }
 
 func effectiveLifecycle(req proto.SubmitRequest) string {
@@ -199,7 +200,7 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 	manifest := approvalManifest{
 		Version: 1, RequestID: j.req.RequestID, TargetUID: 0,
 		Context:   manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
-		Operation: manifestOperation{Mode: operation.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), operation.Argv...), Env: append([]string(nil), operation.Env...), CWD: operation.CWD},
+		Operation: manifestOperation{Mode: operation.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), operation.Argv...), Env: append([]string(nil), operation.Env...), CWD: operation.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:  append([]captureRecord(nil), index.Files...),
 		TrustAssumptions: manifestTrustAssumptions{
 			ReadRoots:      append([]string(nil), j.daemon.cfg.Inspection.ReadRoots...),
@@ -258,11 +259,9 @@ func (j *jobRuntime) storeFrozenManifest(ctx context.Context, encoded []byte, au
 
 func (j *jobRuntime) validateCaptureState(index captureIndex) error {
 	if j.req.CapturedStdinBase64 != "" {
-		file, err := j.openCapturedStdin()
-		if err != nil {
+		if err := j.freezeCapturedInput(); err != nil {
 			return err
 		}
-		_ = file.Close()
 	}
 	for _, record := range index.Files {
 		if validateCapturePath(record.Path) != nil {

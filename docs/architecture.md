@@ -37,10 +37,16 @@ helper launches only after claiming a broker-authenticated one-use grant.
 At startup it:
 
 1. Loads and validates `/etc/askdo/config.json` (or `--config`).
-2. Probes `openat2` `RESOLVE_*` support and refuses to start without it
-   (host content inspection would be unsafe). Inspection additionally
-   requires `statx` `STATX_MNT_ID` and fails closed without it; in practice
-   this means kernel 5.8 or newer.
+2. Probes actual kernel primitives **once** and refuses to start host
+   inspection without a supported combination. Modern kernels use `openat2`
+   `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS` plus `statx` `STATX_MNT_ID`
+   (in practice kernel 5.8+). Kernels where `openat2` answers `ENOSYS` —
+   exercised on real Linux 3.10.108 (x86_64, ext4) —
+   fall back to `os.Root` confined lookups with `name_to_handle_at` exact
+   mount IDs. Only feature absence (`ENOSYS`) selects the fallback;
+   permission and resource errors fail closed on either path, there is no
+   uname-based guessing, and every filesystem is still checked per object.
+   `askdo config check` displays which backend the same probe selected.
 3. Creates `/run/askdo/` (root:askdo 0750), the request socket
     `request.sock` (root:askdo 0660) and a separate root-only `launch.sock`.
 4. Opens the durable store (`/var/lib/askdo/jobs.sqlite3`) and calls
@@ -57,12 +63,19 @@ Before submitting an operation the client reserves a globally unique
 ID before sending the submit frame on a second connection. The store owns the
 daily sequence and reservation tombstone; reservation alone neither stages a
 command nor permits dispatch. The broker owns the spool tree
-(`/var/lib/askdo/jobs/<id>/`, root-only
-0700 per job), the descriptor-relative read-only inspection boundary
-(`internal/inspection`, openat2-based), the approval-manifest freeze, and the
-dispatch gate. Detached operations still use the daemon-owned
-`SystemExecutor`; foreground operations use the separate root-only helper
-after an approved one-use handoff. This is **not** a unified helper engine.
+   (`/var/lib/askdo/jobs/<id>/`, root-only
+   0700 per job), the descriptor-relative read-only inspection boundary
+   (`internal/inspection`, openat2 with a legacy `os.Root` fallback),
+   the approval-manifest freeze, and the
+   dispatch gate. The legacy backend keeps the same policy gate but reports
+   its unsupported cases honestly: reads through a terminal symlink and
+   absolute-path symlink traversal are denied rather than silently followed,
+   and relatively resolved parent links remain confined by `os.Root` to the
+   policy root. On any backend, unsupported filesystems (those without
+   descriptor mount identity) are denied individually — never blanket-allowed.
+   Detached operations still use the daemon-owned
+   `SystemExecutor`; foreground operations use the separate root-only helper
+   after an approved one-use handoff. This is **not** a unified helper engine.
 
 ### Foreground helper (root, fixed entry point)
 

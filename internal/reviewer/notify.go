@@ -54,6 +54,7 @@ func notifyAutoApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.
 	}
 	if bootstrap.Operation.CapturedStdin != nil {
 		input.CapturedStdinBytes = bootstrap.Operation.CapturedStdin.Size
+		input.CapturedStdinKind = bootstrap.Operation.CapturedStdin.DeliveryKind
 	}
 	parts, err := telegram.RenderSummaryParts(input)
 	if err != nil {
@@ -166,6 +167,7 @@ func notifyApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.Boot
 	}
 	if bootstrap.Operation.CapturedStdin != nil {
 		input.CapturedStdinBytes = bootstrap.Operation.CapturedStdin.Size
+		input.CapturedStdinKind = bootstrap.Operation.CapturedStdin.DeliveryKind
 	}
 	parts, err := telegram.RenderSummaryParts(input)
 	if err != nil {
@@ -271,6 +273,7 @@ func notifyAvailabilityApproval(ctx context.Context, pipe *asyncBroker, bootstra
 	}
 	if bootstrap.Operation.CapturedStdin != nil {
 		input.CapturedStdinBytes = bootstrap.Operation.CapturedStdin.Size
+		input.CapturedStdinKind = bootstrap.Operation.CapturedStdin.DeliveryKind
 	}
 	parts, err := telegram.RenderApprovalOnlySummaryParts(input)
 	if err != nil {

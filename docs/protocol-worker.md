@@ -83,7 +83,7 @@ The immutable job bootstrap; the first and only message of its kind.
 | Field | Type — bounds |
 |---|---|
 | `mode` | enum `"argv"` \| `"bundle"` |
-| `captured_stdin` | optional argv-mode v5 metadata: logical bundle `path: "stdin"`, byte `size`, SHA-256 digest; no script contents |
+| `captured_stdin` | optional argv-mode v5 metadata: logical bundle `path: "stdin"`, byte `size`, SHA-256 digest, and optional `delivery_kind` enum `"sealed_memfd"` (modern sealed seekable file, the historical default) | `"socket_stream"` (legacy non-seekable owner-approved stream, selected only on `memfd_create` `ENOSYS`); no script contents |
 | `argv` | argv mode: array 1–64 of strings, each ≤ 4096; must be absent/empty in bundle mode |
 | `entry` | bundle mode: string ≤ 1024; must be empty in argv mode |
 | `args` | bundle mode: array ≤ 64 of strings, each ≤ 4096; must be empty in argv mode |
@@ -97,7 +97,9 @@ entries for reviewed jobs. The broker derives them from the actual launch
 environment. Private `ASKDO_BUNDLE` staging paths are not projected.
 
 The bootstrap carries no raw capture contents. For captured stdin it carries
-only the logical path, byte size and SHA-256 digest. In argv mode
+only the logical path, byte size, SHA-256 digest and the selected delivery
+kind — the kind is visible before approval and never changes afterwards; a
+kind/bytes mismatch fails closed. In argv mode
 the broker performs metadata-only `argv[0]` resolution as execution preflight
 and reads no host content eagerly; host bytes cross to the model only through
 model-chosen `inspect_request` exchanges. `bundle_dir` is broker-private
@@ -296,7 +298,17 @@ not justify hiding material uncertainty from its warnings/missing context.
   `max_inspected_files` ≥ 1; `max_inspected_bytes` ≥ 1;
   `max_hash_file_bytes` 1–33554432; `max_hashed_bytes_per_review` between that
   per-file value and 67108864; `sudo_policy_uids` array ≤ 128 of distinct
-  uint32s, empty when disabled. Roots are descriptor-filtered configured
+  uint32s, empty when disabled. Optional `compatibility` object (omitted, never
+  `null`): `path_resolver` enum `"openat2"` | `"os_root"`; booleans
+  `terminal_link_follow_supported` and `absolute_path_follow_supported`;
+  `mount_identity_policy` enum `"statx_or_file_handle"`. Unknown fields, other
+  enum spellings and null inside the leaf are rejected at decode time. The
+  leaf reports what the broker's one-time startup probe actually selected
+  (`os_root` only where `openat2` answered `ENOSYS`; measured on Linux
+  3.10.108, ext4 — not a universal vendor claim); the worker or caller cannot
+  select a backend and the snapshot is identical on every page. When the field
+  is absent, the historical scope JSON shape is preserved unchanged. Roots are
+  descriptor-filtered configured
   spellings, not canonical aliases or blanket grants. Exclusion details remain
   private. An oversized effective UID list fails closed, not truncated.
 - `hash_path`: `source: "host"`; `requested_path` exactly matching the request;

@@ -317,8 +317,13 @@ func TestProbeOpenat2AbsenceFailsClosed(t *testing.T) {
 	if err := ProbeOpenat2(); err == nil || !errors.Is(err, unix.ENOSYS) {
 		t.Fatalf("ProbeOpenat2 error = %v", err)
 	}
-	if _, err := NewPolicy(config.InspectionConfig{}); err == nil {
-		t.Fatal("NewPolicy succeeded without openat2")
+	p, err := NewPolicy(config.InspectionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if p.legacyRoot == nil {
+		t.Fatal("legacy resolver not selected")
 	}
 }
 

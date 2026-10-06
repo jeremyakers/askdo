@@ -116,9 +116,10 @@ type WorkerOperation struct {
 // CapturedInput is broker-authored metadata for the logical bundle file;
 // script bytes stay in the spool until a reviewer explicitly reads it.
 type CapturedInput struct {
-	Path   string `json:"path"`
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
+	DeliveryKind DeliveryKind `json:"delivery_kind,omitempty"`
+	Path         string       `json:"path"`
+	Size         int64        `json:"size"`
+	SHA256       string       `json:"sha256"`
 }
 
 // ConfigProjection is the worker-safe subset of configuration.
@@ -736,12 +737,18 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 	if discriminator.Type == "bootstrap" {
 		var flags struct {
 			FleetMode json.RawMessage `json:"fleet_mode"`
+			Operation struct {
+				CapturedStdin json.RawMessage `json:"captured_stdin"`
+			} `json:"operation"`
 		}
 		if err := json.Unmarshal(data, &flags); err != nil {
 			return nil, err
 		}
 		if string(flags.FleetMode) == "null" {
 			return nil, errors.New("null fleet mode")
+		}
+		if string(flags.Operation.CapturedStdin) == "null" {
+			return nil, errors.New("null captured input metadata")
 		}
 	}
 	if discriminator.Type == "model_turn_request" || discriminator.Type == "model_turn_result" {
@@ -817,7 +824,7 @@ func requireWorkerFields(raw []byte, value reflect.Value) error {
 				return fmt.Errorf("missing required worker field %s", name)
 			}
 			if string(child) == "null" {
-				if name == "inspection_caps" || name == "reason_code" || value.Type() == reflect.TypeOf(SudoRule{}) {
+				if name == "inspection_caps" || name == "reason_code" || name == "compatibility" || value.Type() == reflect.TypeOf(SudoRule{}) {
 					return fmt.Errorf("worker field %s must not be null", name)
 				}
 				if optional {
@@ -1053,7 +1060,7 @@ func validateBootstrap(m Bootstrap) error {
 	return validateProjectionMode(m.ConfigProjection, m.ApprovalOnly, m.FleetMode)
 }
 func validateOperation(o WorkerOperation) error {
-	if o.CapturedStdin != nil && (o.Mode != "argv" || o.CapturedStdin.Path != "stdin" || o.CapturedStdin.Size < 1 || o.CapturedStdin.Size > MaxCapturedStdinBytes || !digestPattern.MatchString(o.CapturedStdin.SHA256)) {
+	if o.CapturedStdin != nil && (!o.CapturedStdin.DeliveryKind.Valid() || o.Mode != "argv" || o.CapturedStdin.Path != "stdin" || o.CapturedStdin.Size < 1 || o.CapturedStdin.Size > MaxCapturedStdinBytes || !digestPattern.MatchString(o.CapturedStdin.SHA256)) {
 		return errors.New("invalid captured stdin metadata")
 	}
 	if !bounded(o.CWD, 4096) || !path.IsAbs(o.CWD) || path.Clean(o.CWD) != o.CWD {

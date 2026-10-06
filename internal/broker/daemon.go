@@ -163,7 +163,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 		return nil, nil, err
 	}
 	emitConfigWarnings(slog.Default(), cfg)
-	if err := inspection.ProbeOpenat2(); err != nil {
+	if err := inspection.ProbeInspectionSupport(); err != nil {
 		return nil, nil, fmt.Errorf("inspection unavailable: %w", err)
 	}
 	protectedPaths := cfg.CredentialPaths()

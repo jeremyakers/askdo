@@ -95,6 +95,7 @@ func TestModelReceivesCommandWithoutInternalCaptureMetadata(t *testing.T) {
 func TestModelReceivesCapturedInputReferenceNotBody(t *testing.T) {
 	b := bootstrap(1, time.Now().Add(time.Minute))
 	b.Operation = proto.WorkerOperation{Mode: "argv", Argv: []string{"/usr/bin/bash"}, CWD: "/home/agent", CapturedStdin: &proto.CapturedInput{Path: "stdin", Size: 19, SHA256: strings.Repeat("a", 64)}}
+	b.Operation.CapturedStdin.DeliveryKind = proto.SocketStream
 	m := &fakemodel.Model{Steps: []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("report", "submit_review", reviewerTestReport("unknown"))}}}}}
 	if _, err := (&reviewer.Loop{Model: m, Tools: reviewer.NewToolExecutor(b, entryBroker{}), Bootstrap: b}).Run(context.Background()); err != nil {
 		t.Fatal(err)

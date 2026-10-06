@@ -318,6 +318,12 @@ func (p *Policy) listDir(path string, offset, maxEntries, totalCap int, identity
 }
 
 func (p *Policy) open(root rootAnchor, rel string, flags int, mode uint32) (int, error) {
+	if root.fd < 0 {
+		return -1, unix.EBADF
+	}
+	if p.legacyRoot != nil {
+		return p.legacyOpen(rel, flags, mode)
+	}
 	fd, err := openat2(root.fd, rel, &unix.OpenHow{Flags: uint64(flags), Mode: uint64(mode), Resolve: resolveFlags})
 	if err != nil {
 		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EPERM) {

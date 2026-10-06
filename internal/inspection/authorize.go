@@ -22,13 +22,29 @@ type authorization struct {
 func denied(reason string) error { return fmt.Errorf("%s: %w", reason, unix.EXDEV) }
 func mountID(fd int) (uint64, error) {
 	var st unix.Statx_t
-	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &st); err != nil {
+	err := descriptorStatx(fd, "", unix.AT_EMPTY_PATH|unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &st)
+	if err == nil && st.Mask&unix.STATX_MNT_ID != 0 {
+		if st.Mnt_id == 0 {
+			return 0, denied("mount ID unavailable")
+		}
+		return st.Mnt_id, nil
+	}
+	// Missing STATX_MNT_ID on an otherwise successful statx is also genuine
+	// feature absence. Permission, contract and resource failures are not.
+	if err != nil && !errors.Is(err, unix.ENOSYS) {
 		return 0, err
 	}
-	if st.Mask&unix.STATX_MNT_ID == 0 {
+	// x/sys uses an initial 32-byte handle and at most one resize, not the
+	// unverified zero-buffer EOVERFLOW shortcut. Linux bounds handles at 128
+	// bytes; retain only the positive mount ID and discard the opaque handle.
+	handle, id, err := descriptorHandle(fd, "", unix.AT_EMPTY_PATH)
+	if err != nil {
+		return 0, err
+	}
+	if id <= 0 || handle.Size() > 128 {
 		return 0, denied("mount ID unavailable")
 	}
-	return st.Mnt_id, nil
+	return uint64(id), nil
 }
 
 // authorizeFD is the sole post-open policy gate; no readable descriptor is
@@ -103,20 +119,8 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		return denied("mountpoint mismatch")
 	}
 	coordinate := filepath.Join(active.root, rel)
-	// The mount root is kernel source evidence even when its coordinate is
-	// hidden by this namespace (PrivateTmp). An explicit exclusion at that
-	// coordinate cannot be evaded by hiding the source pathname.
-	for _, hard := range p.hard {
-		if containsPath(hard, coordinate) {
-			return denied("protected mount source " + coordinate)
-		}
-	}
-	for _, exclude := range p.denies {
-		if containsPath(exclude, coordinate) && !p.rule(coordinate).allowed {
-			return denied("excluded mount source " + coordinate)
-		}
-	}
-	a.sensitive = a.sensitive || p.MatchesSensitive(coordinate)
+	// Filesystem coordinates are not namespace paths. Only mountinfo entries
+	// on this filesystem can translate them into source policy spellings.
 	for _, m := range mounts {
 		if m.major != active.major || m.minor != active.minor || !containsPath(m.root, coordinate) {
 			continue
@@ -126,6 +130,22 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 			return denied("unrepresentable mount alias")
 		}
 		alias := filepath.Join(m.point, part)
+		// Translate the filesystem source coordinate back through every mount
+		// spelling, including a source hidden by an overmount. A positive bind
+		// mount root is evidence of that source even when a reachability probe
+		// would now see the covering inode. Merely being outside a read root is
+		// not source exclusion evidence; that still requires identity below.
+		for _, hard := range p.hard {
+			if containsPath(hard, alias) {
+				return denied("protected mount source " + alias)
+			}
+		}
+		for _, exclude := range p.denies {
+			if containsPath(exclude, alias) && !p.rule(alias).allowed {
+				return denied("excluded mount source " + alias)
+			}
+		}
+		a.sensitive = a.sensitive || p.MatchesSensitive(alias)
 		// A mountinfo root is a filesystem coordinate, not necessarily an
 		// addressable namespace path (notably systemd PrivateTmp). Prove
 		// reachability and object identity before treating it as an alias.
@@ -133,7 +153,7 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		if a.stat.Mode&unix.S_IFMT == unix.S_IFLNK {
 			flags |= unix.O_NOFOLLOW
 		}
-		probe, err := openat2(p.roots[0].fd, alias, &unix.OpenHow{Flags: flags, Resolve: resolveFlags})
+		probe, err := p.open(p.roots[0], alias, int(flags), 0)
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) {
 			continue
 		}
@@ -146,13 +166,15 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		if err != nil {
 			return err
 		}
+		if p.legacyRoot != nil && st.Mode&unix.S_IFMT == unix.S_IFLNK && a.stat.Mode&unix.S_IFMT != unix.S_IFLNK {
+			return denied("legacy mount alias terminal symlink unproved")
+		}
 		if st.Dev != a.stat.Dev || st.Ino != a.stat.Ino {
 			continue
 		} // overmounted, not an alias
 		if d := p.rule(alias); !d.allowed {
 			return denied("mount alias " + alias + " is " + d.rule)
 		}
-		a.sensitive = a.sensitive || p.MatchesSensitive(alias)
 	}
 	return nil
 }
@@ -171,6 +193,9 @@ func (p *Policy) authorizedOpen(path string, flags int) (int, authorization, err
 	a, err = p.authorizeFD(fd, path)
 	if err != nil {
 		return -1, a, err
+	}
+	if p.legacyRoot != nil && a.stat.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return -1, a, denied("legacy terminal symlink follow unsupported")
 	}
 	// Masked objects remain metadata-only: never upgrade their O_PATH FD to
 	// one capable of reading content, even when a caller requested read flags.

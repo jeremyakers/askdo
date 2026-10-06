@@ -45,7 +45,8 @@ Telegram.
 Validate with:
 
 ```sh
-askdo config check         # offline validation + warnings + openat2 probe
+askdo config check         # offline validation + warnings + kernel feature
+                           # probe (prints the actually selected backend)
 askdo config check --live  # additionally probes each model endpoint
                            # with a synthetic fixture (never host files)
 ```
@@ -129,8 +130,33 @@ It opens metadata only; it does not print contents or change configuration.
 It reports an **inspection policy decision only**; incomplete reviewer or
 Telegram sections are intentionally permitted during onboarding. Run
 `askdo config check` for complete service configuration validation.
-Inspection requires `STATX_MNT_ID` (normally Linux 5.8+), in addition to
-`openat2`; missing kernel support fails closed.
+Inspection is selected by actual kernel feature probes, not a blind version
+check: `openat2` is preferred, and only its absence
+(`ENOSYS`) selects the legacy `os.Root` confined fallback with exact
+`name_to_handle_at` mount IDs (statx `STATX_MNT_ID` preferred when present).
+Permission and resource errors on either path fail closed, and filesystems
+without descriptor mount identity are denied per object — there is no
+blanket-filesystem support flag, no uname-based guessing, and no
+configuration override for the backend the probe selected. Legacy paths were
+tested on real Linux 3.10.108 (x86_64, ext4); native daemon and service-lifecycle
+acceptance remains deployment-specific. `askdo config check` prints which
+backend the same probe selected.
+
+Go 1.27.1's Unix `os.Root` implementation opens intermediate directories
+read-only while walking a confined path. Search-only ancestor access can
+therefore be insufficient even when the final acquisition is metadata-only
+(`O_PATH`). Such permission failures remain fail-closed; no broader read root,
+ACL bypass, or alternate path walker is selected to compensate.
+
+These source-only compatibility changes require compatible fleet gateway and
+joining host broker/reviewer builds. Older strict peers can reject
+`display.captured_stdin_kind`, `operation.captured_stdin.delivery_kind`, or
+inspection-scope `compatibility`. Modern sealed-memfd jobs also emit the new
+kind metadata; it is not enabled only on legacy kernels. Current-version
+fixtures do not establish older-peer interoperability. Coordinate an
+owner-approved rollout before joining the new flow; this does not require
+upgrading every existing host or authorize a fleet upgrade/restart. Native
+host installation and acceptance remain separate from source publication.
 
 #### Optional host evidence and rollout
 

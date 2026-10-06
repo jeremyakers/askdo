@@ -23,7 +23,23 @@ func TestWorkerCapturedStdinMetadataWire(t *testing.T) {
 		}
 	}
 	check(true)
+	for _, kind := range []DeliveryKind{SealedMemfd, SocketStream} {
+		b.Operation.CapturedStdin.DeliveryKind = kind
+		check(true)
+	}
+	body, _ := json.Marshal(b)
+	var object map[string]json.RawMessage
+	_ = json.Unmarshal(body, &object)
+	var operation map[string]json.RawMessage
+	_ = json.Unmarshal(object["operation"], &operation)
+	operation["captured_stdin"] = json.RawMessage("null")
+	object["operation"], _ = json.Marshal(operation)
+	body, _ = json.Marshal(object)
+	if _, err := DecodeWorkerMessage(body, BrokerToWorker); err == nil {
+		t.Fatal("null captured metadata accepted")
+	}
 	for _, invalid := range []CapturedInput{
+		{Path: "stdin", Size: 23, SHA256: strings.Repeat("a", 64), DeliveryKind: "pipe"},
 		{Path: "../stdin", Size: 23, SHA256: strings.Repeat("a", 64)},
 		{Path: "/tmp/stdin", Size: 23, SHA256: strings.Repeat("a", 64)},
 		{Path: "", Size: 23, SHA256: strings.Repeat("a", 64)},

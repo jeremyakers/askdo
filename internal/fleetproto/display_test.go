@@ -27,6 +27,7 @@ func TestDisplaySubmitterFactsSignedRoundTripAndBinding(t *testing.T) {
 	ticket.Display.Reason = "request purpose <canary> & data"
 	ticket.Display.CWD = "/work/<canary>"
 	ticket.Display.CapturedStdinBytes = 123
+	ticket.Display.CapturedStdinKind = proto.SocketStream
 	ticket.Binding.DisplayHash, err = HashDisplay(ticket.Display)
 	if err != nil {
 		t.Fatal(err)
@@ -68,6 +69,7 @@ func TestDisplaySubmitterFactsSignedRoundTripAndBinding(t *testing.T) {
 		{"reason", func(d *Display) { d.Reason += " altered" }},
 		{"cwd", func(d *Display) { d.CWD += "/altered" }},
 		{"size", func(d *Display) { d.CapturedStdinBytes++ }},
+		{"kind", func(d *Display) { d.CapturedStdinKind = proto.SealedMemfd }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := ticket
@@ -175,6 +177,8 @@ func TestDisplayFactBoundsAndStrictShape(t *testing.T) {
 		{"cwd_utf8", func(d *Display) { d.CWD = "/bad\xff" }},
 		{"size_negative", func(d *Display) { d.CapturedStdinBytes = -1 }},
 		{"size_oversize", func(d *Display) { d.CapturedStdinBytes = proto.MaxCapturedStdinBytes + 1 }},
+		{"kind_unknown", func(d *Display) { d.CapturedStdinKind = "pipe" }},
+		{"kind_without_input", func(d *Display) { d.CapturedStdinKind = proto.SocketStream; d.CapturedStdinBytes = 0 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d := ticket.Display
@@ -188,7 +192,7 @@ func TestDisplayFactBoundsAndStrictShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"reason", "cwd", "captured_stdin_bytes"} {
+	for _, field := range []string{"reason", "cwd", "captured_stdin_bytes", "captured_stdin_kind"} {
 		for _, value := range []string{"null", "true", "{}", "[]"} {
 			bad := strings.Replace(string(data), `"display":{`, `"display":{"`+field+`":`+value+`,`, 1)
 			if _, err := Parse[Ticket]([]byte(bad)); !errors.Is(err, ErrProtocol) {

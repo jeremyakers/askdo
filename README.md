@@ -93,9 +93,17 @@ and [upgrade constraints](docs/configuration.md#optional-host-evidence-and-rollo
 
 ## Get started
 
-You'll need a Linux host with systemd and sudo (kernel 5.8+),
-[Go 1.27.1](go.mod) to build from source, and a Telegram bot. You can create
-a bot with [BotFather](https://t.me/BotFather). A model is only needed if you
+You'll need a Linux host with systemd and sudo. The source implementation probes
+the kernel features it needs rather than relying on a minimum kernel version:
+`openat2` confinement and `STATX_MNT_ID`, or, when those primitives are absent,
+an `os.Root` confined resolver and `name_to_handle_at` mount identity. It refuses
+host inspection when no supported combination is available. The legacy paths
+were exercised in an isolated, real **Linux 3.10.108** VM (x86_64, ext4); a vendor
+or DSM installation still needs its own native broker, terminal and service
+lifecycle acceptance. These compatibility additions are not in the published
+rc.2 binaries. Build from source needs [Go 1.27.1](go.mod). Approval requires a
+Telegram bot, which you can create with
+[BotFather](https://t.me/BotFather). A model is only needed if you
 want AI review.
 
 ### 1. Install from source

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,12 +19,16 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/frozeninput"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
 )
 
 type jobRuntime struct {
+	inputMu            sync.Mutex
+	frozenInput        *frozeninput.Input
+	selectInput        func() (proto.DeliveryKind, error) // test-only capability probe
 	daemon             *daemon
 	uid                uint32
 	route              config.TelegramRoute // detached at admission from authenticated peer UID
@@ -334,6 +339,10 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	if err := j.captureEvidence(); err != nil {
 		j.fail("capture evidence: " + err.Error())
+		return
+	}
+	if err := j.freezeCapturedInput(); err != nil {
+		j.fail("freeze captured input: " + err.Error())
 		return
 	}
 	// Explicit policy exemptions never construct a provider. Codex preparation
@@ -1149,17 +1158,30 @@ func (j *jobRuntime) execute(ctx context.Context) {
 	}
 	operation := j.operation()
 	operation.CWDFd = j.cwdFD()
+	var delivery *frozeninput.Delivery
 	if j.req.CapturedStdinBase64 != "" {
-		operation.Stdin, err = j.openCapturedStdin()
+		if j.frozenInput == nil {
+			recorder.close()
+			j.recordLaunchFailure(ctx)
+			return
+		}
+		err = j.freezeCapturedInput()
+		if err == nil {
+			delivery, err = j.frozenInput.Open(ctx, j.inputSelector)
+		}
 		if err != nil {
 			recorder.close()
 			j.recordLaunchFailure(ctx)
 			return
 		}
-		defer operation.Stdin.Close()
+		operation.Stdin = delivery.ReadFile()
+		defer delivery.Close()
 	}
 	execution, err := j.daemon.executor.Start(operation, recorder.stdout, recorder.stderr)
 	if err != nil {
+		if delivery != nil {
+			_ = delivery.Close()
+		}
 		recorder.close()
 		j.recordLaunchFailure(ctx)
 		return
@@ -1168,6 +1190,9 @@ func (j *jobRuntime) execute(ctx context.Context) {
 		// The commit was already durable; reap the child exactly once and
 		// leave the starting record for restart marking to report unknown.
 		_ = execution.Wait()
+		if delivery != nil {
+			_ = delivery.Close()
+		}
 		recorder.close()
 		return
 	}
@@ -1184,6 +1209,16 @@ func (j *jobRuntime) execute(ctx context.Context) {
 		recorder.stderr.follow(j, "stderr", flushed)
 	}()
 	result := execution.Wait()
+	if delivery != nil {
+		_ = delivery.Close()
+		if transfer := delivery.Result(); transfer.Err != nil {
+			slog.Error("captured input transfer failed after process start", "request_id", j.req.RequestID, "delivery_kind", j.capturedKind(), "error", transfer.Err)
+			j.progress("input", "captured input transfer failed")
+		} else if transfer.EarlyClose {
+			slog.Info("captured input producer closed before transfer completed", "request_id", j.req.RequestID, "delivery_kind", j.capturedKind())
+			j.progress("input", "captured input producer closed before transfer completed")
+		}
+	}
 	flushErr := recorder.flush()
 	close(flushed)
 	followers.Wait()
@@ -1309,7 +1344,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	if j.req.CapturedStdinBase64 != "" {
 		data, _ := base64.StdEncoding.DecodeString(j.req.CapturedStdinBase64)
 		digest := sha256.Sum256(data)
-		operation.CapturedStdin = &proto.CapturedInput{Path: "stdin", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:])}
+		operation.CapturedStdin = &proto.CapturedInput{Path: "stdin", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), DeliveryKind: j.capturedKind()}
 	}
 	if j.req.Mode == "bundle" {
 		operation.BundleDir = j.spool.bundle

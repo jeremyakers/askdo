@@ -184,6 +184,90 @@ func TestMetadataResultValueBounds(t *testing.T) {
 	}
 }
 
+func TestScopeCompatibilityLeafValidation(t *testing.T) {
+	base := InspectionScopeResult{ReadRoots: []string{"/usr"}, ExclusionsRemain: true, MaxReadBytes: 16384, MaxInspectedFiles: 256, MaxInspectedBytes: 8388608, MaxHashFileBytes: 32 << 20, MaxHashedBytesPerReview: 64 << 20, SudoPolicyUIDs: []uint32{}}
+	valid := []ScopeCompatibility{
+		{PathResolver: CompatPathResolverOpenat2, TerminalLinkFollow: true, AbsolutePathFollow: true, MountIdentity: CompatMountIdentityStatxOrHandle},
+		{PathResolver: CompatPathResolverOSRoot, TerminalLinkFollow: false, AbsolutePathFollow: false, MountIdentity: CompatMountIdentityStatxOrHandle},
+	}
+	for _, compat := range valid {
+		p := base
+		p.Compatibility = &compat
+		req, res := metadataExchange(t, "inspection_scope", InspectionScopeRequest{}, p)
+		if err := ValidateInspectResultFor(req, res); err != nil {
+			t.Fatalf("valid compat %+v rejected: %v", compat, err)
+		}
+		typed, err := DecodeInspectionMetadataResult(req, res)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := typed.(InspectionScopeResult).Compatibility; got == nil || *got != compat {
+			t.Fatalf("compat roundtrip: %+v", got)
+		}
+	}
+	for _, mutate := range []func(*InspectionScopeResult){
+		func(p *InspectionScopeResult) {
+			p.Compatibility = &ScopeCompatibility{PathResolver: "uname", TerminalLinkFollow: false, AbsolutePathFollow: false, MountIdentity: CompatMountIdentityStatxOrHandle}
+		},
+		func(p *InspectionScopeResult) {
+			p.Compatibility = &ScopeCompatibility{PathResolver: CompatPathResolverOpenat2, TerminalLinkFollow: false, AbsolutePathFollow: false, MountIdentity: "name_to_handle_universal"}
+		},
+		func(p *InspectionScopeResult) {
+			p.Compatibility = &ScopeCompatibility{PathResolver: "", TerminalLinkFollow: false, AbsolutePathFollow: false, MountIdentity: CompatMountIdentityStatxOrHandle}
+		},
+		func(p *InspectionScopeResult) {
+			p.Compatibility = &ScopeCompatibility{PathResolver: CompatPathResolverOpenat2, TerminalLinkFollow: true, AbsolutePathFollow: true}
+		},
+	} {
+		p := base
+		mutate(&p)
+		req, res := metadataExchange(t, "inspection_scope", InspectionScopeRequest{}, p)
+		if err := ValidateInspectResultFor(req, res); err == nil {
+			t.Fatalf("invalid leaf accepted: %+v", p.Compatibility)
+		}
+	}
+	// null is rejected even though the field is optional; absence is not null.
+	req := InspectRequest{Type: "inspect_request", RequestSeq: 7, Op: "inspection_scope", Payload: json.RawMessage(`{"cursor":""}`)}
+	for _, raw := range []string{
+		`{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":null}`,
+		`{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":{"path_resolver":"openat2"}}`,
+		`{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":{"path_resolver":"openat2","terminal_link_follow_supported":true,"absolute_path_follow_supported":true,"mount_identity_policy":"statx_or_file_handle","guaranteed_all_fs":true}}`,
+	} {
+		res := InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: json.RawMessage(raw)}
+		if err := ValidateInspectResultFor(req, res); err == nil {
+			t.Fatalf("invalid compatibility wire accepted: %s", raw)
+		}
+	}
+	// Historical JSON without the field decodes unchanged: the absence is
+	// preserved, not defaulted into a backend claim.
+	historical := `{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[]}`
+	res := InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: json.RawMessage(historical)}
+	typed, err := DecodeInspectionMetadataResult(req, res)
+	if err != nil {
+		t.Fatalf("historical scope JSON rejected: %v", err)
+	}
+	if typed.(InspectionScopeResult).Compatibility != nil {
+		t.Fatal("absent compatibility was defaulted")
+	}
+	// Omitting an unchanged modern snapshot keeps the wire exactly correct:
+	// marshaling a result with a nil pointer emits no compatibility key.
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "compatibility") {
+		t.Fatalf("nil compat marshaled a key: %s", encoded)
+	}
+	// With a value, the closed modern spelling marshals as explicit openat2.
+	openat2 := valid[0]
+	p := base
+	p.Compatibility = &openat2
+	encoded, err = json.Marshal(p)
+	if err != nil || !strings.Contains(string(encoded), `"path_resolver":"openat2"`) {
+		t.Fatalf("explicit modern compat lost: %s %v", encoded, err)
+	}
+}
+
 func TestScopePaginationBoundsAndTracker(t *testing.T) {
 	value := InspectionScopeResult{ReadRoots: []string{}, ExclusionsRemain: true, MaxReadBytes: 16384, MaxInspectedFiles: 256, MaxInspectedBytes: 8388608, MaxHashFileBytes: 32 << 20, MaxHashedBytesPerReview: 64 << 20, SudoPolicyUIDs: []uint32{}}
 	req, res := metadataExchange(t, "inspection_scope", InspectionScopeRequest{}, value)
