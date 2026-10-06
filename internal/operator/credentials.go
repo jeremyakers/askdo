@@ -8,10 +8,10 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/jeremyakers/askdo/internal/codexauth"
+	"github.com/jeremyakers/askdo/internal/reviewidentity"
 )
 
 // CredentialKind selects the ownership/mode rule the daemon enforces for a
@@ -134,15 +134,11 @@ func credentialOwnership(kind CredentialKind) (mode os.FileMode, uid, gid int, e
 	case CredentialTrust:
 		return 0400, 0, 0, nil
 	case CredentialKey:
-		group, err := lookupGroup("askdo-review")
+		groupID, err := reviewidentity.GroupID(lookupGroup)
 		if err != nil {
-			return 0, 0, 0, fmt.Errorf("resolve askdo-review group: %w", err)
+			return 0, 0, 0, err
 		}
-		gid64, err := strconv.ParseUint(group.Gid, 10, 32)
-		if err != nil {
-			return 0, 0, 0, fmt.Errorf("parse askdo-review group ID: %w", err)
-		}
-		return 0640, 0, int(gid64), nil
+		return 0640, 0, int(groupID), nil
 	default:
 		return 0, 0, 0, fmt.Errorf("operator: unknown credential kind %d", kind)
 	}

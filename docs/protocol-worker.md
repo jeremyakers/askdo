@@ -15,7 +15,12 @@ The broker launches the worker as
 `exec.Command("/usr/local/bin/askdo", "reviewer")` with:
 
 - **Credentials:** the process runs with `syscall.Credential` set to the
-  resolved `askdo-review` UID/GID and an empty supplementary-group list. The
+  UID of the fixed named `askdo-review` account and the GID of the fixed named
+  `askdo-review` group, with an empty supplementary-group list. The execution
+  group is independent of the account's NSS primary group; that primary group
+  is not inherited. Missing, invalid or zero role IDs fail closed. Root-started
+  `config check --live` resolves the same identity before provider preparation,
+  then clears supplementary groups and drops GID before UID for live checks. The
   reviewer binary refuses to run as root (exit 1). Bare `askdo reviewer` is
   worker mode; subcommands such as `askdo reviewer add` are operator CLI, not
   worker invocations.
@@ -34,6 +39,13 @@ The broker launches the worker as
    may know — model projection (possibly empty for approval-only), limits,
    Telegram settings, the frozen operation, deadlines — arrives in the single
    `bootstrap` message.
+
+This process boundary is not a full OS sandbox: normal filesystem permissions,
+ACLs and network access still apply. Choosing a dedicated execution group does
+not disable the account's login or remove UID-specific/default ACL grants.
+The standard installer still requires the account's NSS primary group to be
+`askdo-review`; this runtime contract does not make it a DSM-compatible installer
+or establish native deployment acceptance.
 
 ## Framing and decoding
 

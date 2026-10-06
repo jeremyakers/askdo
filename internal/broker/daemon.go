@@ -22,6 +22,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/foreground"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/reviewidentity"
 	"github.com/jeremyakers/askdo/internal/store"
 	"golang.org/x/sys/unix"
 )
@@ -349,22 +350,14 @@ func emitConfigWarnings(logger *slog.Logger, cfg *config.Config) {
 	}
 }
 
-// resolveReviewCredentials resolves the unprivileged askdo-review account used
-// as the reviewer process credential. An explicit non-zero override wins.
+// resolveReviewCredentials resolves the fixed reviewer execution identity.
+// An explicit non-zero test override wins.
 func resolveReviewCredentials(uid, gid uint32) (uint32, uint32, error) {
 	if uid != 0 || gid != 0 {
 		return uid, gid, nil
 	}
-	account, err := user.Lookup("askdo-review")
-	if err != nil {
-		return 0, 0, fmt.Errorf("resolve askdo-review user: %w", err)
-	}
-	parsedUID, uidErr := strconv.ParseUint(account.Uid, 10, 32)
-	parsedGID, gidErr := strconv.ParseUint(account.Gid, 10, 32)
-	if uidErr != nil || gidErr != nil {
-		return 0, 0, errors.New("parse askdo-review credentials")
-	}
-	return uint32(parsedUID), uint32(parsedGID), nil
+	identity, err := reviewidentity.Resolve()
+	return identity.UID, identity.GID, err
 }
 
 func effectiveFrameLimit(maxInspectedBytes int64) uint32 {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/reviewidentity"
 	"github.com/jeremyakers/askdo/internal/sensitive"
 )
 
@@ -1270,15 +1271,11 @@ func validateCredentialFile(path string) error {
 	if stat.Uid != 0 {
 		return errors.New("owner must be root")
 	}
-	group, err := lookupGroup("askdo-review")
+	gid, err := reviewidentity.GroupID(lookupGroup)
 	if err != nil {
-		return fmt.Errorf("resolve askdo-review group: %w", err)
+		return err
 	}
-	gid, err := strconv.ParseUint(group.Gid, 10, 32)
-	if err != nil {
-		return fmt.Errorf("parse askdo-review group ID: %w", err)
-	}
-	if stat.Gid != uint32(gid) {
+	if stat.Gid != gid {
 		return errors.New("group must be askdo-review")
 	}
 	if info.Mode().Perm()&^os.FileMode(0640) != 0 {
