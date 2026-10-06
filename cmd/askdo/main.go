@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +19,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/prompt"
 	"github.com/jeremyakers/askdo/internal/providers"
 	"github.com/jeremyakers/askdo/internal/reviewer"
+	"github.com/jeremyakers/askdo/internal/reviewidentity"
 )
 
 const defaultConfigPath = "/etc/askdo/config.json"
@@ -34,29 +33,20 @@ var probeInspectionSupport = inspection.ProbeInspectionSupport
 // on success. It is a variable so tests can pin the outcome.
 var probeCompatibility = func() (inspection.Compatibility, error) { return inspection.ProbeCompatibility() }
 
-// dropToReviewer permanently drops this process to the askdo-review account
-// for `config check --live`, matching the reviewer's privileges when the CLI
-// is started as root. It is a variable so tests can pin it.
-var dropToReviewer = func() error {
-	account, err := user.Lookup("askdo-review")
-	if err != nil {
-		return fmt.Errorf("resolve askdo-review account: %w", err)
-	}
-	uid, err := strconv.Atoi(account.Uid)
-	if err != nil {
-		return fmt.Errorf("askdo-review uid %q: %w", account.Uid, err)
-	}
-	gid, err := strconv.Atoi(account.Gid)
-	if err != nil {
-		return fmt.Errorf("askdo-review gid %q: %w", account.Gid, err)
-	}
+// resolveReviewerIdentity uses the worker's fixed-role resolver. It is a
+// variable so subprocess tests can pin a failure before provider preparation.
+var resolveReviewerIdentity = reviewidentity.Resolve
+
+// dropToReviewer permanently drops to the already validated execution identity
+// for root-started `config check --live`. It is a variable for subprocess tests.
+var dropToReviewer = func(identity reviewidentity.Identity) error {
 	if err := syscall.Setgroups([]int{}); err != nil {
 		return fmt.Errorf("clear supplementary groups: %w", err)
 	}
-	if err := syscall.Setgid(gid); err != nil {
+	if err := syscall.Setgid(int(identity.GID)); err != nil {
 		return fmt.Errorf("setgid: %w", err)
 	}
-	if err := syscall.Setuid(uid); err != nil {
+	if err := syscall.Setuid(int(identity.UID)); err != nil {
 		return fmt.Errorf("setuid: %w", err)
 	}
 	return nil
@@ -192,6 +182,16 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stderr, "askdo config check --live: probing %d configured model endpoint(s) with a synthetic two-turn tool fixture; this may consume provider quota. No host files are sent.\n", len(cfg.Review.Models))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Review.TotalTimeout))
 	defer cancel()
+	// Resolve before even broker-only Codex refresh activity, but retain root
+	// until that preparation completes. Use this same validated value to drop.
+	var identity reviewidentity.Identity
+	if os.Geteuid() == 0 {
+		identity, err = resolveReviewerIdentity()
+		if err != nil {
+			fmt.Fprintln(stderr, "resolve reviewer privileges:", err)
+			return 125
+		}
+	}
 	// openai_codex: the OAuth token file is broker-only (root:root 0600), so
 	// load + refresh + persist it BEFORE the privilege drop and hand the
 	// fixture only the fresh access token and account ID. Refresh/read
@@ -207,7 +207,7 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		codexTokens[model.Name] = providers.CodexLivePrepare(ctx, newCodexClient(), model.APIKeyFile, getEUID() == 0)
 	}
 	if os.Geteuid() == 0 {
-		if err := dropToReviewer(); err != nil {
+		if err := dropToReviewer(identity); err != nil {
 			fmt.Fprintln(stderr, "drop to reviewer privileges:", err)
 			return 125
 		}

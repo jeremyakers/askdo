@@ -99,7 +99,7 @@ type namedCredentialInfo struct{ os.FileInfo }
 
 func (i namedCredentialInfo) Sys() any {
 	stat := *i.FileInfo.Sys().(*syscall.Stat_t)
-	stat.Uid, stat.Gid = 0, 0
+	stat.Uid, stat.Gid = 0, 42
 	return &stat
 }
 
@@ -233,7 +233,7 @@ func namedConfig(t *testing.T, b *namedBots, auto ...bool) *config.Config {
 			return nil, err
 		}
 		return namedCredentialInfo{info}, nil
-	}, func(string) (*user.Group, error) { return &user.Group{Gid: "0"}, nil })
+	}, func(string) (*user.Group, error) { return &user.Group{Gid: "42"}, nil })
 	defer restore()
 	loaded, err := config.Load(path)
 	if err != nil {

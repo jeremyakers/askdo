@@ -736,13 +736,13 @@ func TestRootDACSocketGate(t *testing.T) {
 
 	// A member client must not read the askdo-review credential fixture (0640
 	// root:askdo-review); a missing reviewer account invalidates this test.
-	review, err := user.Lookup("askdo-review")
+	review, err := user.LookupGroup("askdo-review")
 	if err != nil {
 		t.Fatal(err)
 	}
 	reviewGID64, err := strconv.ParseUint(review.Gid, 10, 32)
 	if err != nil || uint32(reviewGID64) == askdoGID {
-		t.Fatalf("reviewer primary group must differ from askdo: gid=%q err=%v", review.Gid, err)
+		t.Fatalf("reviewer execution group must differ from askdo: gid=%q err=%v", review.Gid, err)
 	}
 	fixture := filepath.Join(root, "credentials")
 	if err := os.WriteFile(fixture, []byte("secret"), 0640); err != nil {
