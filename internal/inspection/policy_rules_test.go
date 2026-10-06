@@ -161,7 +161,8 @@ func TestMountSensitiveCoordinatesAndReachableAliases(t *testing.T) {
 	}
 	active := mountInfoEntry{id: auth.mountID, major: unix.Major(uint64(auth.stat.Dev)), minor: unix.Minor(uint64(auth.stat.Dev)), point: plain, root: masked}
 	coordinate := auth
-	if err := p.checkMountAliases(&coordinate, []mountInfoEntry{active}); err != nil || !coordinate.sensitive {
+	sourceMapping := mountInfoEntry{major: active.major, minor: active.minor, point: root, root: root}
+	if err := p.checkMountAliases(&coordinate, []mountInfoEntry{active, sourceMapping}); err != nil || !coordinate.sensitive {
 		t.Fatalf("masked mount source: sensitive=%v err=%v", coordinate.sensitive, err)
 	}
 	active.root = plain

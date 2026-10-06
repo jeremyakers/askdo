@@ -25,10 +25,14 @@ import (
 
 const defaultConfigPath = "/etc/askdo/config.json"
 
-// probeOpenat2 is the daemon's openat2 support probe, surfaced by
+// probeInspectionSupport is the daemon's complete inspection support probe, surfaced by
 // `config check` as an informational note. It is a variable so tests can pin
 // the outcome.
-var probeOpenat2 = inspection.ProbeOpenat2
+var probeInspectionSupport = inspection.ProbeInspectionSupport
+
+// probeCompatibility renders the typed backend snapshot `config check` prints
+// on success. It is a variable so tests can pin the outcome.
+var probeCompatibility = func() (inspection.Compatibility, error) { return inspection.ProbeCompatibility() }
 
 // dropToReviewer permanently drops this process to the askdo-review account
 // for `config check --live`, matching the reviewer's privileges when the CLI
@@ -158,10 +162,18 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	for _, warning := range cfg.Warnings {
 		fmt.Fprintln(stderr, "warning:", warning)
 	}
-	if err := probeOpenat2(); err != nil {
-		fmt.Fprintln(stderr, "note: openat2 resolve-flag probe failed:", err, "(kernel >= 5.6 is required; the daemon refuses host content inspection on this host)")
+	if err := probeInspectionSupport(); err != nil {
+		fmt.Fprintln(stderr, "note: inspection support probe failed:", err, "(the daemon refuses host content inspection on this host)")
 	} else {
-		fmt.Fprintln(stdout, "openat2 resolve-flag probe: ok")
+		// Display the backend the same one-time probe actually selected;
+		// this is informational only and selects nothing.
+		if compat, compatErr := probeCompatibility(); compatErr != nil {
+			fmt.Fprintln(stdout, "inspection support probe: ok")
+			fmt.Fprintln(stderr, "note: inspection backend snapshot unavailable:", compatErr)
+		} else {
+			fmt.Fprintf(stdout, "inspection support probe: ok (path resolver %s, mount identity %s, terminal symlink follow %t, absolute symlink follow %t)\n",
+				compat.PathResolver, compat.MountIdentity, compat.TerminalLinkFollow, compat.AbsolutePathFollow)
+		}
 	}
 	fmt.Fprintln(stdout, "configuration valid")
 	if !*live {

@@ -26,6 +26,35 @@ type InspectionCapabilities struct {
 	SudoPolicyEnabled    bool `json:"sudo_policy_enabled"`
 }
 
+// Closed backend enum spellings for the optional scope compatibility leaf.
+const (
+	CompatPathResolverOpenat2        = "openat2"
+	CompatPathResolverOSRoot         = "os_root"
+	CompatMountIdentityStatxOrHandle = "statx_or_file_handle"
+)
+
+// ScopeCompatibility is the optional nested leaf of InspectionScopeResult: a
+// typed snapshot of the broker's actual inspection backend — the selected path
+// resolver, whether terminal symlink content follow and absolute symlink
+// traversal are supported, and the descriptor mount-identity policy. It is
+// observational metadata the broker derives from its own one-time probe;
+// workers and callers cannot select or override any backend, and per-object
+// mount-identity support remains mandatory on every filesystem. The field is
+// optional: when absent, the historical scope JSON shape is preserved exactly,
+// and old parsers that reject unknown fields keep working against older
+// brokers.
+type ScopeCompatibility struct {
+	PathResolver       string `json:"path_resolver"`
+	TerminalLinkFollow bool   `json:"terminal_link_follow_supported"`
+	AbsolutePathFollow bool   `json:"absolute_path_follow_supported"`
+	MountIdentity      string `json:"mount_identity_policy"`
+}
+
+func validScopeCompatibility(c ScopeCompatibility) bool {
+	return oneOf(c.PathResolver, CompatPathResolverOpenat2, CompatPathResolverOSRoot) &&
+		c.MountIdentity == CompatMountIdentityStatxOrHandle
+}
+
 type InspectionScopeRequest struct {
 	Cursor string `json:"cursor"`
 }
@@ -41,6 +70,10 @@ type SudoPolicyRequest struct {
 
 // InspectionScopeResult exposes candidate read roots, not blanket permission.
 // Exclusion details stay private; ExclusionsRemain declares that policy applies.
+// Compatibility is an optional nested leaf: when absent, historical JSON (the
+// exactly previous shape, including old golden bytes) is preserved; when
+// present, its closed enums and shape are strictly validated. Workers and
+// callers cannot select or override the backend it reports.
 type InspectionScopeResult struct {
 	ReadRoots               []string               `json:"read_roots"`
 	NextCursor              string                 `json:"next_cursor"`
@@ -52,6 +85,7 @@ type InspectionScopeResult struct {
 	MaxHashFileBytes        int64                  `json:"max_hash_file_bytes"`
 	MaxHashedBytesPerReview int64                  `json:"max_hashed_bytes_per_review"`
 	SudoPolicyUIDs          []uint32               `json:"sudo_policy_uids"`
+	Compatibility           *ScopeCompatibility    `json:"compatibility,omitempty"`
 }
 
 type HashPathResult struct {
@@ -204,6 +238,9 @@ func DecodeInspectionMetadataResult(request InspectRequest, result InspectResult
 		}
 		if !p.Capabilities.SudoPolicyEnabled && len(p.SudoPolicyUIDs) != 0 {
 			return nil, errors.New("disabled sudo policy exposes accounts")
+		}
+		if p.Compatibility != nil && !validScopeCompatibility(*p.Compatibility) {
+			return nil, errors.New("invalid inspection scope compatibility")
 		}
 		return *p, nil
 	case *HashPathResult:

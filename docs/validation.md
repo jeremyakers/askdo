@@ -150,6 +150,33 @@ synthetic fixed-argv systemctl adapter, not a real systemd manager. This proves
 the new broker/tool/approval flow, not native ARM, live-model behavior, or actual
 deployed manager observations. Those remain post-merge/approved-rollout checks.
 
+### Legacy-kernel compatibility validation (honest scope)
+
+The legacy inspection path was exercised on a **real isolated Linux
+3.10.108 VM** (x86_64, ext4): confined
+`os.Root` lookups, exact descriptor mount IDs via the `name_to_handle_at`
+fallback, credential masking, terminal-symlink and absolute-link denial,
+mount-alias handling and captured-stdin review via the legacy socket-stream
+delivery. The `inspection_scope` `compatibility` leaf and the
+`config check` backend note report exactly what such a kernel selects. This
+proves those units and a separate fixture-backed broker runtime matrix:
+
+- The VM runtime matrix exercised actual kernel peer credentials, an
+  unprivileged reviewer, private IPC, SQLite, TLS, root execution, literal argv,
+  a real Bash staged bundle, sequential captured stdin, approval/denial,
+  once-only decisions, cancellation, mutation refusal and status/output replay.
+  Model and Telegram responses were loopback wire fixtures; graceful restart
+  does not establish SIGKILL/crash recovery.
+- No successful **native DSM broker acceptance** or compatibility deployment
+  has been completed. Native account/SSH restrictions, original terminal/helper
+  behavior, real service-manager integration, installation persistence and
+  rollback remain separate owner-approved acceptance lanes.
+- The old-kernel test VM stages its temporary `HOME` outside `/tmp` because
+  that environment reports `/tmp` as `noexec`; this is an environment
+  accommodation, not advice to remount production filesystems.
+- Docker-based suites do not prove old-kernel behavior; only the real 3.10
+  VM run does.
+
 Deployment still needs owner-approved per-host upgrade/configuration, queue
 drain and askdo restart after review/merge. `config check` cannot prove that an
 enabled sudo adapter has no plugin/NSS network or audit effects, that service
@@ -161,7 +188,8 @@ No new capability is enabled by these instructions or shipped example defaults.
 Run these as root after a reviewed installation:
 
 ```sh
-askdo config check         # offline validation + warnings + openat2 probe
+askdo config check         # offline validation + warnings + kernel feature
+                           # probe (prints the actually selected backend)
 askdo config check --live  # additionally probes each model endpoint
                            # with a synthetic fixture (never host files)
 askdo inspection check /path/to/file   # diagnose a rule without reading content

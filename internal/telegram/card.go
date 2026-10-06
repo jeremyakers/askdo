@@ -43,6 +43,7 @@ const partHeaderReserve = 96
 // characters, HTML-escapes all dynamic text, and never receives source
 // bundles.
 type CardInput struct {
+	CapturedStdinKind  proto.DeliveryKind
 	CapturedStdinBytes int64 // broker-verified metadata, never the script body
 	// Host is the trusted target hostname (broker-supplied via bootstrap).
 	Host string
@@ -93,6 +94,7 @@ type DetailsInput struct {
 // ApprovalOnlyInput contains operation facts and typed availability statuses,
 // never a review report, model history text, or model identity.
 type ApprovalOnlyInput struct {
+	CapturedStdinKind                                             proto.DeliveryKind
 	CapturedStdinBytes                                            int64
 	Host, Container, JobID, Operation, Reason, SubmitterName, CWD string
 	TargetUID, SubmitterUID                                       uint32
@@ -102,7 +104,17 @@ type ApprovalOnlyInput struct {
 
 var safeProviderName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
+func capturedDeliveryLabel(kind proto.DeliveryKind) string {
+	if kind == proto.SocketStream {
+		return "socket_stream (non-seekable sequential input)"
+	}
+	return "sealed_memfd (sealed seekable input)"
+}
+
 func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
+	if !in.CapturedStdinKind.Valid() || (in.CapturedStdinKind != "" && in.CapturedStdinBytes < 1) {
+		return nil, errors.New("telegram: invalid captured input kind")
+	}
 	if strings.TrimSpace(in.Host) == "" || strings.TrimSpace(in.JobID) == "" || len(in.JobID) > 64 || strings.TrimSpace(in.Operation) == "" || in.Expiry.IsZero() || len(in.Failures) > 16 {
 		return nil, errors.New("telegram: incomplete approval-only request")
 	}
@@ -152,7 +164,7 @@ func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
 	}
 	blocks = append(blocks, "\n<b>Command</b>\n", bashBlock(esc(in.Operation)), "\n\n<b>Reason (submitter-stated)</b>\n", esc(in.Reason)+"\n")
 	if in.CapturedStdinBytes > 0 {
-		blocks = append(blocks, fmt.Sprintf("<b>Input:</b> captured script input (%d bytes); review via bundle:stdin\n", in.CapturedStdinBytes))
+		blocks = append(blocks, fmt.Sprintf("<b>Input:</b> captured script input (%d bytes); %s; review via bundle:stdin\n", in.CapturedStdinBytes, capturedDeliveryLabel(in.CapturedStdinKind)))
 	}
 	blocks = append(blocks, fmt.Sprintf("\nExpires %s · job <code>%s</code>\n", esc(in.Expiry.UTC().Format(time.RFC3339)), esc(in.JobID)))
 	return blocks, nil
@@ -370,6 +382,9 @@ func RenderDetails(in DetailsInput) ([]string, error) {
 // renderable card. Content validation (bounds, enums) belongs to the
 // reviewer's report validator; the renderer stays usable for any string.
 func validateCardInput(in CardInput) error {
+	if !in.CapturedStdinKind.Valid() || (in.CapturedStdinKind != "" && in.CapturedStdinBytes < 1) {
+		return errors.New("telegram: invalid captured input kind")
+	}
 	switch {
 	case strings.TrimSpace(in.Host) == "":
 		return errors.New("telegram: card requires a host")
@@ -443,7 +458,7 @@ func summaryBlocks(in CardInput) []string {
 	add("\n<b>Command</b>\n")
 	add("%s", bashBlock(esc(in.Operation)))
 	if in.CapturedStdinBytes > 0 {
-		add("\n<b>Input:</b> captured script input (%d bytes); review via bundle:stdin", in.CapturedStdinBytes)
+		add("\n<b>Input:</b> captured script input (%d bytes); %s; review via bundle:stdin", in.CapturedStdinBytes, capturedDeliveryLabel(in.CapturedStdinKind))
 	}
 
 	add("\n\n<b>Reason</b>\n")

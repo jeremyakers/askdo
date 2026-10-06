@@ -24,7 +24,8 @@
 - [`protocol-worker.md`](protocol-worker.md) — broker ↔ reviewer private
   pipe (process contract, full message reference, invariants).
 - [`review-tools.md`](review-tools.md) — six filesystem inspection tools,
-  optional webfetch, the report schema, and inspection boundaries.
+  optional webfetch, the report schema, inspection boundaries, and the
+  `compatibility` snapshot of the host's actual inspection backend.
 
 **Optional fleet mode (implemented in source; not in the `v1.0.0-rc.1` release binaries):**
 

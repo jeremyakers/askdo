@@ -129,6 +129,9 @@ func binding(b TicketBinding) error {
 	return nil
 }
 func display(d Display) error {
+	if !d.CapturedStdinKind.Valid() || (d.CapturedStdinKind != "" && d.CapturedStdinBytes == 0) {
+		return ErrProtocol
+	}
 	// Reason was previously bounded inside the 16 KiB operation projection.
 	// CWD follows SubmitRequest's clean absolute, NUL-free UTF-8 path contract;
 	// nonprinting path characters remain data and are quoted by the renderer.

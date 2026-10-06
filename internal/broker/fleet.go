@@ -285,6 +285,7 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 		withholding = append(withholding, refs...)
 	}
 	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
+	display.CapturedStdinKind = j.capturedKind()
 	profilesHash, err := fleetproto.HashProfiles(f.selection.Profiles)
 	if err != nil {
 		return nil, err

@@ -26,6 +26,7 @@ func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	out := FleetRendering{}
 	if d.Report == nil {
 		in := ApprovalOnlyInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, Expiry: time.Unix(b.ExpiresAt, 0), Failures: d.AvailabilityHistory}
+		in.CapturedStdinKind = d.CapturedStdinKind
 		var err error
 		out.Parts, err = RenderApprovalOnlySummaryParts(in)
 		if err != nil {
@@ -56,6 +57,7 @@ func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 		}
 	}
 	in := CardInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, Report: *d.Report, ReviewerModel: model, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, Expiry: time.Unix(b.ExpiresAt, 0)}
+	in.CapturedStdinKind = d.CapturedStdinKind
 	// Withholding is display text rather than path references; escape all facts
 	// with the existing chunker rather than reinterpret them as filesystem paths.
 	var err error

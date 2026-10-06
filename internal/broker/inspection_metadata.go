@@ -20,6 +20,22 @@ type hostMetadataReader interface {
 	SudoPolicy(context.Context, uint32) (proto.SudoPolicyResult, inspection.Status, string)
 }
 
+// scopeCompatibility projects the daemon policy's selected backend snapshot.
+// It reads the immutable selection NewPolicy already made — no re-probe, no
+// per-request backend decision, no caller influence.
+func scopeCompatibility(p *inspection.Policy) *proto.ScopeCompatibility {
+	if p == nil {
+		return nil
+	}
+	compat := p.Compatibility()
+	return &proto.ScopeCompatibility{
+		PathResolver:       string(compat.PathResolver),
+		TerminalLinkFollow: compat.TerminalLinkFollow,
+		AbsolutePathFollow: compat.AbsolutePathFollow,
+		MountIdentity:      string(compat.MountIdentity),
+	}
+}
+
 func (j *jobRuntime) inspectionCapabilities() proto.InspectionCapabilities {
 	c := j.daemon.cfg.Inspection
 	return proto.InspectionCapabilities{HashPathEnabled: c.HashPathEnabled, ServiceStatusEnabled: c.ServiceStatusEnabled, SudoPolicyEnabled: c.SudoPolicyEnabled}
@@ -107,7 +123,7 @@ func (j *jobRuntime) inspectionScope(r proto.InspectRequest, args proto.Inspecti
 		}
 	}
 	file, total := j.hashLimits()
-	v := proto.InspectionScopeResult{ReadRoots: []string{}, ExclusionsRemain: true, Capabilities: j.inspectionCapabilities(), MaxReadBytes: proto.MaxDirectReadBytes, MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes, MaxHashFileBytes: file, MaxHashedBytesPerReview: total, SudoPolicyUIDs: j.authorizedSudoUIDs()}
+	v := proto.InspectionScopeResult{ReadRoots: []string{}, ExclusionsRemain: true, Capabilities: j.inspectionCapabilities(), MaxReadBytes: proto.MaxDirectReadBytes, MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes, MaxHashFileBytes: file, MaxHashedBytesPerReview: total, SudoPolicyUIDs: j.authorizedSudoUIDs(), Compatibility: scopeCompatibility(j.daemon.policy)}
 	if len(v.SudoPolicyUIDs) > 128 {
 		return metadataFailure(r, inspection.StatusLimitExceeded, "output_limit"), nil
 	}

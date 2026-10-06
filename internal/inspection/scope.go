@@ -44,21 +44,19 @@ type rootAnchor struct {
 // Policy is an immutable set of validated inspection roots and deny rules.
 // Close releases its root anchor descriptors.
 type Policy struct {
-	roots     []rootAnchor
-	denies    []string
-	hard      []string
-	hardIDs   map[fileIdentity]struct{}
-	allows    []string
-	canonical []string
-	sensitive *sensitive.Matcher
+	legacyRoot *os.Root
+	roots      []rootAnchor
+	denies     []string
+	hard       []string
+	hardIDs    map[fileIdentity]struct{}
+	allows     []string
+	canonical  []string
+	sensitive  *sensitive.Matcher
 }
 
 // NewPolicy validates cfg and its read roots, then anchors namespace-root
 // descriptor-relative lookups. The post-open gate verifies mount identity.
 func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, error) {
-	if err := ProbeOpenat2(); err != nil {
-		return nil, fmt.Errorf("inspection unavailable: %w", err)
-	}
 	mounts, err := readMountInfo()
 	if err != nil {
 		return nil, fmt.Errorf("mountinfo: %w", err)
@@ -86,6 +84,9 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 		_ = p.Close()
 		return nil, err
 	}
+	if err := p.initializeResolver(); err != nil {
+		return fail(fmt.Errorf("inspection unavailable: %w", err))
+	}
 	// Resolve existing symlink ancestors even if the exclusion's suffix has
 	// not been created yet. The lexical and resolved names compete in exactly
 	// the same specificity evaluation; uncertainty fails configuration load.
@@ -112,11 +113,6 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 		return fail(fmt.Errorf("hard-deny identity: %w", err))
 	}
 	p.hardIDs = hardIDs
-	fd, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fail(err)
-	}
-	p.roots = append(p.roots, rootAnchor{path: "/", fd: fd})
 	for _, configured := range cfg.ReadRoots {
 		resolved, err := filepath.EvalSymlinks(configured)
 		if err != nil {
@@ -132,7 +128,7 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 		if containedByAny(resolved, p.hard) {
 			return fail(fmt.Errorf("read root %q resolves inside a hard-denied path", configured))
 		}
-		fd, err := unix.Open(resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
+		fd, err := p.open(p.roots[0], resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return fail(fmt.Errorf("open read root %q: %w", configured, err))
 		}
@@ -159,9 +155,20 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 			unix.Close(fd)
 			return fail(fmt.Errorf("cannot map read root %q to mountinfo", configured))
 		}
-		if containedByAny(mount.root, p.hard) {
-			unix.Close(fd)
-			return fail(fmt.Errorf("read root %q has hard-denied mount source %q", configured, mount.root))
+		for _, source := range mounts {
+			if source.major != mount.major || source.minor != mount.minor || !containsPath(source.root, mount.root) {
+				continue
+			}
+			part, err := filepath.Rel(source.root, mount.root)
+			if err != nil {
+				unix.Close(fd)
+				return fail(err)
+			}
+			spelling := filepath.Join(source.point, part)
+			if containedByAny(spelling, p.hard) {
+				unix.Close(fd)
+				return fail(fmt.Errorf("read root %q has hard-denied mount source %q", configured, spelling))
+			}
 		}
 		unix.Close(fd)
 	}
@@ -216,6 +223,11 @@ func (p *Policy) Close() error {
 		return nil
 	}
 	var errs []error
+	if p.legacyRoot != nil {
+		if err := p.legacyRoot.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for i := range p.roots {
 		if p.roots[i].fd >= 0 {
 			if err := unix.Close(p.roots[i].fd); err != nil {

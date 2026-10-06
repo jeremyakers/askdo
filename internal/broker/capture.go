@@ -17,9 +17,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/frozeninput"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
-	"golang.org/x/sys/unix"
 )
 
 // Capture index schema (capture-index.json): version is 1; files holds relative
@@ -126,10 +126,8 @@ func readCaptureIndex(path string) (captureIndex, error) {
 	return index, nil
 }
 
-// openCapturedStdin binds the approved bytes to a single confined regular-file
-// descriptor. Both the captured request and the index must agree; replacing
-// either the path or the index cannot authorize different input.
-func (j *jobRuntime) openCapturedStdin() (*os.File, error) {
+// verifiedCapturedStdin checks staging without constructing a delivery/feeder.
+func (j *jobRuntime) verifiedCapturedStdin() ([]byte, error) {
 	if j.req.CapturedStdinBase64 == "" {
 		return nil, errors.New("no captured stdin")
 	}
@@ -171,31 +169,49 @@ func (j *jobRuntime) openCapturedStdin() (*os.File, error) {
 	if err != nil || !linked.Mode().IsRegular() || !os.SameFile(linked, info) {
 		return nil, errors.New("captured stdin path changed before dispatch")
 	}
-	// The staged inode is writable by the broker. Freeze the verified bytes
-	// into a sealed regular memfd so an in-place write after verification
-	// cannot change what the approved child actually reads.
-	fd, err := unix.MemfdCreate("askdo-stdin", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	return read, nil
+}
+
+var selectCapturedInput = frozeninput.Select // syscall-selection seam for direct tests
+
+func (j *jobRuntime) inputSelector() (proto.DeliveryKind, error) {
+	if j.selectInput != nil {
+		return j.selectInput()
+	}
+	return selectCapturedInput()
+}
+
+func (j *jobRuntime) freezeCapturedInput() error {
+	if j.req.CapturedStdinBase64 == "" {
+		return nil
+	}
+	data, err := j.verifiedCapturedStdin()
 	if err != nil {
-		return nil, fmt.Errorf("freeze captured stdin: %w", err)
+		return err
 	}
-	immutable := os.NewFile(uintptr(fd), "captured stdin")
-	valid := false
-	defer func() {
-		if !valid {
-			_ = immutable.Close()
+	j.inputMu.Lock()
+	defer j.inputMu.Unlock()
+	kind, err := j.inputSelector()
+	if err != nil {
+		return err
+	}
+	if j.frozenInput != nil {
+		if kind != j.frozenInput.Kind() || !j.frozenInput.Matches(data) {
+			return errors.New("captured input facts changed")
 		}
-	}()
-	if _, err := immutable.Write(read); err != nil {
-		return nil, err
+		return nil
 	}
-	if _, err := unix.FcntlInt(immutable.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
-		return nil, fmt.Errorf("seal captured stdin: %w", err)
+	j.frozenInput, err = frozeninput.New(kind, data)
+	return err
+}
+
+func (j *jobRuntime) capturedKind() proto.DeliveryKind {
+	j.inputMu.Lock()
+	defer j.inputMu.Unlock()
+	if j.frozenInput == nil {
+		return ""
 	}
-	if _, err := immutable.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	valid = true
-	return immutable, nil
+	return j.frozenInput.Kind()
 }
 
 func writeCaptureIndex(path string, index captureIndex, create bool) error {

@@ -41,8 +41,15 @@ host, observed container, and the fixed non-secret `PATH`, `HOME`, `LANG`, and
 staging path and staged bundle hashes are **never** shown to the model. For
 a captured-stdin job (`protocol_version` 5) the description also carries the
 captured-input metadata `captured_stdin` — path `stdin`, size in bytes, and
-SHA-256 — never the script bytes; the reviewer reads the content itself as a
-bundle file (below). For bundle jobs the entry is staged and dependency files
+SHA-256, plus the `delivery_kind` the broker actually selected — never the
+script bytes; the reviewer reads the content itself as a
+bundle file (below). The delivery kind is visible before approval and bound
+into the frozen lifecycle: modern kernels deliver a sealed, seekable
+memory-backed file (`sealed_memfd`); kernels without `memfd_create`
+(`ENOSYS` only) deliver an owner-approved non-seekable Unix socket stream
+(`socket_stream`). There is no writable temp-file or plain-pipe fallback, no
+approving different bytes, and the kind can never silently change after the
+review saw it. For bundle jobs the entry is staged and dependency files
 are exposed to the executed process through `ASKDO_BUNDLE`; relative shell
 paths otherwise resolve from `cwd`. Review instructions and dependency
 references should use the explicit bundle path (for example
@@ -74,14 +81,17 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
 - **Binary:** content that is not valid UTF-8, or contains a NUL byte,
   returns the payload-free status `"binary"` instead of any bytes.
 - **Host enforcement:** the broker opens the path descriptor-relative
-  (openat2, `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`) under
+  (openat2 with `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, or the legacy
+  `os.Root` fallback where `openat2` is absent) under
   `inspection.read_roots`, applies `deny_paths`, the hard-deny set and the
   `sensitive_masks` name policy against both the requested and resolved
   spellings on the authorized opened descriptor **before** reading, and
   revalidates the path and object identity **after** the bounded read; any
   change fails the call (`changed_during_capture`). A permitted path matching
   a sensitive name mask returns payload-free `withheld` — metadata policy is
-  checked, but no content crosses to the model.
+  checked, but no content crosses to the model. On the legacy backend a read
+  through a terminal symlink or an absolute-path symlink is denied rather than
+  followed; the `inspection_scope` `compatibility` leaf reports this.
 - **Bundle reads:** served from the root-only staged copy; the staged bytes
   are re-hashed against the capture index on every read. A staged file the
   broker classified as masked (admin `Masked` policy or a client
@@ -188,9 +198,26 @@ scope rather than guessing roots. It is always offered; the current loop does
 - **Result:** `read_roots` (≤ 128 per page), `next_cursor`,
   `exclusions_remain: true`, `capabilities` (the three enabled booleans),
   `max_read_bytes`, `max_inspected_files`, `max_inspected_bytes`,
-  `max_hash_file_bytes`, `max_hashed_bytes_per_review`, and `sudo_policy_uids`.
-  The UID list is empty when sudo inspection is disabled; otherwise it is the
-  sorted, deduplicated submitting UID plus configured additional UIDs.
+  `max_hash_file_bytes`, `max_hashed_bytes_per_review`, `sudo_policy_uids`,
+  and an optional typed `compatibility` leaf. The UID list is empty when sudo
+  inspection is disabled; otherwise it is the sorted, deduplicated submitting
+  UID plus configured additional UIDs.
+- **`compatibility` leaf (optional):** a broker-derived snapshot of the actual
+  inspection backend on this host, strictly validated against closed enums:
+  `path_resolver` (`"openat2"` on modern kernels, `"os_root"` on legacy kernels
+  where `openat2` answered `ENOSYS` — measured on Linux 3.10.108), boolean
+  `terminal_link_follow_supported` and `absolute_path_follow_supported` (both
+  `false` on the legacy `os_root` backend: reads through a terminal symlink and
+  absolute symlink traversal are denied there rather than followed, while
+  relatively resolved parent links and metadata-only link stats remain
+  available under `os.Root` confinement), and `mount_identity_policy`
+  (`"statx_or_file_handle"`: exact mount IDs via `statx` `STATX_MNT_ID` with a
+  `name_to_handle_at` fallback; per-object support is still mandatory on every
+  filesystem, so unsupported filesystems are denied individually). The field
+  is observational: the broker derives it once from its own startup probe and
+  reports the same snapshot on every page; the model, worker or caller cannot
+  select or override any backend. When absent, the historical scope shape is
+  unchanged.
 - **Disclosure:** candidate configured root spellings only, filtered through
   descriptor authorization, masks, protected identities and revalidation.
   Denied/masked roots, private exclusion rules, mask patterns, credential paths

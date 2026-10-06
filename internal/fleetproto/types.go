@@ -122,7 +122,8 @@ type Identity struct {
 	SubmitterUID uint32 `json:"submitter_uid"`
 }
 type Display struct {
-	Operation string `json:"operation"`
+	CapturedStdinKind proto.DeliveryKind `json:"captured_stdin_kind,omitempty"`
+	Operation         string             `json:"operation"`
 	// Optional facts preserve the hashes of legacy displays when absent. Reason
 	// is submitter-stated purpose; UnreviewedReason is why AI review was absent.
 	Reason              string                `json:"reason,omitempty"`

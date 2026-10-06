@@ -80,6 +80,58 @@ func TestRootMetadataDisabledAndUIDAuthorizationBeforeReader(t *testing.T) {
 	}
 }
 
+func TestRootMetadataScopeProjectsActualBackendCompatibility(t *testing.T) {
+	j := directJob(t, t.TempDir(), nil)
+	// The projection must equal the policy's own non-IO snapshot of the
+	// backend its initialization actually selected — never a re-probe or a
+	// caller/backend selection. On this test host either resolver is valid;
+	// inspection package tests pin both spellings explicitly.
+	want := j.daemon.policy.Compatibility()
+	if want.PathResolver != inspection.ResolverOpenat2 && want.PathResolver != inspection.ResolverOSRoot {
+		t.Fatalf("unexpected policy resolver %+v", want)
+	}
+	compat := proto.ScopeCompatibility{
+		PathResolver:       string(want.PathResolver),
+		TerminalLinkFollow: want.TerminalLinkFollow,
+		AbsolutePathFollow: want.AbsolutePathFollow,
+		MountIdentity:      string(want.MountIdentity),
+	}
+	r := directCall(t, j, "inspection_scope", proto.InspectionScopeRequest{})
+	if r.Status != "ok" {
+		t.Fatal(r)
+	}
+	var scope proto.InspectionScopeResult
+	if err := json.Unmarshal(r.Payload, &scope); err != nil {
+		t.Fatal(err)
+	}
+	if scope.Compatibility == nil || *scope.Compatibility != compat {
+		t.Fatalf("compat projection = %+v, want %+v", scope.Compatibility, compat)
+	}
+	// The projection is stable across pages: no per-request re-probe occurs.
+	again := directCall(t, j, "inspection_scope", proto.InspectionScopeRequest{})
+	var repeat proto.InspectionScopeResult
+	if err := json.Unmarshal(again.Payload, &repeat); err != nil || *repeat.Compatibility != compat {
+		t.Fatalf("compat changed per request: %+v %v", repeat.Compatibility, err)
+	}
+	// The scope observation's audit metadata binds the same snapshot through
+	// the existing strictly decoded/re-encoded evidence flow.
+	if len(j.inspectionObservations) != 2 {
+		t.Fatal("observations not recorded")
+	}
+	var audited proto.InspectionScopeResult
+	if err := json.Unmarshal(j.inspectionObservations[0].Metadata, &audited); err != nil {
+		t.Fatal(err)
+	}
+	if audited.Compatibility == nil || *audited.Compatibility != compat {
+		t.Fatalf("audit metadata compat = %+v", audited.Compatibility)
+	}
+	// Frozen manifest evidence rides the existing flow automatically.
+	ev := j.inspectionEvidence()
+	if ev == nil || len(ev.Observations) != 2 {
+		t.Fatal("manifest evidence missing")
+	}
+}
+
 func TestRootMetadataScopePaginationPrivacyAndCapabilities(t *testing.T) {
 	root := t.TempDir()
 	j := directJob(t, root, nil)

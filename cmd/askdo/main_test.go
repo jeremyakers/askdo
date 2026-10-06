@@ -21,6 +21,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/client"
 	"github.com/jeremyakers/askdo/internal/codexauth"
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
@@ -98,12 +99,20 @@ func stubCredentials(t *testing.T) {
 	t.Cleanup(restore)
 }
 
-// stubProbe pins the openat2 probe outcome for config check tests.
+// stubProbe pins the inspection support probe outcome for config check tests.
 func stubProbe(t *testing.T, err error) {
 	t.Helper()
-	original := probeOpenat2
-	probeOpenat2 = func() error { return err }
-	t.Cleanup(func() { probeOpenat2 = original })
+	original := probeInspectionSupport
+	probeInspectionSupport = func() error { return err }
+	t.Cleanup(func() { probeInspectionSupport = original })
+}
+
+// stubCompat pins the typed backend snapshot config check displays.
+func stubCompat(t *testing.T, compat inspection.Compatibility) {
+	t.Helper()
+	original := probeCompatibility
+	probeCompatibility = func() (inspection.Compatibility, error) { return compat, nil }
+	t.Cleanup(func() { probeCompatibility = original })
 }
 
 // stubUsers pins NSS resolution of the fixture login name (agent→1000) so
@@ -139,17 +148,50 @@ func localModelEntry(name, api, baseURL string) string {
 func TestConfigCheckOfflineFixture(t *testing.T) {
 	stubCredentials(t)
 	stubProbe(t, nil)
+	stubCompat(t, inspection.Compatibility{PathResolver: inspection.ResolverOpenat2, TerminalLinkFollow: true, AbsolutePathFollow: true, MountIdentity: inspection.MountIdentityStatxOrFileHandle})
 	path := writeFixtureConfig(t, localModelEntry("local-ok", "openai_chat", "http://127.0.0.1:9/v1"))
 	var stdout, stderr bytes.Buffer
 	if code := runConfig([]string{"check", "--config", path}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "configuration valid") || !strings.Contains(stdout.String(), "openat2 resolve-flag probe: ok") {
+	if !strings.Contains(stdout.String(), "configuration valid") || !strings.Contains(stdout.String(), "inspection support probe: ok (path resolver openat2, mount identity statx_or_file_handle, terminal symlink follow true, absolute symlink follow true)") {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
 	// The deprecated trusted-root setting does not generate review warnings.
 	if strings.Contains(stderr.String(), "warning:") {
 		t.Fatalf("inert trusted-root policy produced a warning: %s", stderr.String())
+	}
+}
+
+func TestConfigCheckLegacyBackendDisplayed(t *testing.T) {
+	stubCredentials(t)
+	stubProbe(t, nil)
+	stubCompat(t, inspection.Compatibility{PathResolver: inspection.ResolverOSRoot, MountIdentity: inspection.MountIdentityStatxOrFileHandle})
+	path := writeFixtureConfig(t, localModelEntry("local-ok", "openai_chat", "http://127.0.0.1:9/v1"))
+	var stdout, stderr bytes.Buffer
+	if code := runConfig([]string{"check", "--config", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "path resolver os_root, mount identity statx_or_file_handle, terminal symlink follow false, absolute symlink follow false") {
+		t.Fatalf("legacy backend display missing: %s", stdout.String())
+	}
+}
+
+func TestConfigCheckCompatSnapshotFailureIsANote(t *testing.T) {
+	stubCredentials(t)
+	stubProbe(t, nil)
+	original := probeCompatibility
+	probeCompatibility = func() (inspection.Compatibility, error) {
+		return inspection.Compatibility{}, errors.New("snapshot unavailable")
+	}
+	t.Cleanup(func() { probeCompatibility = original })
+	path := writeFixtureConfig(t, localModelEntry("local-ok", "openai_chat", "http://127.0.0.1:9/v1"))
+	var stdout, stderr bytes.Buffer
+	if code := runConfig([]string{"check", "--config", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("snapshot failure must not fail offline validation, exit=%d", code)
+	}
+	if !strings.Contains(stdout.String(), "inspection support probe: ok") || !strings.Contains(stderr.String(), "note: inspection backend snapshot unavailable") {
+		t.Fatalf("stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
 }
 
@@ -161,7 +203,7 @@ func TestConfigCheckProbeFailureIsANote(t *testing.T) {
 	if code := runConfig([]string{"check", "--config", path}, &stdout, &stderr); code != 0 {
 		t.Fatalf("probe failure must not fail offline validation, exit=%d", code)
 	}
-	if !strings.Contains(stderr.String(), "note: openat2 resolve-flag probe failed") {
+	if !strings.Contains(stderr.String(), "note: inspection support probe failed") {
 		t.Fatalf("stderr=%s", stderr.String())
 	}
 }
