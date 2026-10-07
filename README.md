@@ -101,21 +101,74 @@ host inspection when no supported combination is available. The legacy paths
 were exercised in an isolated, real **Linux 3.10.108** VM (x86_64, ext4); a vendor
 or DSM installation still needs its own native broker, terminal and service
 lifecycle acceptance. These compatibility additions are not in the published
-rc.2 binaries. Build from source needs [Go 1.27.1](go.mod). Approval requires a
+rc.2 binaries. Release builders need [Go 1.27.1](go.mod), but installation does
+not require Go or a destination compiler. Approval requires a
 Telegram bot, which you can create with
 [BotFather](https://t.me/BotFather). A model is only needed if you
 want AI review.
 
-### 1. Install from source
+### 1. Install a verified release
 
 ```sh
-git clone https://github.com/jeremyakers/askdo
-cd askdo
-sudo ./install.sh
+curl --proto '=https' --proto-redir '=https' -fsSL \
+  https://github.com/jeremyakers/askdo/releases/latest/download/install.sh -o install.sh
+sudo sh install.sh
 ```
 
-The installer builds askdo and its terminal helper, installs the service, and
-creates a starter config. It leaves the service stopped until you've set it up.
+The installer downloads release binaries for askdo and its terminal helper,
+installs inert service units, and creates a starter config. It never compiles on
+the destination or falls back to source. `--version TAG` selects a published
+release tag (not a source branch); the default is `latest`. One closed
+`install-manifest.v1` pins the tag, source commit, installer, both architecture
+inventories and asset hashes/sizes. All subsequent assets use that exact tag.
+The local installer must byte-match the selected release installer; a mismatch
+refuses rather than silently executing different policy. `ASKDO_SOURCE_DIR` is
+obsolete and rejected. Manifest/hash binding relies on the owner's HTTPS release
+publication; it is not a signature or reproducible-build claim.
+
+This new manifest-based bundle has not yet been published. Existing rc.2 assets
+do not contain it or the DSM compatibility changes: this source installer fails
+closed for those releases. Do not interpret local release fixtures as a published
+upgrade. Publication and first native DSM installation require separate approval.
+
+The same entry point automatically recognizes DSM metadata/native-tool paths
+and uses native Synology role operations. DSM uses the existing vendor
+`/usr/bin/python3` and `synoacltool`. A checked canonical native `visudo` may be
+used when it matches the installed sudo version/grammar. Otherwise the verified
+release validator runs temporarily from root-controlled executable staging, not
+`/tmp`, and only for the exact supported sudo 1.9.5p2/grammar48 runtime. It never
+replaces sudo, PAM or plugins or installs a compiler/package manager dependency. It
+refuses unsupported bundled-parser configurations: custom plugins, plugin search
+paths, alternate sudoers files and LDAP/SSSD sudoers sources are not treated as
+stock local sudoers. Only bounded trusted default/standard configuration is
+accepted; emitted parser warnings also fail closed. The real upstream amd64
+checker rejects malformed policy and missing required include files. It accepts
+an unrelated missing `@includedir` as empty, matching documented upstream
+semantics; this is not a claim that every referenced directory exists. The
+installer separately requires its own trusted `/etc/sudoers.d`. No native NAS
+policy or authentication acceptance is claimed.
+It accepts only native Linux-mode ACL metadata combined with absent/unsupported
+POSIX extended ACLs, and refuses unknown, unsafe or inconsistent metadata.
+Ordinary Linux installation needs no Python. Its role/sudo transaction is
+preserved, while artifact delivery is now release-download-only on every host.
+
+DSM reviewer creation uses `expired=1` on the first native call, privilege zero
+and a **public, nonsecret placeholder password**. The installer verifies
+`Expired=true`, native/NSS UID consistency and non-admin/non-submitter groups
+before installing the grant. It never enables, resets the password of, or
+repairs an existing reviewer. **Do not re-enable this service account:** its
+placeholder is public. Disabled state is not a claim of share/application ACL
+isolation. The fixed `askdo-review` execution group is independent of the native
+NSS primary group (`users`, GID 100).
+
+Native role creation/deletion, disabled-account authentication enforcement and
+empty-group behavior still require approved first-install acceptance on DSM;
+local native-command adapters test orchestration, not the NAS runtime. Ambiguous
+native failures or changed rollback dependencies retain state and a private
+staging journal for manual inspection; rollback never recursively erases a
+native-created home. On DSM, `uninstall.sh --purge --yes` retains native identities
+and `/var/lib/askdo-review` because name-only deletion cannot prove that a previous
+installer created them. Neither install path enables or starts services.
 
 ### 2. Connect Telegram
 

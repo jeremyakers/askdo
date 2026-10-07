@@ -2,9 +2,20 @@
 # Disposable root only; no host installation or service control.
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
-  export GOTOOLCHAIN=local ASKDO_SOURCE_DIR=/src
+if [ "${1:-}" != --inside ]; then
+  case "$(docker info --format '{{json .SecurityOptions}}')" in *'"name=rootless"'*) ;; *) exit 1;; esac
+  C=$(docker create -w /src golang:1.27 sh /src/scripts/test-packaging.sh --inside)
+  trap 'docker rm -f "$C" >/dev/null 2>&1 || :' EXIT
+  git -C "$ROOT" ls-files -z | tar -C "$ROOT" --null -T - -cf - | docker cp - "$C:/src"
+  docker cp "$ROOT/scripts" "$C:/src/"
+  docker start -a "$C"
+  exit "$(docker inspect --format '{{.State.ExitCode}}' "$C")"
+fi
+exec sh -ec '
+  export GOTOOLCHAIN=local
   apt-get update -qq >/dev/null && apt-get install -y -qq sudo >/dev/null
+  sh /src/scripts/test-install-release-fixture.sh
+  export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   printf "#!/bin/sh\nprintf \"%%s\\n\" \"\$*\" >> /tmp/systemctl-calls\nif [ \"\$1\" = is-active ] && [ \"\$3\" = askdo-gateway.service ]; then [ -e /tmp/gw-active ] && exit 0 || exit 3; fi\nif [ \"\$1\" = disable ] && [ \"\$3\" = askdo-gateway.service ]; then rm -f /tmp/gw-active; fi\ncase \"\$1\" in enable|start|restart|stop) exit 1;; is-active) exit 3;; esac\nexit 0\n" > /usr/local/bin/systemctl
   chmod +x /usr/local/bin/systemctl
   old=/etc/sudoers.d/askdo-foreground
@@ -13,6 +24,9 @@ exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
   chmod 0440 /tmp/old-policy
   fail() { printf "%s\n" "$*" >&2; exit 1; }
   sh /src/install.sh
+  cmp /usr/local/bin/askdo /fixture/release/askdo-linux-amd64
+  cmp /usr/local/libexec/askdo-launch /fixture/release/askdo-launch-linux-amd64
+  test ! -s /fixture/calls || fail "destination compiler invoked"
   test ! -e "$old" && ! getent group askdo-foreground || fail "fresh install created legacy grant/group"
   cmp "$new" /src/contrib/askdo.sudoers
   test "$(stat -c %a:%u:%g "$new")" = 440:0:0
@@ -49,11 +63,12 @@ exec docker run --rm -v "$ROOT:/src:ro" -w /src golang:1.27 sh -ec '
   test ! -e /etc/askdo-gateway || fail "purge kept gateway server state"
   test ! -e /var/lib/askdo-gateway || fail "purge kept gateway database"
   mkdir -p /tmp/mock
-  printf "#!/bin/sh\nprintf \"%%s\\n\" \"\$2\" >> /tmp/fetch-urls\nexit 1\n" > /tmp/mock/curl
+  printf "#!/bin/sh\nfor arg do case \"\$arg\" in https://*) printf \"%%s\\n\" \"\$arg\" >> /tmp/missing-release-urls;; esac; done\nexit 1\n" > /tmp/mock/curl
   chmod +x /tmp/mock/curl
-  if (cd /tmp && ASKDO_SOURCE_DIR= PATH="/tmp/mock:$PATH" sh /src/install.sh --version v999.0.0); then fail "missing source accepted"; fi
-  grep -qx "https://codeload.github.com/jeremyakers/askdo/tar.gz/v999.0.0" /tmp/fetch-urls
-  if grep -q "/releases/" /tmp/fetch-urls; then fail "release assets requested on source-only install"; fi
+  if (cd /tmp && PATH="/tmp/mock:$PATH" sh /src/install.sh --version v999.0.0); then fail "missing release accepted"; fi
+  grep -qx "https://github.com/jeremyakers/askdo/releases/download/v999.0.0/install-manifest.v1" /tmp/missing-release-urls
+  if grep -q "codeload" /tmp/missing-release-urls; then fail "source fallback requested"; fi
+  rm /tmp/mock/curl
   printf "#!/bin/sh\nif [ \"\$1\" = -c ] && [ -e /etc/sudoers.d/askdo ]; then exit 1; fi\nexec /usr/sbin/visudo \"\$@\"\n" > /tmp/mock/visudo
   chmod +x /tmp/mock/visudo
   if PATH="/tmp/mock:$PATH" sh /src/install.sh; then fail "fresh visudo failure accepted"; fi

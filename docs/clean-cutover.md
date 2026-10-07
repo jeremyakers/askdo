@@ -30,15 +30,15 @@ the two services have independent sockets and state.
 
 ## Prepare askdo without interrupting the other service
 
-1. From the intended **source checkout** (verify it yourself; for a public
-   release, prefer a verified upstream checkout or release), inspect
-   `install.sh` and its `--help`, verify that the checkout is the intended
-   source, and obtain the machine owner's approval before any host
-   installation. Run `./install.sh`
-   from that checkout as root only after approval. It builds from the local
-   checkout, installs the askdo binary, helper, service, example configuration,
-   accounts, groups, and directories; it does not enable or start the service.
-   Do not stage from a remote script or an unverified copy of the checkout.
+1. Obtain the intended release's `install.sh` from the owner repository, inspect
+   it and its `--help`, and obtain the machine owner's approval before any host
+   installation. Run `sh install.sh --version TAG` as root only after approval.
+   The script downloads and verifies the matching release binary, helper,
+   policy, units and example configuration, then installs accounts, groups and
+   directories; it does not compile source, enable or start the service.
+   A local checkout's installer must match the selected release installer or
+   installation refuses. Do not use an unverified copy, a source-branch selector,
+   or unpublished snapshot artifacts as if they were a released installation.
 2. Configure askdo as root: add submitting users to the single `askdo` group
    and refresh their login/group credentials before submitting. Enroll each
    agent and human account with the operator's explicit approval. The narrow
