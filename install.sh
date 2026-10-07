@@ -557,7 +557,9 @@ bundled_policy_config() {
   # Missing/comment-only sudo.conf still selects a default plugin. Require one
   # unambiguous supported stock origin without executing sudo to discover it.
   STOCK_PLUGIN=
-  for P in /usr/libexec/sudo/sudoers.so /usr/lib/sudo/sudoers.so; do
+  STOCK_ORIGINS='/usr/libexec/sudo/sudoers.so /usr/lib/sudo/sudoers.so'
+  if [ "$DSM" = 1 ]; then STOCK_ORIGINS="$STOCK_ORIGINS /usr/lib/sudoers.so"; fi
+  for P in $STOCK_ORIGINS; do
     if [ -e "$P" ] || [ -L "$P" ]; then
       [ -z "$STOCK_PLUGIN" ] && [ ! -L "$P" ] && [ -f "$P" ] || return 1
       STOCK_PLUGIN=$P

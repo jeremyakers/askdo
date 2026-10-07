@@ -145,6 +145,99 @@ expect_failure() {
 no_mutations() {
   if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'early failure mutated identity'; fi
 }
+# Fixed physical DSM origin: genuine package bytes moved ONLY in this isolated
+# namespace. The version oracle does not prove Debian sudo's compiled defaults
+# match DSM; real bundled visudo still performs the policy checks.
+reset_fixture
+ORIGIN_BASELINE=
+for path in /usr/libexec/sudo/sudoers.so /usr/lib/sudo/sudoers.so; do
+  if [ -f "$path" ]; then test -z "$ORIGIN_BASELINE" || fail 'ambiguous fixture origin'; ORIGIN_BASELINE=$path; fi
+done
+test -n "$ORIGIN_BASELINE" && test ! -e /usr/lib/sudoers.so || fail 'unexpected fixture stock layout'
+origin_hash=$(sha256sum "$ORIGIN_BASELINE" | cut -d' ' -f1)
+lib_mode=$(stat -c %a /usr/lib)
+if [ -e /etc/sudo.conf ]; then cp /etc/sudo.conf /fixture/origin-sudo-conf; fi
+mv "$ORIGIN_BASELINE" /usr/lib/sudoers.so
+  mv /usr/sbin/visudo /usr/sbin/visudo.saved
+cat > /usr/local/bin/sudo <<'EOF'
+#!/bin/sh
+printf 'queried\n' >> /fixture/origin-queries
+if [ "$1" = -V ]; then printf 'Sudo version 1.9.5p2\nSudoers policy plugin version 1.9.5p2\nSudoers file grammar version 48\n'; exit 0; fi
+exit 1
+EOF
+chmod 0755 /usr/local/bin/sudo
+for config in absent commented explicit; do
+  reset_fixture
+  case "$config" in
+    absent) rm -f /etc/sudo.conf ;;
+    commented) printf '# stock defaults\n' > /etc/sudo.conf ;;
+    explicit) printf 'Plugin sudoers_policy sudoers.so\nPlugin sudoers_io sudoers.so\nPlugin sudoers_audit sudoers.so\n' > /etc/sudo.conf ;;
+  esac
+  rm -f /fixture/origin-queries
+  TMPDIR=/stage sh /src/install.sh > /tmp/result 2>&1 || fail "fixed physical DSM origin rejected ($config)"
+  test -s /fixture/origin-queries || fail 'accepted DSM origin did not reach validated query'
+  uid=$(id -u askdo-review)
+  gid=$(/usr/bin/getent group askdo-review | cut -d: -f3)
+  printf 'operator-fixture-config\n' > /etc/askdo/config.json
+  : > /fixture/calls
+  TMPDIR=/stage sh /src/install.sh > /tmp/result 2>&1 || fail 'DSM physical-origin repeat failed'
+  test "$(id -u askdo-review)" = "$uid" && test "$(/usr/bin/getent group askdo-review | cut -d: -f3)" = "$gid" || fail 'DSM physical-origin repeat changed identities'
+  grep -qx 'operator-fixture-config' /etc/askdo/config.json || fail 'DSM physical-origin repeat changed config'
+  no_mutations
+  cmp /usr/local/bin/askdo /fixture/release/askdo-linux-amd64 || fail 'DSM physical-origin client bytes differ'
+  cmp /usr/local/libexec/askdo-launch /fixture/release/askdo-launch-linux-amd64 || fail 'DSM physical-origin helper bytes differ'
+  printf 'DSM physical stock origin PASS: %s config and repeat\n' "$config"
+done
+for unsafe in missing symlink duplicate nonroot writable parent-writable acl; do
+  reset_fixture
+  rm -f /etc/sudo.conf /fixture/origin-queries
+  case "$unsafe" in
+    missing) mv /usr/lib/sudoers.so /fixture/origin-module ;;
+    symlink) mv /usr/lib/sudoers.so /fixture/origin-module; ln -s /fixture/origin-module /usr/lib/sudoers.so ;;
+    duplicate) cp -p /usr/lib/sudoers.so "$ORIGIN_BASELINE" ;;
+    nonroot) chown 65534:65534 /usr/lib/sudoers.so ;;
+    writable) chmod 0666 /usr/lib/sudoers.so ;;
+    parent-writable) chmod 0777 /usr/lib ;;
+    acl)
+      /usr/bin/python3 -I -S - <<'PY'
+import os, struct
+entries = [(1,7,0xffffffff),(2,4,65534),(4,5,0xffffffff),(16,5,0xffffffff),(32,5,0xffffffff)]
+os.setxattr('/usr/lib', 'system.posix_acl_access', struct.pack('<I',2) + b''.join(struct.pack('<HHI',*e) for e in entries))
+PY
+      ;;
+  esac
+  expect_failure
+  test ! -e /fixture/origin-queries || fail 'unsafe DSM physical origin queried sudo'
+  test ! -s /fixture/calls || fail 'unsafe DSM physical origin invoked mutation/compiler/service'
+  case "$unsafe" in
+    missing) mv /fixture/origin-module /usr/lib/sudoers.so ;;
+    symlink) rm /usr/lib/sudoers.so; mv /fixture/origin-module /usr/lib/sudoers.so ;;
+    duplicate) rm "$ORIGIN_BASELINE" ;;
+    nonroot) chown 0:0 /usr/lib/sudoers.so ;;
+    writable) chmod 0644 /usr/lib/sudoers.so ;;
+    parent-writable) chmod "$lib_mode" /usr/lib ;;
+    acl) /usr/bin/python3 -I -S -c "import os; os.removexattr('/usr/lib', 'system.posix_acl_access')"; chmod "$lib_mode" /usr/lib ;;
+  esac
+  printf 'DSM physical stock origin refusal PASS: %s before query\n' "$unsafe"
+done
+# Marker/tool absence, not a platform-force option: ordinary Linux still refuses
+# the third location even when it is safe and the fallback version would match.
+reset_fixture
+mv /etc.defaults/VERSION /fixture/origin-version
+mv /usr/syno /usr/syno.origin-saved
+rm -f /fixture/origin-queries
+expect_failure
+test ! -e /fixture/origin-queries && test ! -s /fixture/calls || fail 'Linux accepted DSM-only physical origin'
+mv /usr/syno.origin-saved /usr/syno
+mv /fixture/origin-version /etc.defaults/VERSION
+test "$(sha256sum /usr/lib/sudoers.so | cut -d' ' -f1)" = "$origin_hash" || fail 'stock fixture module bytes changed'
+mv /usr/lib/sudoers.so "$ORIGIN_BASELINE"
+  mv /usr/sbin/visudo.saved /usr/sbin/visudo
+rm /usr/local/bin/sudo
+if [ -f /fixture/origin-sudo-conf ]; then cp /fixture/origin-sudo-conf /etc/sudo.conf; else rm -f /etc/sudo.conf; fi
+printf 'Linux origin allowlist unchanged; physical module bytes restored\n'
+reset_fixture
+if [ "${2:-}" = --plugin-origin-test ]; then exit 0; fi
 # Starter-config copy can fail without a target or with uncertain side effects.
 # Record only synthetic bytes/hashes; never print config contents as evidence.
 reset_fixture
