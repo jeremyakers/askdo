@@ -20,6 +20,31 @@ fi
 fail() { printf '%s\n' "$*" >&2; cat /tmp/result >&2; exit 1; }
 apt-get update -qq >/dev/null && apt-get install -y -qq sudo python3 >/dev/null
 mkdir -p /etc.defaults /usr/syno/sbin /usr/syno/bin /fixture /usr/local/libexec
+# Native absence replies for synouser/synogroup adapters. The measured DSM user
+# reply lists the absence code before the source hint; shape files are per kind.
+cat > /fixture/absence.sh <<'EOF'
+absence() {
+  if [ "$1" = user ]; then
+    hint='Lastest SynoErr=[user_db_get.c:36]'; code='synouser.c:406 SYNOUserGet failed. synoerr=[0x1D00]'
+  else
+    hint='Lastest SynoErr=[group_db_get.c:26]'; code='SYNOGroupGet failed, synoerr=0x1800'
+  fi
+  rc=255
+  shape=$(cat "/fixture/absence-shape-$1" 2>/dev/null || echo forward)
+  case "$shape" in
+    forward) printf '%s\n%s\n' "$hint" "$code";;
+    reverse) printf '%s\n%s\n' "$code" "$hint";;
+    duplicate-hint) printf '%s\n%s\n%s\n' "$hint" "$hint" "$code";;
+    duplicate-code) printf '%s\n%s\n%s\n' "$code" "$hint" "$code";;
+    missing-hint) printf '%s\n' "$code";;
+    missing-code) printf '%s\n' "$hint";;
+    extra-unknown) printf '%s\n%s\n%s\n' "$code" "$hint" 'unrecognized fixture line';;
+    permission) printf '%s\n%s\n%s\n' "$code" "$hint" 'permission denied';;
+    wrong-status) printf '%s\n%s\n' "$code" "$hint"; rc=1;;
+  esac
+  exit "$rc"
+}
+EOF
 if [ -d /real-validator ]; then mv /real-validator /fixture/real-validator; fi
 printf 'majorversion="7"\nbuildnumber="72806"\n' > /etc.defaults/VERSION
 groupadd -g 100 users 2>/dev/null || :
@@ -59,7 +84,7 @@ case "$1" in
     [ ! -e /fixture/duplicate-group ] || printf 'Group ID : [%s]\n' "$gid"
     exit 0
   fi
-  printf 'Lastest SynoErr=[group_db_get.c:26]\nSYNOGroupGet failed, synoerr=0x1800\n'; exit 255;;
+  . /fixture/absence.sh; absence group;;
 --add)
   echo "group add $2" >> /fixture/calls
   /usr/sbin/groupadd "$2"
@@ -76,7 +101,7 @@ set -eu
 case "$1" in
 --get)
   if [ -e /fixture/user-permission ]; then echo 'permission denied'; exit 255; fi
-  if row=$(/usr/bin/getent passwd "$2"); then
+  if [ ! -e /fixture/native-absent-user ] && row=$(/usr/bin/getent passwd "$2"); then
     uid=$(printf '%s' "$row" | cut -d: -f3)
     [ ! -e /fixture/bad-uid ] || uid=0
     expired=true; [ ! -e /fixture/enabled ] || expired=false
@@ -85,7 +110,7 @@ case "$1" in
     [ ! -e /fixture/duplicate-user ] || printf 'User uid : [%s]\n' "$uid"
     exit 0
   fi
-  printf 'Lastest SynoErr=[user_db_get.c:36]\nsynouser.c:406 SYNOUserGet failed. synoerr=[0x1D00]\n'; exit 255;;
+  . /fixture/absence.sh; absence user;;
 --add)
   # Never capture full argv/password in fixture evidence.
   test "$5:$6:$7" = '1::0'
@@ -135,7 +160,7 @@ reset_fixture() {
     /etc/systemd/system/askdo.service /etc/systemd/system/askdo-gateway.service
   rm -f /fixture/enabled /fixture/*-permission /fixture/acl-unknown /fixture/bad-* \
     /fixture/duplicate-* /fixture/fail-* /fixture/change-* /fixture/unknown-absence \
-    /fixture/wrong-* /usr/local/bin/visudo /usr/local/bin/install
+    /fixture/wrong-* /fixture/absence-shape-* /fixture/native-absent-user /usr/local/bin/visudo /usr/local/bin/install
   : > /fixture/calls
 }
 expect_failure() {
@@ -145,6 +170,32 @@ expect_failure() {
 no_mutations() {
   if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'early failure mutated identity'; fi
 }
+# Native absence diagnostics: both recognized lines, either order, only with 255 and no local row.
+for absent in user:reverse user:forward group:reverse group:forward; do
+  reset_fixture
+  printf '%s\n' "${absent#*:}" > "/fixture/absence-shape-${absent%%:*}"
+  sh /src/install.sh > /tmp/result 2>&1 || fail "native absence ($absent) refused"
+  test "$(id -g askdo-review)" = 100 || fail "native absence ($absent) did not create reviewer"
+  sh /src/install.sh > /tmp/result 2>&1 || fail "native absence ($absent) repeat failed"
+  printf 'DSM native absence accepted: %s\n' "$absent"
+done
+for absent in user:duplicate-hint user:duplicate-code user:missing-hint user:missing-code user:extra-unknown \
+  user:permission user:wrong-status group:duplicate-hint group:duplicate-code group:missing-hint \
+  group:missing-code group:extra-unknown group:permission group:wrong-status user:nss-present; do
+  reset_fixture
+  if [ "${absent#*:}" = nss-present ]; then
+    /usr/sbin/useradd -g users -s /usr/sbin/nologin askdo-review
+    printf 'reverse\n' > /fixture/absence-shape-user
+    : > /fixture/native-absent-user
+  else
+    printf '%s\n' "${absent#*:}" > "/fixture/absence-shape-${absent%%:*}"
+  fi
+  : > /fixture/calls
+  expect_failure
+  no_mutations
+  printf 'DSM native absence refused: %s\n' "$absent"
+done
+reset_fixture
 # Fixed physical DSM origin: genuine package bytes moved ONLY in this isolated
 # namespace. The version oracle does not prove Debian sudo's compiled defaults
 # match DSM; real bundled visudo still performs the policy checks.

@@ -243,8 +243,10 @@ try:
     rows = [line.rstrip('\n').split(':') for line in open(filename)]
     selected = [row for row in rows if row[0] == name]
     if status == 255:
-        pattern = (r'Lastest SynoErr=\[group_db_get\.c:[0-9]+\]\nSYNOGroupGet failed, synoerr=0x1800\n' if kind == 'group' else
-                   r'Lastest SynoErr=\[user_db_get\.c:[0-9]+\]\nsynouser\.c:[0-9]+ SYNOUserGet failed\. synoerr=\[0x1D00\]\n')
+        hint, code = ((r'Lastest SynoErr=\[group_db_get\.c:[0-9]+\]', r'SYNOGroupGet failed, synoerr=0x1800') if kind == 'group' else
+                      (r'Lastest SynoErr=\[user_db_get\.c:[0-9]+\]', r'synouser\.c:[0-9]+ SYNOUserGet failed\. synoerr=\[0x1D00\]'))
+        # Native DSM emits the two known lines in either order; require exactly one of each.
+        pattern = '(?:' + hint + '\n' + code + '|' + code + '\n' + hint + ')\n'
         if selected or re.fullmatch(pattern, data) is None:
             raise ValueError()
         sys.exit(2)
