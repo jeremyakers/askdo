@@ -31,17 +31,43 @@ CGO_ENABLED=0 go build -trimpath -o askdo-launch ./cmd/askdo-launch
   service on the host):
 
 ```sh
-scripts/build-release.sh dist    # refuses to overwrite an existing dist/
+sh scripts/test-release-install.sh
 scripts/test-packaging.sh
+sh scripts/test-dsm-install.sh
 scripts/run-root-tests.sh
 scripts/test-foreground-sudo-container.sh
 scripts/test-fleet-binary.sh
 ```
 
-`scripts/build-release.sh` writes Linux amd64/arm64 assets and SHA-256 files
-to `dist/`; `scripts/test-build-release.sh` wraps it in a disposable
-temporary directory and asserts the installer-facing file set (and that the
-test-only `askdo_fleet_fixture` build tag never leaks into release assets).
+Normal installation downloads verified release binaries; none of the destination
+install paths compiles source or falls back to a source build. The release-transfer
+and packaging fixtures prepare artifacts before invoking the installer, then use
+fail-on-call destination compiler stubs and compare installed bytes to the
+downloaded pair. DSM account/ACL adapters prove orchestration, not native DSM
+authentication or installation acceptance.
+
+Release building is a separate, **offhost** operation:
+
+```sh
+sh scripts/build-sudo-validator.sh /absolute/new/validator-amd64 amd64
+sh scripts/build-sudo-validator.sh /absolute/new/validator-arm64 arm64
+sh scripts/build-release.sh /absolute/new/release \
+  --release EXISTING_APPROVED_TAG \
+  --validator-amd64 /absolute/new/validator-amd64 \
+  --validator-arm64 /absolute/new/validator-arm64 \
+  --evidence /absolute/new/release-evidence
+```
+
+The release tag must resolve to the clean, exact checkout. The producer freezes
+public source, builds both Go commands for Linux amd64/arm64, and emits the fixed
+21-payload set plus `install-manifest.v1`. It refuses existing output directories.
+`--snapshot LABEL` is only for local development evidence: its source field is
+the base commit, with the actual snapshot bytes identified separately; it is not
+a publishable release. `scripts/test-build-release.sh` tests the producer's
+inventory, checksums, source binding and refusal guards with explicitly synthetic
+validator fixtures. Real validators need their separate build/runtime checks.
+No `askdo_fleet_fixture` build tag may appear in release assets. ARM64 checker
+tests use explicit user-mode emulation, not native ARM hardware/kernel proof.
 
 ### Fleet fixtures (implemented in source; not in the rc.1 release binaries)
 

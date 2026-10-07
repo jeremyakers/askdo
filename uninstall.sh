@@ -6,7 +6,7 @@ PURGE=0
 YES=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --help|-h) printf 'usage: sh uninstall.sh [--purge --yes]\nDefault keeps all configuration, credentials and databases. --purge also removes /etc/askdo, /var/lib/askdo, /var/lib/askdo-review and the default fleet gateway state (/etc/askdo-gateway and /var/lib/askdo-gateway); a custom gateway database path is never deleted.\n'; exit 0 ;;
+    --help|-h) printf 'usage: sh uninstall.sh [--purge --yes]\nDefault keeps all configuration, credentials and databases. --purge also removes /etc/askdo, /var/lib/askdo, /var/lib/askdo-review and the default fleet gateway state (/etc/askdo-gateway and /var/lib/askdo-gateway); a custom gateway database path is never deleted. On DSM, native identities and /var/lib/askdo-review are retained because creation ownership cannot be proved across runs.\n'; exit 0 ;;
     --purge) PURGE=1 ;;
     --yes) YES=1 ;;
     *) die "unknown option: $1" ;;
@@ -15,6 +15,14 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$(id -u)" = 0 ] || die 'run as root'
 if [ "$PURGE" = 1 ] && [ "$YES" != 1 ]; then die 'purge requires --yes'; fi
+DSM_NATIVE=0
+# Even incomplete DSM evidence forbids generic name-only identity deletion.
+# This is retention, not proof of identity ownership or trusted native tools.
+if [ -e /etc.defaults/VERSION ] || [ -L /etc.defaults/VERSION ] ||
+   [ -e /usr/syno/sbin/synouser ] || [ -L /usr/syno/sbin/synouser ] ||
+   [ -e /usr/syno/sbin/synogroup ] || [ -L /usr/syno/sbin/synogroup ]; then
+  DSM_NATIVE=1
+fi
 
 # Recognize the optional fleet gateway unit BEFORE any service control: only
 # a byte-for-byte shipped, root-owned, non-symlink unit may be stopped,
@@ -90,7 +98,8 @@ if [ "${KEEP_HELPER:-0}" != 1 ]; then rm -f /usr/local/libexec/askdo-launch; fi
 if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || :; fi
 rm -rf /run/askdo
 if [ "$PURGE" = 1 ]; then
-  rm -rf /etc/askdo /var/lib/askdo /var/lib/askdo-review
+  rm -rf /etc/askdo /var/lib/askdo
+  if [ "$DSM_NATIVE" = 0 ]; then rm -rf /var/lib/askdo-review; fi
   # Default fleet gateway state holds operator-provisioned signing keys, the
   # enrollment database and server credentials. Remove the two default
   # directories only on explicit purge, and only when each is a root-owned,
@@ -102,6 +111,9 @@ if [ "$PURGE" = 1 ]; then
       rm -rf "$GSTATE"
     fi
   done
+  if [ "$DSM_NATIVE" = 1 ]; then
+    printf 'WARNING: retaining DSM identities and /var/lib/askdo-review; no durable native creation provenance exists; no generic userdel/groupdel attempted\n' >&2
+  else
   if id askdo-review >/dev/null 2>&1; then userdel askdo-review || die 'reviewer account still in use'; fi
   PASSWD_SNAPSHOT=$(mktemp) || die 'could not stage NSS enumeration'
   # groupdel refuses a primary group in use; also retain supplementary groups
@@ -119,6 +131,7 @@ if [ "$PURGE" = 1 ]; then
     fi
   done
   rm -f "$PASSWD_SNAPSHOT"
+  fi
 fi
 if [ "$PURGE" != 1 ]; then
   for GSTATE in /etc/askdo-gateway /var/lib/askdo-gateway; do

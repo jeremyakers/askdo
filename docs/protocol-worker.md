@@ -43,9 +43,12 @@ The broker launches the worker as
 This process boundary is not a full OS sandbox: normal filesystem permissions,
 ACLs and network access still apply. Choosing a dedicated execution group does
 not disable the account's login or remove UID-specific/default ACL grants.
-The standard installer still requires the account's NSS primary group to be
-`askdo-review`; this runtime contract does not make it a DSM-compatible installer
-or establish native deployment acceptance.
+On ordinary Linux the installer still requires the account's NSS primary group
+to be `askdo-review`. The automatic DSM path instead verifies a disabled native
+account with NSS primary `users` (GID 100) and independently resolves the named
+`askdo-review` execution group. It does not inherit the account's primary or
+supplementary groups at runtime. Native DSM deployment/authentication acceptance
+is still separate from the local installer adapter tests; see the README.
 
 ## Framing and decoding
 
