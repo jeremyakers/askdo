@@ -145,6 +145,60 @@ expect_failure() {
 no_mutations() {
   if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'early failure mutated identity'; fi
 }
+# Starter-config copy can fail without a target or with uncertain side effects.
+# Record only synthetic bytes/hashes; never print config contents as evidence.
+reset_fixture
+/usr/sbin/groupadd config-unrelated
+/usr/sbin/useradd -g users -G config-unrelated -s /usr/sbin/nologin config-unrelated
+unrelated_uid=$(id -u config-unrelated)
+unrelated_groups=$(id -G config-unrelated)
+for config_state in absent partial dangling foreign directory; do
+  reset_fixture
+  cat > /usr/local/bin/install <<EOF
+#!/bin/sh
+for last do :; done
+if [ "\$last" = /etc/askdo/config.json ]; then
+  case $config_state in
+    partial) printf '{' > "\$last"; chmod 0600 "\$last" ;;
+    dangling) ln -s /etc/fixture-missing-config "\$last" ;;
+    foreign) printf 'unrelated-fixture-config\n' > "\$last"; chmod 0600 "\$last" ;;
+    directory) mkdir "\$last" ;;
+  esac
+  if [ -f "\$last" ]; then sha256sum "\$last" | cut -d' ' -f1 > /fixture/config-failure-hash; fi
+  exit 1
+fi
+exec /usr/bin/install "\$@"
+EOF
+  chmod 0755 /usr/local/bin/install
+  expect_failure
+  test "$(id -u config-unrelated)" = "$unrelated_uid" &&
+    test "$(id -G config-unrelated)" = "$unrelated_groups" || fail 'config rollback changed unrelated identity/membership'
+  test ! -e /usr/local/bin/askdo && test ! -e /usr/local/libexec/askdo-launch || fail 'config failure retained new binaries'
+  if [ "$config_state" = absent ]; then
+    if grep -q 'rollback incomplete' /tmp/result; then fail 'absent failed config copy incorrectly retained rollback state'; fi
+    for role in askdo askdo-review; do
+      if /usr/bin/getent group "$role" >/dev/null; then fail 'absent config failure retained new group'; fi
+    done
+    if /usr/bin/getent passwd askdo-review >/dev/null; then fail 'absent config failure retained new reviewer'; fi
+    for path in /etc/askdo /var/lib/askdo /var/lib/askdo-review /run/askdo; do
+      test ! -e "$path" && test ! -L "$path" || fail 'absent config failure retained new directory';
+    done
+  else
+    grep -q 'rollback incomplete' /tmp/result || fail 'uncertain config failure discarded journal'
+    if grep -E '^(user|group) del' /fixture/calls; then fail 'uncertain config failure deleted roles'; fi
+    /usr/bin/getent passwd askdo-review >/dev/null || fail 'uncertain config failure did not retain reviewer'
+    case "$config_state" in
+      partial|foreign) test "$(sha256sum /etc/askdo/config.json | cut -d' ' -f1)" = "$(cat /fixture/config-failure-hash)" || fail 'unknown config bytes changed' ;;
+      dangling) test -L /etc/askdo/config.json && test "$(readlink /etc/askdo/config.json)" = /etc/fixture-missing-config || fail 'dangling config link changed' ;;
+      directory) test -d /etc/askdo/config.json && test ! -L /etc/askdo/config.json || fail 'nonregular config target changed' ;;
+    esac
+  fi
+  printf 'config-copy rollback PASS: %s\n' "$config_state"
+done
+reset_fixture
+/usr/sbin/userdel config-unrelated
+/usr/sbin/groupdel config-unrelated
+if [ "${2:-}" = --config-rollback-test ]; then exit 0; fi
 # Review2 records attempted execution only; no custom module/exploit payload.
 # Version replies remain explicitly synthetic, not native compatibility proof.
 review2_failures=0

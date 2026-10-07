@@ -370,9 +370,13 @@ dsm_rollback() {
   dsm_paths && dsm_acl "$TMP" || return 1
   # New configuration is a role dependency, removed only if byte/metadata exact.
   if [ "${DSM_CONFIG_NEW:-0}" = 1 ]; then
-    [ ! -L /etc/askdo/config.json ] && [ -f /etc/askdo/config.json ] &&
-      [ "$(stat -c %a:%u:%g /etc/askdo/config.json)" = 600:0:0 ] &&
-      cmp -s /etc/askdo/config.json "$TMP/askdo-config.example.json" && rm /etc/askdo/config.json || return 1
+    [ ! -L /etc/askdo/config.json ] || return 1
+    # The copy may have failed before creating anything; no dependency to remove.
+    if [ -e /etc/askdo/config.json ]; then
+      [ -f /etc/askdo/config.json ] &&
+        [ "$(stat -c %a:%u:%g /etc/askdo/config.json)" = 600:0:0 ] &&
+        cmp -s /etc/askdo/config.json "$TMP/askdo-config.example.json" && rm /etc/askdo/config.json || return 1
+    fi
   fi
   for DIR_PATH in $DSM_NEW_DIRS; do
     [ ! -L "$DIR_PATH" ] && [ -d "$DIR_PATH" ] &&
