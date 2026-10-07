@@ -23,6 +23,13 @@ mkdir -p /etc.defaults /usr/syno/sbin /usr/syno/bin /fixture /usr/local/libexec
 # Native absence replies for synouser/synogroup adapters. The measured DSM user
 # reply lists the absence code before the source hint; shape files are per kind.
 cat > /fixture/absence.sh <<'EOF'
+# Optional standard comment header prepended to the NSS files after native add.
+nss_header() {
+  [ -e /fixture/nss-header ] || return 0
+  for f in /etc/group /etc/passwd; do
+    case "$(head -n 1 "$f")" in '#'*) ;; *) { echo '# fixture comment header'; cat "$f"; } > /fixture/nss-header.tmp && cat /fixture/nss-header.tmp > "$f";; esac
+  done
+}
 absence() {
   if [ "$1" = user ]; then
     hint='Lastest SynoErr=[user_db_get.c:36]'; code='synouser.c:406 SYNOUserGet failed. synoerr=[0x1D00]'
@@ -88,6 +95,7 @@ case "$1" in
 --add)
   echo "group add $2" >> /fixture/calls
   /usr/sbin/groupadd "$2"
+  . /fixture/absence.sh; nss_header
   [ ! -e "/fixture/fail-add-$2" ] || exit 1;;
 --del)
   echo "group del $2" >> /fixture/calls
@@ -116,6 +124,7 @@ case "$1" in
   test "$5:$6:$7" = '1::0'
   echo "user add $2 expired=1" >> /fixture/calls
   /usr/sbin/useradd -g users -d /var/lib/askdo-review -s /usr/sbin/nologin "$2"
+  . /fixture/absence.sh; nss_header
   [ ! -e /fixture/fail-user-add ] || exit 1;;
 --del)
   echo "user del $2" >> /fixture/calls
@@ -155,6 +164,8 @@ reset_fixture() {
   /usr/sbin/userdel existing-submitter 2>/dev/null || :
   /usr/sbin/groupdel askdo-review 2>/dev/null || :
   /usr/sbin/groupdel askdo 2>/dev/null || :
+  sed -i '/^#/d' /etc/group /etc/passwd
+  rm -f /fixture/nss-header
   rm -rf /etc/askdo /var/lib/askdo /var/lib/askdo-review /run/askdo
   rm -f /usr/local/bin/askdo /usr/local/libexec/askdo-launch /etc/sudoers.d/askdo \
     /etc/systemd/system/askdo.service /etc/systemd/system/askdo-gateway.service
@@ -194,6 +205,41 @@ for absent in user:duplicate-hint user:duplicate-code user:missing-hint user:mis
   expect_failure
   no_mutations
   printf 'DSM native absence refused: %s\n' "$absent"
+done
+reset_fixture
+# Standard comment header lines in the NSS files are not accounts/groups.
+reset_fixture
+: > /fixture/nss-header
+sh /src/install.sh > /tmp/result 2>&1 || fail 'NSS comment header refused (fresh roles)'
+test "$(head -n 1 /etc/group | cut -c1)" = '#' && test "$(head -n 1 /etc/passwd | cut -c1)" = '#' || fail 'fixture header not present'
+test "$(id -g askdo-review)" = 100 || fail 'header fresh install did not create reviewer'
+sh /src/install.sh > /tmp/result 2>&1 || fail 'NSS comment header repeat failed'
+printf 'DSM NSS comment header accepted: fresh and repeat\n'
+reset_fixture
+/usr/sbin/groupadd askdo
+: > /fixture/nss-header
+/usr/bin/python3 -I -S -c "
+for p in ('/etc/group','/etc/passwd'):
+    d = open(p).read(); open(p, 'w').write('# fixture comment header\\n' + d)"
+pre_gid=$(/usr/bin/getent group askdo | cut -d: -f3)
+sh /src/install.sh > /tmp/result 2>&1 || fail 'NSS comment header refused (pre-existing group)'
+test "$(/usr/bin/getent group askdo | cut -d: -f3)" = "$pre_gid" && test "$(/usr/bin/getent group askdo | cut -d: -f4)" = '' || fail 'pre-existing group changed'
+grep -q '^group add askdo$' /fixture/calls && fail 'pre-existing group recreated'
+printf 'DSM NSS comment header accepted: pre-existing empty group\n'
+for bad in malformed alias; do
+  reset_fixture
+  /usr/sbin/groupadd askdo
+  case "$bad" in
+    malformed) printf 'bad:x:5\n' >> /etc/group ;;
+    alias) /usr/sbin/groupadd -o -g "$(/usr/bin/getent group askdo | cut -d: -f3)" askdo-alias ;;
+  esac
+  sed -i '1i # fixture comment header' /etc/group
+  : > /fixture/calls
+  expect_failure
+  no_mutations
+  sed -i '/^bad:x:5$/d' /etc/group
+  /usr/sbin/groupdel askdo-alias 2>/dev/null || :
+  printf 'DSM NSS comment header does not hide %s group rows\n' "$bad"
 done
 reset_fixture
 # Fixed physical DSM origin: genuine package bytes moved ONLY in this isolated

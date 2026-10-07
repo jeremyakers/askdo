@@ -240,7 +240,7 @@ try:
     if len(data) > 4096:
         raise ValueError()
     filename, width, idfield = ('/etc/group', 4, 2) if kind == 'group' else ('/etc/passwd', 7, 2)
-    rows = [line.rstrip('\n').split(':') for line in open(filename)]
+    rows = [line.rstrip('\n').split(':') for line in open(filename) if not line.startswith('#')]
     selected = [row for row in rows if row[0] == name]
     if status == 255:
         hint, code = ((r'Lastest SynoErr=\[group_db_get\.c:[0-9]+\]', r'SYNOGroupGet failed, synoerr=0x1800') if kind == 'group' else
@@ -296,7 +296,7 @@ try:
             raise ValueError()
         if subprocess.check_output(['/usr/bin/id', '-g', name], timeout=10).decode().strip() != '100':
             raise ValueError()
-        group_rows = [line.rstrip('\n').split(':') for line in open('/etc/group')]
+        group_rows = [line.rstrip('\n').split(':') for line in open('/etc/group') if not line.startswith('#')]
         group_ids = namespace_ids(group_rows, 4, 2)
         users = [r for r, gid in zip(group_rows, group_ids) if r[0] == 'users' or gid == 100]
         if len(users) != 1 or users[0][0] != 'users' or users[0][2] != '100':
