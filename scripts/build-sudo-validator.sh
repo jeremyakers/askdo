@@ -40,7 +40,14 @@ printf '%s  %s\n' "$SUDO_SHA256" "$STAGE/inputs/sudo.tar.gz" | sha256sum -c -
 curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
   --output "$STAGE/inputs/musl.tar.gz" "$MUSL_NOTICE_URL"
 printf '%s  %s\n' "$MUSL_NOTICE_SHA256" "$STAGE/inputs/musl.tar.gz" | sha256sum -c -
-docker image inspect "$VALIDATOR_IMAGE" >/dev/null 2>&1 || docker pull "$VALIDATOR_IMAGE"
+# A cached index may resolve to another platform; inspect success alone is
+# not proof that the requested build image exists (especially on ARM64 hosts).
+PLATFORM=$(docker image inspect "$VALIDATOR_IMAGE" --format '{{.Os}}/{{.Architecture}}' 2>/dev/null || :)
+if [ "$PLATFORM" != "linux/$ARCH" ]; then
+  docker pull --platform "linux/$ARCH" "$VALIDATOR_IMAGE"
+  PLATFORM=$(docker image inspect "$VALIDATOR_IMAGE" --format '{{.Os}}/{{.Architecture}}')
+  [ "$PLATFORM" = "linux/$ARCH" ] || die "pulled validator image platform $PLATFORM does not match linux/$ARCH"
+fi
 # Only public archives and fixed build metadata are copied in, never the repo,
 # Docker socket, credentials or host /etc. Container root is namespace root.
 CONTAINER=$(docker create --platform "linux/$ARCH" --network bridge \
