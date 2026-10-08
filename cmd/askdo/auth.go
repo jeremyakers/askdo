@@ -86,8 +86,15 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, authUsage)
 		return 125
 	}
-	explicitDir := false
-	flags.Visit(func(f *flag.Flag) { explicitDir = explicitDir || f.Name == "credentials-dir" })
+	explicitDir, explicitConfig := false, false
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "credentials-dir":
+			explicitDir = true
+		case "config":
+			explicitConfig = true
+		}
+	})
 	path := filepath.Join(*credDir, codexCredentialsFile)
 	switch {
 	case *tokenFile != "":
@@ -103,13 +110,17 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		*credDir = filepath.Dir(path)
 	case explicitDir:
 	default:
+		if explicitConfig && *configPath == "" {
+			fmt.Fprintln(stderr, "auth: --config requires a non-empty path")
+			return 125
+		}
 		// Root is checked before touching root-private configuration so an
 		// unprivileged login gets the clear message, not a read error.
 		if sub == "login" && getEUID() != 0 {
 			return authLogin(path, *credDir, stdout, stderr)
 		}
 		var err error
-		if path, *credDir, err = resolveCodexTarget(*configPath, *configPath != ""); err != nil {
+		if path, *credDir, err = resolveCodexTarget(*configPath, explicitConfig); err != nil {
 			fmt.Fprintln(stderr, "auth:", err)
 			return 125
 		}

@@ -246,6 +246,72 @@ func TestAuthExplicitOverridesIgnoreBrokenConfig(t *testing.T) {
 	}
 }
 
+func TestAuthExplicitEmptyConfigRefusesBeforeDefaultLookupOrTokenChanges(t *testing.T) {
+	for _, verb := range []string{"login", "status", "logout"} {
+		for name, selection := range map[string][]string{
+			"separate":    {"--config", ""},
+			"equals":      {"--config="},
+			"interleaved": {"openai-codex", "--config", ""},
+		} {
+			t.Run(verb+"/"+name, func(t *testing.T) {
+				// Given a valid default config and a credential that must remain untouched.
+				e := newAuthTargetEnv(t, 0)
+				token := writeCodexCredential(t, e.dir)
+				e.write(t, e.gwCfg, gatewayDoc(codexEntry("p1", token)))
+				before, err := os.ReadFile(token)
+				if err != nil {
+					t.Fatal(err)
+				}
+				e.denyNetwork(t)
+				reads := 0
+				authReadConfig = func(path string) ([]byte, error) {
+					reads++
+					return os.ReadFile(path)
+				}
+
+				// When an explicit empty config is selected, it must not become omission.
+				args := append([]string{verb}, selection...)
+				code, out, _ := e.run(args...)
+
+				// Then no default lookup, OAuth request or credential change occurs.
+				if code != 125 || out != "" || reads != 0 || e.requestsSeen() != 0 {
+					t.Fatalf("exit=%d output=%q configReads=%d issuerRequests=%d", code, out, reads, e.requestsSeen())
+				}
+				after, err := os.ReadFile(token)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatalf("configured credential changed: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestAuthExplicitCredentialsKeepPrecedenceOverEmptyConfig(t *testing.T) {
+	for _, flag := range []string{"--token-file", "--credentials-dir"} {
+		t.Run(flag, func(t *testing.T) {
+			// Given an explicitly selected provisioning credential and no config reads.
+			e := newAuthTargetEnv(t, 1000)
+			token := writeCodexCredential(t, e.dir)
+			authReadConfig = func(string) ([]byte, error) {
+				t.Error("higher-priority credential override must not read config")
+				return nil, os.ErrPermission
+			}
+			value := token
+			if flag == "--credentials-dir" {
+				value = e.dir
+			}
+
+			// When a lower-priority config flag is empty, the explicit credential wins.
+			code, out, errOut := e.run("status", "--config", "", flag, value)
+
+			// Then status observes only the explicitly selected credential.
+			if code != 0 || errOut != "" || !strings.Contains(out, token) {
+				t.Fatalf("exit=%d output=%q error=%q", code, out, errOut)
+			}
+		})
+	}
+}
+
 func TestAuthFallsBackToProvisioningDefaultWhenNothingConfigured(t *testing.T) {
 	e := newAuthTargetEnv(t, 1000)
 	// Missing defaults and codex-free documents both keep the old default.
