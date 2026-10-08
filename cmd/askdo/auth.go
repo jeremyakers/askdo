@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/codexauth"
-	"github.com/jeremyakers/askdo/internal/operator"
 )
 
 // defaultCredentialsDir holds the broker-only credential files, including the
@@ -31,29 +30,42 @@ var (
 	checkCredDir   = validateCredentialsDir
 )
 
+const authUsage = "usage: askdo auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]"
+
 // runAuth dispatches `askdo auth login|status|logout [openai-codex]`.
 // openai-codex is the only provider; the positional argument is optional and
-// must name it when present.
+// must name it when present. Explicit help exits 0; usage errors exit 125.
 func runAuth(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: askdo auth login|status|logout [openai-codex] [--credentials-dir DIR]")
+		fmt.Fprintln(stderr, authUsage)
 		return 125
 	}
 	sub := args[0]
+	if isHelpWord(sub) {
+		writeAuthHelp(stdout)
+		return 0
+	}
 	if sub != "login" && sub != "status" && sub != "logout" {
-		fmt.Fprintf(stderr, "unknown auth subcommand %q\nusage: askdo auth login|status|logout [openai-codex] [--credentials-dir DIR]\n", sub)
+		fmt.Fprintf(stderr, "unknown auth subcommand %q\n%s\n", sub, authUsage)
 		return 125
 	}
 	flags := flag.NewFlagSet("auth "+sub, flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {} // help goes to stdout below; parse errors keep their message
 	credDir := flags.String("credentials-dir", defaultCredentialsDir, "directory holding the provider credential files")
 	tokenFile := flags.String("token-file", "", "explicit root-private Codex token path (central gateway credentials)")
+	configPath := flags.String("config", "", "host or gateway configuration naming the openai_codex token file")
 	// Accept flags and the optional positional provider in any order (the
 	// stdlib flag package alone stops at the first positional).
 	var positional []string
 	rest := args[1:]
 	for {
-		if flags.Parse(rest) != nil {
+		if err := flags.Parse(rest); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				writeAuthHelp(stdout)
+				return 0
+			}
+			fmt.Fprintln(stderr, authUsage)
 			return 125
 		}
 		rest = flags.Args()
@@ -71,21 +83,59 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 			return 125
 		}
 	default:
-		fmt.Fprintln(stderr, "usage: askdo auth "+sub+" [openai-codex] [--credentials-dir DIR]")
+		fmt.Fprintln(stderr, authUsage)
 		return 125
 	}
+	explicitToken, explicitDir, explicitConfig := false, false, false
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "token-file":
+			explicitToken = true
+		case "credentials-dir":
+			explicitDir = true
+		case "config":
+			explicitConfig = true
+		}
+	})
 	path := filepath.Join(*credDir, codexCredentialsFile)
-	if *tokenFile != "" {
+	switch {
+	case explicitToken:
+		// Presence, not value, selects this source: an empty explicit path
+		// must not fall through to a lower-priority target.
+		if *tokenFile == "" {
+			fmt.Fprintln(stderr, "auth: --token-file requires a non-empty path")
+			return 125
+		}
 		if !filepath.IsAbs(*tokenFile) || filepath.Clean(*tokenFile) != *tokenFile {
 			fmt.Fprintln(stderr, "auth: --token-file must be an absolute clean path")
 			return 125
 		}
-		if err := operator.TrustedDirectory(filepath.Dir(*tokenFile), false); err != nil {
+		if err := authTrustedDir(filepath.Dir(*tokenFile), false); err != nil {
 			fmt.Fprintln(stderr, "auth: unsafe token parent:", err)
 			return 125
 		}
 		path = *tokenFile
 		*credDir = filepath.Dir(path)
+	case explicitDir:
+		if *credDir == "" {
+			fmt.Fprintln(stderr, "auth: --credentials-dir requires a non-empty path")
+			return 125
+		}
+	default:
+		if explicitConfig && *configPath == "" {
+			fmt.Fprintln(stderr, "auth: --config requires a non-empty path")
+			return 125
+		}
+		// Root is checked before touching root-private configuration so an
+		// unprivileged login gets the clear message, not a read error.
+		if sub == "login" && getEUID() != 0 {
+			return authLogin(path, *credDir, stdout, stderr)
+		}
+		var err error
+		if path, *credDir, err = resolveCodexTarget(*configPath, explicitConfig); err != nil {
+			fmt.Fprintln(stderr, "auth:", err)
+			return 125
+		}
 	}
 	switch sub {
 	case "login":

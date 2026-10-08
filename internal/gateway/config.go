@@ -60,6 +60,22 @@ func LoadConfig(path string) (*Config, error) {
 
 // DecodeConfig validates a bounded, already safely read operator document.
 func DecodeConfig(data []byte) (*Config, error) {
+	c, err := DecodeConfigStructure(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// DecodeConfigStructure applies DecodeConfig's size bound and strict schema
+// (unknown/duplicate keys, explicit profiles array) without Validate's
+// filesystem and runtime-readiness checks. It exists for operator tooling that
+// must read identity fields while unrelated sections are still unconfigured;
+// serving paths must use DecodeConfig.
+func DecodeConfigStructure(data []byte) (*Config, error) {
 	if len(data) > fleetproto.MaxPayloadBytes {
 		return nil, errors.New("gateway config exceeds size bound")
 	}
@@ -73,9 +89,6 @@ func DecodeConfig(data []byte) (*Config, error) {
 	}
 	if raw, ok := fields["profiles"]; !ok || string(raw) == "null" {
 		return nil, errors.New("profiles must be an explicit array (empty is human-only)")
-	}
-	if err := c.Validate(); err != nil {
-		return nil, err
 	}
 	return &c, nil
 }
