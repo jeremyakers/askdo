@@ -21,6 +21,7 @@ var (
 	authDefaultConfigs = []string{defaultConfigPath, defaultGatewayConfig}
 	authReadConfig     = func(path string) ([]byte, error) { return operator.ReadRootPrivate(path, 1<<20) }
 	authTrustedDir     = operator.TrustedDirectory
+	authStat           = os.Stat
 )
 
 // codexTarget is one configured openai_codex token path and the config
@@ -83,6 +84,9 @@ func resolveCodexTarget(configPath string, explicit bool) (path, dir string, err
 		if err := authTrustedDir(dir, false); err != nil {
 			return "", "", fmt.Errorf("unsafe configured token parent: %w", err)
 		}
+		if err := rejectConfigAlias(path, paths); err != nil {
+			return "", "", err
+		}
 		return path, dir, nil
 	case fleetDoc != "":
 		return "", "", fmt.Errorf("%s is a fleet host configuration with no local provider credentials; run auth on the gateway host (askdo auth login --config %s) instead of creating an unused local copy", fleetDoc, defaultGatewayConfig)
@@ -91,7 +95,50 @@ func resolveCodexTarget(configPath string, explicit bool) (path, dir string, err
 	}
 	// Standalone initial login: nothing configured yet, so the provisioning
 	// default directory is the target.
-	return filepath.Join(defaultCredentialsDir, codexCredentialsFile), defaultCredentialsDir, nil
+	path = filepath.Join(defaultCredentialsDir, codexCredentialsFile)
+	if err := rejectConfigAlias(path, paths); err != nil {
+		return "", "", err
+	}
+	return path, defaultCredentialsDir, nil
+}
+
+// rejectConfigAlias keeps configuration read-only: login would replace and
+// logout would delete a token target that is one of the documents consulted
+// by this resolution (same file by spelling, hardlink or symlink). Only
+// metadata is compared, never token contents; a missing token or a missing
+// default document is the normal initial-login state unless the target itself
+// names that configuration path.
+func rejectConfigAlias(token string, consulted []string) error {
+	for _, doc := range consulted {
+		key, err := configuredTokenPath(doc, doc)
+		if err != nil {
+			return err
+		}
+		if token == key {
+			return fmt.Errorf("the token target %s is the configuration document %s; auth would overwrite or delete it. Fix the api_key_file path", token, doc)
+		}
+	}
+	var tokenInfo os.FileInfo
+	for _, doc := range consulted {
+		docInfo, err := authStat(doc)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect configuration %s: %w", doc, err)
+		}
+		if tokenInfo == nil {
+			if tokenInfo, err = authStat(token); errors.Is(err, os.ErrNotExist) {
+				return nil
+			} else if err != nil {
+				return fmt.Errorf("inspect token target %s: %w", token, err)
+			}
+		}
+		if os.SameFile(docInfo, tokenInfo) {
+			return fmt.Errorf("the token target %s is the configuration document %s; auth would overwrite or delete it. Fix the api_key_file path", token, doc)
+		}
+	}
+	return nil
 }
 
 // codexTargetsIn extracts the openai_codex api_key_file entries from one

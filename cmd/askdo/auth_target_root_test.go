@@ -296,6 +296,11 @@ func TestAuthRootCompiledCLI(t *testing.T) {
 			t.Fatalf("status leaked %s", canary)
 		}
 	}
+	for _, args := range [][]string{{"auth", "status", "--token-file", ""}, {"auth", "logout", "--credentials-dir="}, {"auth", "login", "--token-file", "", "--config", defaultGatewayConfig}} {
+		if code, out, errOut := run(0, args...); code != 125 || out != "" || !strings.Contains(errOut, "non-empty") {
+			t.Fatalf("%v: empty explicit selector must refuse: %d %q %q", args, code, out, errOut)
+		}
+	}
 	code, out, errOut = run(65534, "auth", "status")
 	if code != 125 || out != "" || !strings.Contains(errOut, "permission denied") || !strings.Contains(errOut, "--token-file") || strings.Contains(errOut, "REFRESH-CANARY") {
 		t.Fatalf("non-root status must report the read failure with a hint: %d %q %q", code, out, errOut)
@@ -340,5 +345,35 @@ func TestAuthRootNonCleanConfiguredPath(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Fatalf("%s written", p)
 		}
+	}
+}
+
+// The configured token path may not be a consulted root-private configuration
+// document (same file by name or hardlink): login would replace it and logout
+// would delete it. Rejected before any issuer traffic with config bytes intact.
+func TestAuthRootRefusesTokenTargetThatIsConsultedConfig(t *testing.T) {
+	for _, name := range []string{"self", "hardlink"} {
+		t.Run(name, func(t *testing.T) {
+			r := newRootSurface(t)
+			target := defaultGatewayConfig
+			if name == "hardlink" {
+				target = "/etc/askdo-gateway/credentials/alias.json"
+			}
+			r.put(defaultGatewayConfig, gatewayDoc(codexEntry("p1", target)), 0600)
+			if name == "hardlink" {
+				if err := os.Link(defaultGatewayConfig, target); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sum := r.digest(defaultGatewayConfig)
+			for _, verb := range []string{"login", "status", "logout"} {
+				if code, _, errOut := r.auth(verb); code != 125 || !strings.Contains(errOut, "configuration document") {
+					t.Fatalf("%s: %d %s", verb, code, errOut)
+				}
+			}
+			if r.count() != 0 || r.digest(defaultGatewayConfig) != sum {
+				t.Fatalf("issuer contacted or config changed: %v", r.hits)
+			}
+		})
 	}
 }

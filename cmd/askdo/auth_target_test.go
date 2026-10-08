@@ -315,6 +315,15 @@ func TestAuthExplicitCredentialsKeepPrecedenceOverEmptyConfig(t *testing.T) {
 func TestAuthFallsBackToProvisioningDefaultWhenNothingConfigured(t *testing.T) {
 	e := newAuthTargetEnv(t, 1000)
 	// Missing defaults and codex-free documents both keep the old default.
+	// The (absent) fallback token is not looked up on the real filesystem.
+	origStat := authStat
+	authStat = func(p string) (os.FileInfo, error) {
+		if strings.HasPrefix(p, defaultCredentialsDir) {
+			return nil, os.ErrNotExist
+		}
+		return origStat(p)
+	}
+	t.Cleanup(func() { authStat = origStat })
 	for _, setup := range []func(){func() {}, func() { e.write(t, e.hostCfg, hostDoc()); e.write(t, e.gwCfg, gatewayDoc()) }} {
 		setup()
 		want := filepath.Join(defaultCredentialsDir, codexCredentialsFile)
@@ -495,5 +504,157 @@ func TestAuthDotDotThroughSymlinkIsNotMergedOrRedirected(t *testing.T) {
 	}
 	for _, p := range []string{lexical, filepath.Join(e.dir, "a", "t.json")} {
 		mustNotExist(t, p)
+	}
+}
+
+// An explicitly named but empty selector must fail before any config, path,
+// token or issuer access instead of falling through to a lower-priority source.
+func TestAuthEmptyExplicitSelectorsRefuseBeforeAnyAccess(t *testing.T) {
+	e := newAuthTargetEnv(t, 0)
+	e.denyNetwork(t)
+	authReadConfig = func(string) ([]byte, error) { t.Error("config read"); return nil, os.ErrPermission }
+	authTrustedDir = func(string, bool) error { t.Error("path check"); return nil }
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	cwdToken := writeCodexCredential(t, cwd) // would be hit by Join("", file)
+	before, err := os.ReadFile(cwdToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validDir := t.TempDir()
+	forms := map[string][]string{
+		"token separate":    {"--token-file", ""},
+		"token equals":      {"--token-file="},
+		"token+dir":         {"--token-file", "", "--credentials-dir", validDir},
+		"token+config":      {"--token-file", "", "--config", e.gwCfg},
+		"dir separate":      {"--credentials-dir", ""},
+		"dir equals":        {"--credentials-dir="},
+		"dir+config":        {"--credentials-dir", "", "--config", e.gwCfg},
+		"token interleaved": {"openai-codex", "--token-file", ""},
+		"dir interleaved":   {"openai-codex", "--credentials-dir", ""},
+	}
+	for name, flags := range forms {
+		for _, verb := range []string{"login", "status", "logout"} {
+			code, out, errOut := e.run(append([]string{verb}, flags...)...)
+			if code != 125 || out != "" || !strings.Contains(errOut, "non-empty") {
+				t.Errorf("%s %s: %d %q %q", verb, name, code, out, errOut)
+			}
+		}
+	}
+	if after, err := os.ReadFile(cwdToken); err != nil || !bytes.Equal(before, after) {
+		t.Errorf("CWD token touched or removed: %v", err)
+	}
+	if e.requestsSeen() != 0 {
+		t.Fatal("network used")
+	}
+}
+
+func TestAuthNonEmptyHigherPriorityOverridesEmptyLowerSelectors(t *testing.T) {
+	e := newAuthTargetEnv(t, 0)
+	e.write(t, e.gwCfg, "{broken")
+	tok := filepath.Join(e.dir, "tok.json")
+	if code, _, errOut := e.run("login", "--token-file", tok, "--credentials-dir", "", "--config", ""); code != 0 {
+		t.Fatalf("token-file over empty dir/config: %s", errOut)
+	}
+	dir := filepath.Join(e.dir, "creds")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := e.run("login", "--credentials-dir", dir, "--config", ""); code != 0 {
+		t.Fatalf("valid dir over empty config: %s", errOut)
+	}
+	if _, err := codexauth.Load(filepath.Join(dir, codexCredentialsFile)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The target must never be a configuration document the resolution consulted:
+// login would replace it and logout would delete it.
+func TestAuthRefusesTokenTargetAliasingConsultedConfig(t *testing.T) {
+	type fixture func(e *authTargetEnv, t *testing.T) (gwBody, hostBody string)
+	cases := map[string]fixture{
+		"self": func(e *authTargetEnv, t *testing.T) (string, string) {
+			return gatewayDoc(codexEntry("p1", e.gwCfg)), ""
+		},
+		"dot-spelling": func(e *authTargetEnv, t *testing.T) (string, string) {
+			return gatewayDoc(codexEntry("p1", e.dir+"//./gateway.json")), ""
+		},
+		"cross-document": func(e *authTargetEnv, t *testing.T) (string, string) {
+			return gatewayDoc(), hostDoc(codexEntry("a", e.gwCfg))
+		},
+		"hardlink": func(e *authTargetEnv, t *testing.T) (string, string) {
+			alias := filepath.Join(e.dir, "alias.json")
+			if err := os.Link(e.gwCfg, alias); err != nil {
+				t.Fatal(err)
+			}
+			return gatewayDoc(codexEntry("p1", alias)), ""
+		},
+		"symlink": func(e *authTargetEnv, t *testing.T) (string, string) {
+			alias := filepath.Join(e.dir, "alias.json")
+			if err := os.Symlink(e.gwCfg, alias); err != nil {
+				t.Fatal(err)
+			}
+			return gatewayDoc(codexEntry("p1", alias)), ""
+		},
+	}
+	for name, setup := range cases {
+		for _, viaFlag := range []bool{false, true} {
+			if name == "cross-document" && viaFlag {
+				continue // --config consults only the named document
+			}
+			t.Run(fmt.Sprintf("%s/explicit=%v", name, viaFlag), func(t *testing.T) {
+				e := newAuthTargetEnv(t, 0)
+				e.write(t, e.gwCfg, gatewayDoc()) // exists before the alias is made
+				gw, host := setup(e, t)
+				e.write(t, e.gwCfg, gw)
+				if host != "" {
+					e.write(t, e.hostCfg, host)
+				}
+				e.denyNetwork(t)
+				sum := entries(t, e.dir)
+				want, _ := os.ReadFile(e.gwCfg)
+				args := []string{}
+				if viaFlag {
+					args = []string{"--config", e.gwCfg}
+				}
+				for _, verb := range []string{"login", "status", "logout"} {
+					code, out, errOut := e.run(append([]string{verb}, args...)...)
+					if code != 125 || !strings.Contains(errOut, "configuration document") {
+						t.Fatalf("%s: %d %q %q", verb, code, out, errOut)
+					}
+				}
+				if got, _ := os.ReadFile(e.gwCfg); !bytes.Equal(got, want) {
+					t.Fatal("config bytes changed")
+				}
+				if entries(t, e.dir) != sum || e.requestsSeen() != 0 {
+					t.Fatal("directory changed or network used")
+				}
+			})
+		}
+	}
+}
+
+func TestAuthMissingConfigPathCannotBecomeACredential(t *testing.T) {
+	for _, verb := range []string{"login", "status", "logout"} {
+		t.Run(verb, func(t *testing.T) {
+			// Given a profile pointing at the absent companion configuration path.
+			e := newAuthTargetEnv(t, 0)
+			body := gatewayDoc(codexEntry("p1", e.hostCfg))
+			e.write(t, e.gwCfg, body)
+			e.denyNetwork(t)
+
+			// When discovery consults that path, absence must not make it a token target.
+			code, out, _ := e.run(verb)
+
+			// Then neither configuration is created, replaced or treated as a credential.
+			if code != 125 || out != "" || e.requestsSeen() != 0 {
+				t.Fatalf("exit=%d output=%q issuerRequests=%d", code, out, e.requestsSeen())
+			}
+			mustNotExist(t, e.hostCfg)
+			got, err := os.ReadFile(e.gwCfg)
+			if err != nil || string(got) != body {
+				t.Fatalf("source config changed: %v", err)
+			}
+		})
 	}
 }

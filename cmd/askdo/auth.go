@@ -86,9 +86,11 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, authUsage)
 		return 125
 	}
-	explicitDir, explicitConfig := false, false
+	explicitToken, explicitDir, explicitConfig := false, false, false
 	flags.Visit(func(f *flag.Flag) {
 		switch f.Name {
+		case "token-file":
+			explicitToken = true
 		case "credentials-dir":
 			explicitDir = true
 		case "config":
@@ -97,7 +99,13 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 	})
 	path := filepath.Join(*credDir, codexCredentialsFile)
 	switch {
-	case *tokenFile != "":
+	case explicitToken:
+		// Presence, not value, selects this source: an empty explicit path
+		// must not fall through to a lower-priority target.
+		if *tokenFile == "" {
+			fmt.Fprintln(stderr, "auth: --token-file requires a non-empty path")
+			return 125
+		}
 		if !filepath.IsAbs(*tokenFile) || filepath.Clean(*tokenFile) != *tokenFile {
 			fmt.Fprintln(stderr, "auth: --token-file must be an absolute clean path")
 			return 125
@@ -109,6 +117,10 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		path = *tokenFile
 		*credDir = filepath.Dir(path)
 	case explicitDir:
+		if *credDir == "" {
+			fmt.Fprintln(stderr, "auth: --credentials-dir requires a non-empty path")
+			return 125
+		}
 	default:
 		if explicitConfig && *configPath == "" {
 			fmt.Fprintln(stderr, "auth: --config requires a non-empty path")
