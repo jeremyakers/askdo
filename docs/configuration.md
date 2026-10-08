@@ -487,6 +487,32 @@ token fails the model as an invalid-config availability failure (the
 fallback advances to the next configured model; if none remain the job fails
 before any review) until you re-run `askdo auth login openai-codex`.
 
+`askdo auth login|status|logout` resolve the token file the same way, with
+the highest-priority applicable rule winning:
+
+1. `--token-file PATH` — explicit path (first provisioning); no config is read.
+2. `--credentials-dir DIR` — `DIR/openai-codex.json`; no config is read.
+3. `--config PATH` — the `openai_codex` `api_key_file` in that host
+   (`review.models[]`) or gateway (`profiles[]`) document.
+4. Neither — the installed `/etc/askdo/config.json` and
+   `/etc/askdo-gateway/config.json` (absent ones are skipped). Entries
+   sharing one path count once; more than one distinct path is refused before
+   any network call or write — choose with `--config` or `--token-file`. A
+   fleet (`config_version` 5) host with no gateway config is directed to run
+   auth on the gateway. With nothing configured, the provisioning default
+   `/etc/askdo/credentials/openai-codex.json` is used.
+
+The config is only read, by its `config_version` and structure; unrelated
+sections (missing TLS or credential files, placeholders) do not block re-auth,
+so a missing or corrupt token can be repaired. An unreadable or malformed
+document is an error, never skipped. `askdo auth --help` shows this summary.
+
+Use `sudo` for configuration-driven `auth login`, `auth status`, and `auth
+logout`: the installed config and OAuth file are root-private. Explicit
+credential-path workflows retain their existing permission rules. Repeated
+slashes and `.` components can share a target, but authentication does not
+bypass its trusted-directory checks for `..` traversal or symlink ancestors.
+
 Rationale: the broker (root) validates them; the reviewer (running as
 `askdo-review`) reads them through group membership; the submitting agent can
 read neither. The recommended layout is:

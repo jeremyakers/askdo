@@ -177,6 +177,14 @@ replacement, removal — holds the same canonical sidecar lock. A refresh
 whose outcome is uncertain (`refresh_pending`) requires re-login; an old
 refresh token is never retried. Hosts never hold OAuth copies.
 
+Once the profile is configured, re-authorize with no path:
+`sudo askdo auth login` (also `auth status` / `auth logout`) reads
+`/etc/askdo-gateway/config.json` and `/etc/askdo/config.json`, and uses the
+one configured `openai_codex` token file. If both name different files the
+command stops and asks for `--config PATH` (or `--token-file`). On a
+fleet-only host with no gateway config it directs you to the gateway host
+instead of creating an unused local copy.
+
 Then enroll (or re-enroll) hosts with the profile allowed and selected:
 
 ```sh

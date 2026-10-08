@@ -63,6 +63,10 @@ func run(args []string) int {
 // runWithClient keeps command routing testable without allowing a test's
 // fallback command to reach the installed broker's request socket.
 func runWithClient(args []string, runClient func(context.Context, []string, client.Options) int) int {
+	if topHelpRequested(args) {
+		writeTopHelp(os.Stdout)
+		return 0
+	}
 	if len(args) == 0 {
 		return runClient(context.Background(), args, client.Options{})
 	}
