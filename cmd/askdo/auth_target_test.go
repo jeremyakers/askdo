@@ -599,9 +599,6 @@ func TestAuthRefusesTokenTargetAliasingConsultedConfig(t *testing.T) {
 	}
 	for name, setup := range cases {
 		for _, viaFlag := range []bool{false, true} {
-			if name == "cross-document" && viaFlag {
-				continue // --config consults only the named document
-			}
 			t.Run(fmt.Sprintf("%s/explicit=%v", name, viaFlag), func(t *testing.T) {
 				e := newAuthTargetEnv(t, 0)
 				e.write(t, e.gwCfg, gatewayDoc()) // exists before the alias is made
@@ -615,7 +612,11 @@ func TestAuthRefusesTokenTargetAliasingConsultedConfig(t *testing.T) {
 				want, _ := os.ReadFile(e.gwCfg)
 				args := []string{}
 				if viaFlag {
-					args = []string{"--config", e.gwCfg}
+					selected := e.gwCfg
+					if name == "cross-document" {
+						selected = e.hostCfg
+					}
+					args = []string{"--config", selected}
 				}
 				for _, verb := range []string{"login", "status", "logout"} {
 					code, out, errOut := e.run(append([]string{verb}, args...)...)
@@ -656,5 +657,29 @@ func TestAuthMissingConfigPathCannotBecomeACredential(t *testing.T) {
 				t.Fatalf("source config changed: %v", err)
 			}
 		})
+	}
+}
+
+func TestAuthExplicitConfigDoesNotParseOtherInstalledDocuments(t *testing.T) {
+	// Given a selected gateway and an unrelated unconfigured installed document.
+	e := newAuthTargetEnv(t, 0)
+	token := filepath.Join(e.dir, "selected-token.json")
+	e.write(t, e.gwCfg, gatewayDoc(codexEntry("p1", token)))
+	e.write(t, e.hostCfg, "{unconfigured")
+	authReadConfig = func(path string) ([]byte, error) {
+		if path != e.gwCfg {
+			t.Errorf("unselected config contents read: %s", path)
+		}
+		return os.ReadFile(path)
+	}
+
+	// When one configuration is selected, only it supplies the credential target.
+	if code, _, errOut := e.run("login", "--config", e.gwCfg); code != 0 {
+		t.Fatalf("selected config login: %d %s", code, errOut)
+	}
+
+	// Then metadata-only protection does not make unrelated readiness a prerequisite.
+	if _, err := codexauth.Load(token); err != nil {
+		t.Fatal(err)
 	}
 }

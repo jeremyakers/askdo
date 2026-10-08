@@ -39,8 +39,12 @@ type codexTarget struct{ path, owner string }
 // The returned dir is the credentials directory login validates.
 func resolveCodexTarget(configPath string, explicit bool) (path, dir string, err error) {
 	paths := authDefaultConfigs
+	protected := paths
 	if explicit {
 		paths = []string{configPath}
+		// Explicit selection changes parsing, not the installed config files
+		// that must remain separate from credential targets.
+		protected = append(append([]string{}, authDefaultConfigs...), configPath)
 	}
 	var targets []codexTarget
 	fleetDoc := ""
@@ -84,7 +88,7 @@ func resolveCodexTarget(configPath string, explicit bool) (path, dir string, err
 		if err := authTrustedDir(dir, false); err != nil {
 			return "", "", fmt.Errorf("unsafe configured token parent: %w", err)
 		}
-		if err := rejectConfigAlias(path, paths); err != nil {
+		if err := rejectConfigAlias(path, protected); err != nil {
 			return "", "", err
 		}
 		return path, dir, nil
@@ -96,20 +100,20 @@ func resolveCodexTarget(configPath string, explicit bool) (path, dir string, err
 	// Standalone initial login: nothing configured yet, so the provisioning
 	// default directory is the target.
 	path = filepath.Join(defaultCredentialsDir, codexCredentialsFile)
-	if err := rejectConfigAlias(path, paths); err != nil {
+	if err := rejectConfigAlias(path, protected); err != nil {
 		return "", "", err
 	}
 	return path, defaultCredentialsDir, nil
 }
 
 // rejectConfigAlias keeps configuration read-only: login would replace and
-// logout would delete a token target that is one of the documents consulted
-// by this resolution (same file by spelling, hardlink or symlink). Only
+// logout would delete a token target that is the selected or a known installed
+// configuration (same file by spelling, hardlink or symlink). Only
 // metadata is compared, never token contents; a missing token or a missing
 // default document is the normal initial-login state unless the target itself
 // names that configuration path.
-func rejectConfigAlias(token string, consulted []string) error {
-	for _, doc := range consulted {
+func rejectConfigAlias(token string, protected []string) error {
+	for _, doc := range protected {
 		key, err := configuredTokenPath(doc, doc)
 		if err != nil {
 			return err
@@ -119,7 +123,7 @@ func rejectConfigAlias(token string, consulted []string) error {
 		}
 	}
 	var tokenInfo os.FileInfo
-	for _, doc := range consulted {
+	for _, doc := range protected {
 		docInfo, err := authStat(doc)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
