@@ -512,8 +512,9 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Telegram.resolveRoutes(); err != nil {
 		return nil, err
 	}
-	// Validate existence and symlink resolution without replacing requested
-	// spellings; matching must still see the operator's original aliases.
+	// Validate symlink resolution of the roots that exist without replacing
+	// requested spellings; matching must still see the operator's original
+	// aliases. A root that does not exist yet stays configured as spelled.
 	if _, _, err := canonicalizeRoots(cfg.Inspection.ReadRoots); err != nil {
 		return nil, err
 	}
@@ -1201,12 +1202,18 @@ func validatePathList(name string, paths []string, deduplicate bool) error {
 // canonicalizeRoots resolves each read root's symlinks and collapses entries
 // that resolve to the same directory (e.g. /bin and /usr/bin on usrmerge
 // systems), returning the deduplicated canonical roots plus the collapsed
-// originals so the caller can surface a warning.
+// originals so the caller can surface a warning. A root that does not exist
+// yet (missing component, ancestor or link target) has nothing to resolve and
+// is skipped: the broker gates every object under it per request once it
+// appears. Any other resolution failure still rejects the configuration.
 func canonicalizeRoots(roots []string) (canonical []string, collapsed []string, err error) {
 	out := make([]string, 0, len(roots))
 	seen := map[string]struct{}{}
 	for _, root := range roots {
 		resolved, err := filepath.EvalSymlinks(root)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("canonicalize read root %q: %w", root, err)
 		}

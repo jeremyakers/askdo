@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -253,6 +254,46 @@ func TestLoadRejectsNestedUnknownFieldsAndCanonicalDuplicates(t *testing.T) {
 	}
 	if len(cfg.Inspection.ReadRoots) != 2 || cfg.Inspection.ReadRoots[1] != link {
 		t.Fatalf("requested aliases not preserved: %v", cfg.Inspection.ReadRoots)
+	}
+}
+
+// A configured read root that does not exist yet — missing final component,
+// missing ancestor, or a dangling link target (for example a boot-time
+// temporary directory) — is not a configuration error. The spelling stays in
+// scope; the broker gates every object under it per request once it exists.
+// Only absence is tolerated: other resolution failures still reject the file.
+func TestLoadKeepsAbsentReadRoots(t *testing.T) {
+	defer stubCredentialChecks(t)()
+	existing := t.TempDir()
+	scratch := t.TempDir()
+	dangling := filepath.Join(scratch, "dangling")
+	if err := os.Symlink(filepath.Join(scratch, "never-created"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	roots := []string{existing, filepath.Join(scratch, "later"), filepath.Join(scratch, "boot", "later"), dangling}
+	body := func(roots []string) string {
+		return `{"config_version":4,"inspection":{"read_roots":["` + strings.Join(roots, `","`) + `"]},"review":{"models":[{"name":"local","api":"openai_chat","base_url":"http://localhost:11434","model":"m","data_boundary":"local"}]},"limits":{},"telegram":{"token_file":"/keys/token","operator_user_id":1,"chat_id":-1}}`
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body(roots)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load with absent read roots: %v", err)
+	}
+	if !slices.Equal(cfg.Inspection.ReadRoots, roots) {
+		t.Fatalf("read_roots=%q, want the configured spellings %q", cfg.Inspection.ReadRoots, roots)
+	}
+	loop := filepath.Join(scratch, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body([]string{existing, loop})), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("unresolvable (looping) read root accepted")
 	}
 }
 
