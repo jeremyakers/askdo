@@ -339,9 +339,16 @@ func (d *dispatcher) cleanup() (more, failed bool) {
 	var keys []ticketKey
 	for rows.Next() {
 		var k ticketKey
-		if rows.Scan(&k.host, &k.job) == nil {
-			keys = append(keys, k)
+		if rows.Scan(&k.host, &k.job) != nil {
+			failed = true
+			continue
 		}
+		keys = append(keys, k)
+	}
+	// An error ends the loop as the last row does, leaving later rows unread;
+	// Err also reports a failed close.
+	if rows.Err() != nil {
+		failed = true
 	}
 	rows.Close()
 	marked := false

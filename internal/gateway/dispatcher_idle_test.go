@@ -28,6 +28,7 @@ type statementLog struct {
 	statements []string
 	failing    func(string) error
 	observer   func(string)
+	rows       func(query string, index int, dest []driver.Value) error
 }
 
 func (l *statementLog) record(query string) error {
@@ -49,6 +50,26 @@ func (l *statementLog) observe(fn func(string)) {
 	l.mu.Lock()
 	l.observer = fn
 	l.mu.Unlock()
+}
+
+// failRows runs fn as the driver produces each row of any later query, after
+// the statement itself succeeded. It may overwrite dest, to model a value that
+// cannot be scanned, or return an error to model the iteration failing instead
+// of delivering that row.
+func (l *statementLog) failRows(fn func(query string, index int, dest []driver.Value) error) {
+	l.mu.Lock()
+	l.rows = fn
+	l.mu.Unlock()
+}
+
+func (l *statementLog) row(query string, index int, dest []driver.Value) error {
+	l.mu.Lock()
+	fn := l.rows
+	l.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(query, index, dest)
 }
 
 func (l *statementLog) count(match func(string) bool) int {
@@ -81,6 +102,9 @@ func isPoll(query string) bool {
 }
 func isClaim(query string) bool { return strings.Contains(query, "SET state='delivering'") }
 
+// The cleanup list: the one query that ends in LIMIT, unlike a test's own counts.
+func isCleanupList(query string) bool { return strings.Contains(query, "AND cleanup=0 LIMIT") }
+
 // Everything else the pool is asked to run while no request is in flight is the
 // dispatcher working: queued behind one connection, a pass's later statements
 // can trail its first by hundreds of milliseconds, so count them all.
@@ -108,7 +132,11 @@ func (c *countingConn) QueryContext(ctx context.Context, query string, args []dr
 	if err := c.log.record(query); err != nil {
 		return nil, err
 	}
-	return c.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
+	rows, err := c.Conn.(driver.QueryerContext).QueryContext(ctx, query, args)
+	if err != nil {
+		return nil, err
+	}
+	return &countingRows{Rows: rows, log: c.log, query: query}, nil
 }
 func (c *countingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if err := c.log.record(query); err != nil {
@@ -126,6 +154,23 @@ func (c *countingConn) ResetSession(ctx context.Context) error {
 	return c.Conn.(driver.SessionResetter).ResetSession(ctx)
 }
 func (c *countingConn) IsValid() bool { return c.Conn.(driver.Validator).IsValid() }
+
+// countingRows hands each row to the log's row hook, so a query can succeed and
+// then fail while its rows are read.
+type countingRows struct {
+	driver.Rows
+	log   *statementLog
+	query string
+	next  int
+}
+
+func (r *countingRows) Next(dest []driver.Value) error {
+	if err := r.Rows.Next(dest); err != nil {
+		return err
+	}
+	r.next++
+	return r.log.row(r.query, r.next-1, dest)
+}
 
 // countStatements swaps e's pool for an equivalent single-connection pool over
 // the same file that records statements. Call it before any goroutine uses e.

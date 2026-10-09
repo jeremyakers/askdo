@@ -3,14 +3,17 @@ package gateway
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,6 +237,93 @@ func TestMaintenanceDrainsEveryCleanupBatchWithoutFurtherWakes(t *testing.T) {
 		err := e.db.QueryRow("SELECT COUNT(*) FROM gateway_tickets WHERE cleanup=0").Scan(&left)
 		return err == nil && left == 0
 	})
+}
+
+// The cleanup read can succeed as a statement and still fail while its rows are
+// read: the driver errors partway, or a row cannot be scanned. The rows not read
+// stay owed their cleanup, and with no ticket active and no event coming nothing
+// else wakes maintenance, so it has to retry by itself, once the fault clears
+// finish exactly the cleanups still owed, and not spin meanwhile.
+func TestMaintenanceRetriesACleanupReadThatFailsWhileReadingRows(t *testing.T) {
+	for _, fault := range []struct {
+		name        string
+		row         int  // the row of the cleanup list the fault strikes
+		unscannable bool // its host_id arrives NULL; otherwise the iteration fails instead of delivering it
+		processed   int  // owed cleanups the faulty pass still completes
+	}{
+		{"iteration_fails_before_any_key", 0, false, 0},
+		{"iteration_fails_after_one_key", 1, false, 1},
+		{"row_cannot_be_scanned", 1, true, 2},
+	} {
+		t.Run(fault.name, func(t *testing.T) {
+			store, e, data, sub, _ := ticketFixture(t)
+			log := countStatements(t, e)
+			ctx, cancel := context.WithCancel(context.Background())
+			if _, _, err := store.Create(ctx, data, "token-hash"); err != nil {
+				t.Fatal(err)
+			}
+			const owed = 3
+			seed, err := e.db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 1; i < owed; i++ {
+				if _, err = seed.Exec("INSERT INTO gateway_tickets(host_id,job_id,submission,token_hash,state,expires_at) SELECT host_id,?,submission,token_hash,state,expires_at FROM gateway_tickets WHERE job_id=?", fmt.Sprintf("2026-09-30_#%d", i+1), sub.Ticket.Binding.JobID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err = seed.Exec("UPDATE gateway_tickets SET state='delivery_fail'"); err != nil {
+				t.Fatal(err)
+			}
+			if err = seed.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			count := func(where string) int {
+				var n int
+				if err := e.db.QueryRow("SELECT COUNT(*) FROM gateway_tickets WHERE " + where).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			var armed atomic.Bool
+			armed.Store(true)
+			var struck atomic.Int32
+			log.failRows(func(query string, row int, dest []driver.Value) error {
+				if !armed.Load() || !isCleanupList(query) || row != fault.row {
+					return nil
+				}
+				struck.Add(1)
+				if fault.unscannable {
+					dest[0] = nil
+					return nil
+				}
+				return errors.New("injected row iteration fault")
+			})
+			d := &dispatcher{ctx: ctx, store: store, bots: map[string]*dispatchBot{"token-hash": {hash: "token-hash"}}, cosmetics: make(chan cosmeticJob, 32)}
+			done := make(chan struct{})
+			go func() { defer close(done); d.maintenance() }()
+			t.Cleanup(func() { cancel(); awaitSignal(t, done) })
+
+			// Faulty pass: the rows read before the fault are still handled, and a
+			// failed read is not progress, so there is no immediate rescan.
+			eventually(t, func() bool { return struck.Load() > 0 })
+			time.Sleep(400 * time.Millisecond)
+			if lists := log.count(isCleanupList); lists > 3 {
+				t.Fatalf("%d cleanup reads in 400ms; a failed read must not be retried in a loop", lists)
+			}
+			if got := count("cleanup=1"); got != fault.processed {
+				t.Fatalf("faulty pass completed %d cleanups, want %d", got, fault.processed)
+			}
+
+			// The fault clears. Nothing wakes maintenance, so only its own retry can
+			// finish the rest, each owed cleanup exactly once.
+			armed.Store(false)
+			eventually(t, func() bool { return count("cleanup=0") == 0 })
+			if queued := len(d.cosmetics); queued != owed || count("state='delivery_fail'") != owed {
+				t.Fatalf("%d cosmetic cleanups queued for %d owed tickets, or ticket states changed", queued, owed)
+			}
+		})
+	}
 }
 
 func TestMaintenanceRetriesFailedTerminalizationWithoutSpinning(t *testing.T) {
