@@ -77,5 +77,7 @@ func (d *dispatcher) pollFatal(bot *dispatchBot, reason string) {
 		return
 	}
 	bot.fail()
+	// Tickets bound to this bot can no longer be delivered or answered.
+	d.store.enrollment.changes.notify()
 	d.pollLog().ErrorContext(d.ctx, "telegram polling failed", "method", "getUpdates", "reason", reason)
 }

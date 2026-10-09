@@ -120,6 +120,9 @@ func (p EnrollmentPolicy) validate() error {
 type EnrollmentStore struct {
 	db   *sql.DB
 	path string
+	// changes wakes the dispatcher after this process commits work for it. Other
+	// processes' commits reach it through dataVersion instead.
+	changes wakeHub
 }
 
 // Test seam only for Unix ownership: production always requires root ownership.
@@ -427,7 +430,12 @@ func (s *EnrollmentStore) RevokeWithTickets(ctx context.Context, hostID string, 
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Pending tickets of the revoked host are the dispatcher's to settle.
+	s.changes.notify()
+	return nil
 }
 
 // Delete is limited to disabled hosts. Future ticket schemas should retain
