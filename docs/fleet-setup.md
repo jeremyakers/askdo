@@ -225,7 +225,11 @@ sudo askdo gateway hosts revoke HOST_ID --config /etc/askdo-gateway/config.json
 ```
 
 Revocation takes effect live in the gateway database: the host's
-authenticated requests and pending tickets are refused. It **cannot undo an
+authenticated requests and pending tickets are refused. The command fails the
+host's pending tickets itself, in the same transaction; a running gateway
+notices the change by itself within about a second and removes the approval
+buttons from the affected Telegram cards (best effort, as for other card
+cleanup). It **cannot undo an
 already-issued proof or recall already-dispatched work** — those remain
 bounded by proof expiry and the host's own local state. There is no claim of
 instant offline revocation.
@@ -257,6 +261,10 @@ instant offline revocation.
   incomplete receipts are still rejected.
 - Card cleanup and callback acknowledgements are cosmetic, bounded,
   lossy and best effort; they never affect authorization.
+- The dispatcher waits for work rather than polling. About once a second it
+  looks for another process's commits, retries a database operation that failed,
+  and re-reads the wall clock for ticket expiry; authentication and every
+  authorization check read the database directly and are not delayed.
 - Model sessions have a global capacity of 256, not per-host quotas. Capacity
   exhaustion fails new reviews closed; a noisy enrolled host can affect other
   hosts' availability until sessions are released or expire. Enrollment

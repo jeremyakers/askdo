@@ -82,6 +82,7 @@ func (s *TicketStore) Ingest(ctx context.Context, token string, updates []telegr
 		return err
 	}
 	original := offset
+	retained := false
 	for _, u := range updates {
 		if u.UpdateID < original || u.UpdateID < 0 || u.UpdateID == math.MaxInt64 {
 			continue
@@ -128,8 +129,12 @@ func (s *TicketStore) Ingest(ctx context.Context, token string, updates []telegr
 				continue
 			}
 			data, _ := json.Marshal(facts)
-			if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO gateway_callback_inbox(token_hash,update_id,host_id,job_id,facts) VALUES(?,?,?,?,?)", token, u.UpdateID, c.key.host, c.key.job, data); err != nil {
+			result, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO gateway_callback_inbox(token_hash,update_id,host_id,job_id,facts) VALUES(?,?,?,?,?)", token, u.UpdateID, c.key.host, c.key.job, data)
+			if err != nil {
 				return err
+			}
+			if n, err := result.RowsAffected(); err != nil || n > 0 {
+				retained = true
 			}
 		}
 	}
@@ -137,7 +142,8 @@ func (s *TicketStore) Ingest(ctx context.Context, token string, updates []telegr
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	// Only a new row is work: empty and unmatched polls, and replays, are not.
+	return s.commit(tx, retained)
 }
 
 func (s *TicketStore) Inbox(ctx context.Context) ([]inboxEntry, error) {
@@ -192,19 +198,21 @@ func (s *TicketStore) Consume(ctx context.Context, e inboxEntry) (bool, *TicketR
 	}
 	b := r.Submission.Ticket.Binding
 	if err = enabled(ctx, tx, e.key.host); errors.Is(err, ErrUnauthorized) {
-		if err = s.failTx(ctx, tx, e.key.host, e.key.job, fleetproto.ErrCodeRevoked); err != nil {
+		changed, err := s.failTx(ctx, tx, e.key.host, e.key.job, fleetproto.ErrCodeRevoked)
+		if err != nil {
 			return false, nil, err
 		}
-		return false, nil, tx.Commit()
+		return false, nil, s.commit(tx, changed)
 	} else if err != nil {
 		return false, nil, err
 	}
 	now := time.Now().Unix()
 	if now >= b.ExpiresAt {
-		if err = s.failTx(ctx, tx, e.key.host, e.key.job, fleetproto.ErrCodeExpired); err != nil {
+		changed, err := s.failTx(ctx, tx, e.key.host, e.key.job, fleetproto.ErrCodeExpired)
+		if err != nil {
 			return false, nil, err
 		}
-		return false, nil, tx.Commit()
+		return false, nil, s.commit(tx, changed)
 	}
 	if r.State == fleetproto.TicketCreated || r.State == fleetproto.TicketDelivering {
 		return false, nil, nil
@@ -241,5 +249,5 @@ func (s *TicketStore) Consume(ctx context.Context, e inboxEntry) (bool, *TicketR
 	if _, err = tx.ExecContext(ctx, "DELETE FROM gateway_callback_inbox WHERE host_id=? AND job_id=?", e.key.host, e.key.job); err != nil {
 		return false, nil, err
 	}
-	return true, &r, tx.Commit()
+	return true, &r, s.commit(tx, true)
 }

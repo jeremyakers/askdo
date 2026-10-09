@@ -144,7 +144,21 @@ func (s *TicketStore) Create(ctx context.Context, data []byte, tokenHash string)
 	if err != nil {
 		return ack, false, err
 	}
-	return ack, true, tx.Commit()
+	return ack, true, s.commit(tx, true)
+}
+
+// commit makes tx durable and then, only if it changed something the dispatcher
+// acts on, wakes it. Claim, send intents and acknowledgements, cleanup marks, and
+// idempotent or refused replays are not such changes: waking for them would let
+// the dispatcher's own progress wake it again.
+func (s *TicketStore) commit(tx *sql.Tx, wake bool) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if wake {
+		s.enrollment.changes.notify()
+	}
+	return nil
 }
 
 func (s *TicketStore) Claim(ctx context.Context, host, job string) error {
@@ -254,30 +268,36 @@ func (s *TicketStore) Complete(ctx context.Context, host, job string) error {
 	if err = s.eventTx(ctx, tx, fleetproto.Event{Version: 1, Kind: fleetproto.KindEvent, HostID: b.HostID, JobID: b.JobID, Type: fleetproto.EventReceipt, Receipt: &receipt}); err != nil {
 		return err
 	}
-	return tx.Commit()
+	// A pending ticket can now be decided, including by callbacks that arrived
+	// before its receipt. An automatic notice awaits no one.
+	return s.commit(tx, state == fleetproto.TicketPending)
 }
 
-func (s *TicketStore) failTx(ctx context.Context, tx *sql.Tx, host, job string, code fleetproto.ErrorCode) error {
+// failTx reports whether it moved the ticket to a terminal state.
+func (s *TicketStore) failTx(ctx context.Context, tx *sql.Tx, host, job string, code fleetproto.ErrorCode) (bool, error) {
 	r, _, err := readTicket(ctx, tx, host, job)
 	if err != nil {
-		return err
+		return false, err
 	}
 	switch r.State {
 	case fleetproto.TicketCreated, fleetproto.TicketDelivering, fleetproto.TicketPending:
 	default:
-		return nil
+		return false, nil
 	}
 	state := fleetproto.TicketFailed
 	if code == fleetproto.ErrCodeExpired {
 		state = fleetproto.TicketExpired
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE gateway_tickets SET state=? WHERE host_id=? AND job_id=?", state, host, job); err != nil {
-		return err
+		return false, err
 	}
 	if _, err = tx.ExecContext(ctx, "DELETE FROM gateway_callback_inbox WHERE host_id=? AND job_id=?", host, job); err != nil {
-		return err
+		return false, err
 	}
-	return s.eventTx(ctx, tx, fleetproto.Event{Version: 1, Kind: fleetproto.KindEvent, HostID: fleetproto.ID(host), JobID: fleetproto.ID(job), Type: fleetproto.EventFailed, Failure: &fleetproto.Failure{Code: code}})
+	if err = s.eventTx(ctx, tx, fleetproto.Event{Version: 1, Kind: fleetproto.KindEvent, HostID: fleetproto.ID(host), JobID: fleetproto.ID(job), Type: fleetproto.EventFailed, Failure: &fleetproto.Failure{Code: code}}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 func (s *TicketStore) Fail(ctx context.Context, host, job string, code fleetproto.ErrorCode) error {
 	tx, err := s.enrollment.db.BeginTx(ctx, nil)
@@ -285,10 +305,11 @@ func (s *TicketStore) Fail(ctx context.Context, host, job string, code fleetprot
 		return err
 	}
 	defer tx.Rollback()
-	if err = s.failTx(ctx, tx, host, job, code); err != nil {
+	changed, err := s.failTx(ctx, tx, host, job, code)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return s.commit(tx, changed)
 }
 
 // RevokeTickets is passed to EnrollmentStore.RevokeWithTickets, using its tx.
@@ -312,7 +333,7 @@ func (s *TicketStore) RevokeTickets(ctx context.Context, tx *sql.Tx, host string
 		return err
 	}
 	for _, job := range jobs {
-		if err = s.failTx(ctx, tx, host, job, fleetproto.ErrCodeRevoked); err != nil {
+		if _, err = s.failTx(ctx, tx, host, job, fleetproto.ErrCodeRevoked); err != nil {
 			return err
 		}
 	}

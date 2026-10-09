@@ -29,6 +29,14 @@ type dispatchBot struct {
 func (b *dispatchBot) healthy() bool { b.mu.Lock(); defer b.mu.Unlock(); return !b.failed }
 func (b *dispatchBot) fail()         { b.mu.Lock(); b.failed = true; b.mu.Unlock() }
 
+// recheckInterval is how often the dispatcher looks for what no in-process
+// commit announces: commits by other processes (the admin CLI), and operations
+// that failed and may succeed on another attempt.
+const recheckInterval = time.Second
+
+// cleanupBatch bounds one cleanup query; a full batch means more may be owed.
+const cleanupBatch = 32
+
 type dispatcher struct {
 	store           *TicketStore
 	ctx             context.Context
@@ -75,6 +83,8 @@ func (d *dispatcher) start() {
 	}
 	d.wg.Add(1)
 	go func() { defer d.wg.Done(); d.maintenance() }()
+	d.wg.Add(1)
+	go func() { defer d.wg.Done(); d.watchExternal() }()
 }
 func pause(ctx context.Context, duration time.Duration) bool {
 	timer := time.NewTimer(duration)
@@ -142,29 +152,45 @@ func (d *dispatcher) poll(bot *dispatchBot) {
 }
 func (d *dispatcher) deliverWorker() {
 	for d.ctx.Err() == nil {
+		// Listen before reading: a ticket created from now on closes wake.
+		wake := d.store.enrollment.changes.listen()
 		keys, err := d.store.Active(d.ctx)
 		if err != nil {
 			return
 		}
+		claimed, failed := false, false
 		for _, key := range keys {
 			if d.ctx.Err() != nil {
 				return
 			}
 			r, err := d.store.Get(d.ctx, key.host, key.job)
 			if err != nil {
+				failed = true
 				continue
 			}
 			if r.State != fleetproto.TicketCreated {
 				continue
 			}
 			if err = d.store.Claim(d.ctx, key.host, key.job); err != nil {
+				// Losing the ticket to another worker, to expiry or to revocation is
+				// final for this attempt. A database error is worth another one.
+				failed = failed || !errors.Is(err, ErrTicketState)
 				continue
 			}
+			claimed = true
 			if err = d.deliver(r); err != nil && d.ctx.Err() == nil {
 				_ = d.store.Fail(d.ctx, key.host, key.job, deliveryFailureCode(err, r.Submission.Ticket.Binding.ExpiresAt))
 			}
 		}
-		if !pause(d.ctx, 40*time.Millisecond) {
+		if claimed {
+			// Delivery took time: look again at once rather than only when woken.
+			continue
+		}
+		var retry time.Time
+		if failed {
+			retry = time.Now().Add(recheckInterval)
+		}
+		if !waitFor(d.ctx, wake, retry, time.Now) {
 			return
 		}
 	}
@@ -223,6 +249,17 @@ func (d *dispatcher) deliver(r TicketRecord) error {
 }
 func (d *dispatcher) maintenance() {
 	for d.ctx.Err() == nil {
+		// Listen before reading, as in deliverWorker.
+		wake := d.store.enrollment.changes.listen()
+		// until is the next moment to run without being woken: the nearest expiry
+		// among tickets that stay active, or a retry.
+		var until time.Time
+		soonest := func(t time.Time) {
+			if until.IsZero() || t.Before(until) {
+				until = t
+			}
+		}
+		failed := false
 		keys, err := d.store.Active(d.ctx)
 		if err != nil {
 			return
@@ -230,21 +267,26 @@ func (d *dispatcher) maintenance() {
 		for _, k := range keys {
 			r, err := d.store.Get(d.ctx, k.host, k.job)
 			if err != nil {
+				failed = true
 				continue
 			}
 			host, err := d.store.enrollment.Get(d.ctx, k.host)
 			code := fleetproto.ErrorCode("")
+			expiresAt := r.Submission.Ticket.Binding.ExpiresAt
 			if errors.Is(err, ErrHostNotFound) || err == nil && !host.Enabled {
 				code = fleetproto.ErrCodeRevoked
 			} else if err != nil {
+				failed = true
 				continue
-			} else if r.Submission.Ticket.Binding.ExpiresAt <= time.Now().Unix() {
+			} else if expiresAt <= time.Now().Unix() {
 				code = fleetproto.ErrCodeExpired
 			} else if bot := d.bots[r.TokenHash]; bot == nil || !bot.healthy() {
 				code = fleetproto.ErrCodeDelivery
 			}
-			if code != "" {
-				_ = d.store.Fail(d.ctx, k.host, k.job, code)
+			if code == "" {
+				soonest(time.Unix(expiresAt, 0))
+			} else if d.store.Fail(d.ctx, k.host, k.job, code) != nil {
+				failed = true
 			}
 		}
 		entries, err := d.store.Inbox(d.ctx)
@@ -254,6 +296,7 @@ func (d *dispatcher) maintenance() {
 		for _, entry := range entries {
 			won, r, err := d.store.Consume(d.ctx, entry)
 			if err != nil {
+				failed = true
 				continue
 			}
 			if r != nil {
@@ -270,40 +313,61 @@ func (d *dispatcher) maintenance() {
 				d.enqueueCosmetic(cosmeticJob{kind: kind, bot: bot, record: r, chat: entry.facts.Chat, callback: entry.facts.CallbackID})
 			}
 		}
-		d.cleanup()
-		if !pause(d.ctx, 40*time.Millisecond) {
+		for more := true; more; {
+			var cleanupFailed bool
+			more, cleanupFailed = d.cleanup()
+			failed = failed || cleanupFailed
+		}
+		if failed {
+			soonest(time.Now().Add(recheckInterval))
+		}
+		if !waitFor(d.ctx, wake, until, time.Now) {
 			return
 		}
 	}
 }
 
 // Cleanup is best effort, never a transition into authority. Persist its attempt
-// so restart does not produce an unbounded stream of cosmetic requests.
-func (d *dispatcher) cleanup() {
-	rows, err := d.store.enrollment.db.QueryContext(d.ctx, "SELECT host_id,job_id FROM gateway_tickets WHERE state IN ('decided','delivery_fail','expired') AND cleanup=0 LIMIT 32")
+// so restart does not produce an unbounded stream of cosmetic requests. more
+// reports a full batch that made progress, so the caller drains the rest now;
+// failed reports an operation worth attempting again later.
+func (d *dispatcher) cleanup() (more, failed bool) {
+	rows, err := d.store.enrollment.db.QueryContext(d.ctx, "SELECT host_id,job_id FROM gateway_tickets WHERE state IN ('decided','delivery_fail','expired') AND cleanup=0 LIMIT ?", cleanupBatch)
 	if err != nil {
-		return
+		return false, true
 	}
 	var keys []ticketKey
 	for rows.Next() {
 		var k ticketKey
-		if rows.Scan(&k.host, &k.job) == nil {
-			keys = append(keys, k)
+		if rows.Scan(&k.host, &k.job) != nil {
+			failed = true
+			continue
 		}
+		keys = append(keys, k)
+	}
+	// An error ends the loop as the last row does, leaving later rows unread;
+	// Err also reports a failed close.
+	if rows.Err() != nil {
+		failed = true
 	}
 	rows.Close()
+	marked := false
 	for _, k := range keys {
 		r, err := d.store.Get(d.ctx, k.host, k.job)
 		if err != nil {
+			failed = true
 			continue
 		}
 		if _, err = d.store.enrollment.db.ExecContext(d.ctx, "UPDATE gateway_tickets SET cleanup=1 WHERE host_id=? AND job_id=?", k.host, k.job); err != nil {
+			failed = true
 			continue
 		}
+		marked = true
 		bot := d.bots[r.TokenHash]
 		if bot == nil {
 			continue
 		}
 		d.enqueueCosmetic(cosmeticJob{kind: cosmeticCleanup, bot: bot, record: &r})
 	}
+	return len(keys) == cleanupBatch && marked, failed
 }
