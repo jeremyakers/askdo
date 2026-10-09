@@ -174,6 +174,7 @@ func TestLegacySecurityMatrix(t *testing.T) {
 		{"bind-hash", TestRootHashExecutableBindAliases},
 		{"hidden-source", TestRootHiddenInspectionSource},
 		{"unsupported-filesystem", TestRootInspectionUnsupportedFilesystem},
+		{"absent-root", TestAbsentReadRootMaterializesLater},
 	} {
 		t.Run(tc.name, tc.run)
 	}

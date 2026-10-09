@@ -56,6 +56,8 @@ type Policy struct {
 
 // NewPolicy validates cfg and its read roots, then anchors namespace-root
 // descriptor-relative lookups. The post-open gate verifies mount identity.
+// A read root that does not exist yet stays in scope as spelled; the same
+// per-request gate judges whatever later appears under it.
 func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, error) {
 	mounts, err := readMountInfo()
 	if err != nil {
@@ -115,6 +117,13 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 	p.hardIDs = hardIDs
 	for _, configured := range cfg.ReadRoots {
 		resolved, err := filepath.EvalSymlinks(configured)
+		if errors.Is(err, os.ErrNotExist) {
+			// Absent now (missing component, ancestor or link target): there
+			// is no object to validate and no resolved alias to allow. The
+			// configured spelling remains allowed and every later object
+			// under it passes authorizeFD like any other request.
+			continue
+		}
 		if err != nil {
 			return fail(fmt.Errorf("canonicalize read root %q: %w", configured, err))
 		}
@@ -129,6 +138,9 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 			return fail(fmt.Errorf("read root %q resolves inside a hard-denied path", configured))
 		}
 		fd, err := p.open(p.roots[0], resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			continue // removed between resolution and the anchored open
+		}
 		if err != nil {
 			return fail(fmt.Errorf("open read root %q: %w", configured, err))
 		}
