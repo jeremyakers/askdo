@@ -64,6 +64,7 @@ import (
 	"encoding/pem"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -86,9 +87,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := os.WriteFile("/tmp/ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o644); err != nil {
-		log.Fatal(err)
-	}
 	files := http.FileServer(http.Dir("/www"))
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("GET %s", r.URL.Path)
@@ -96,7 +94,15 @@ func main() {
 	})
 	server := &http.Server{Addr: "127.0.0.1:443", Handler: handler, TLSConfig: &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}}
-	log.Fatal(server.ListenAndServeTLS("", ""))
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Publishing the CA is the fixture readiness signal: bind the listener first.
+	if err := os.WriteFile("/tmp/ca.crt", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), 0o644); err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(server.ServeTLS(listener, "", ""))
 }
 GO
   mkdir -p "$W/tools/usr/local/bin"
@@ -128,7 +134,7 @@ printf 'fixture ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/fixture
 chmod 0440 /etc/sudoers.d/fixture
 printf '#!/bin/sh\ncase "$1" in is-active) exit 3;; *) exit 0;; esac\n' > /usr/local/bin/systemctl
 chmod 0755 /usr/local/bin/systemctl
-pipe() { su fixture -c "curl -fsSL $URL | sudo sh $*" > /tmp/result 2>&1; }
+pipe() { su fixture -c "curl --proto '=https' --proto-redir '=https' -fsSL $URL | sudo sh $*" > /tmp/result 2>&1; }
 same_as_bundle() {
   cmp /usr/local/bin/askdo /bundle/askdo-linux-amd64
   cmp /usr/local/libexec/askdo-launch /bundle/askdo-launch-linux-amd64
@@ -163,7 +169,7 @@ sh /bundle/uninstall.sh --purge --yes >/dev/null
 pipe -s -- --version "$TAG" || { cat /tmp/result; exit 1; }
 same_as_bundle
 sh /bundle/uninstall.sh --purge --yes >/dev/null
-su fixture -c "curl -fsSL $URL | ASKDO_VERSION=$TAG sudo env ASKDO_VERSION=$TAG sh" > /tmp/result 2>&1 || { cat /tmp/result; exit 1; }
+su fixture -c "curl --proto '=https' --proto-redir '=https' -fsSL $URL | ASKDO_VERSION=$TAG sudo env ASKDO_VERSION=$TAG sh" > /tmp/result 2>&1 || { cat /tmp/result; exit 1; }
 same_as_bundle
 sh /bundle/uninstall.sh --purge --yes >/dev/null
 # Local source checkout installer with --version: line-5 difference must not break self-binding.

@@ -113,14 +113,14 @@ One line, pinned to a published release tag (no environment variable or
 arguments needed; the release's `install.sh` defaults to its own tag):
 
 ```sh
-curl -fsSL https://github.com/jeremyakers/askdo/releases/download/<tag>/install.sh | sudo sh
+curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/jeremyakers/askdo/releases/download/<tag>/install.sh | sudo sh
 ```
 
 The first release built with this tag-bound installer is planned as `v1.0.0-rc.11`;
 use that URL only after it is published. The `releases/latest/...` URL selects the
 newest stable (non-prerelease) release, so it does not work while only release
 candidates exist; there is no prerelease fallback. To read the installer first:
-download it with `curl -fsSL <same URL> -o install.sh`, then `sudo sh install.sh`.
+download it with `curl --proto '=https' --proto-redir '=https' -fsSL <same URL> -o install.sh`, then `sudo sh install.sh`.
 Stop any running older askdo broker yourself before upgrading; the installer
 never starts or stops the service.
 
