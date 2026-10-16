@@ -109,27 +109,34 @@ want AI review.
 
 ### 1. Install a verified release
 
+One line, pinned to a published release tag (no environment variable or
+arguments needed; the release's `install.sh` defaults to its own tag):
+
 ```sh
-curl --proto '=https' --proto-redir '=https' -fsSL \
-  https://github.com/jeremyakers/askdo/releases/latest/download/install.sh -o install.sh
-sudo sh install.sh
+curl -fsSL https://github.com/jeremyakers/askdo/releases/download/<tag>/install.sh | sudo sh
 ```
+
+The first release built with this tag-bound installer is planned as `v1.0.0-rc.11`;
+use that URL only after it is published. The `releases/latest/...` URL selects the
+newest stable (non-prerelease) release, so it does not work while only release
+candidates exist; there is no prerelease fallback. To read the installer first:
+download it with `curl -fsSL <same URL> -o install.sh`, then `sudo sh install.sh`.
+Stop any running older askdo broker yourself before upgrading; the installer
+never starts or stops the service.
 
 The installer downloads release binaries for askdo and its terminal helper,
 installs inert service units, and creates a starter config. It never compiles on
 the destination or falls back to source. `--version TAG` selects a published
-release tag (not a source branch); the default is `latest`. One closed
+release tag (not a source branch); `ASKDO_VERSION` does the same; a source-tree `install.sh` defaults to `latest`. One closed
 `install-manifest.v1` pins the tag, source commit, installer, both architecture
 inventories and asset hashes/sizes. All subsequent assets use that exact tag.
-The local installer must byte-match the selected release installer; a mismatch
+A local installer must byte-match the selected release installer except for its line-5 `VERSION` default; any other difference
 refuses rather than silently executing different policy. `ASKDO_SOURCE_DIR` is
 obsolete and rejected. Manifest/hash binding relies on the owner's HTTPS release
 publication; it is not a signature or reproducible-build claim.
 
-This new manifest-based bundle has not yet been published. Existing rc.2 assets
-do not contain it or the DSM compatibility changes: this source installer fails
-closed for those releases. Do not interpret local release fixtures as a published
-upgrade. Publication and first native DSM installation require separate approval.
+Older rc.2 assets lack this manifest bundle and the DSM compatibility changes, so
+this installer refuses them. Local release fixtures are not a published upgrade.
 
 The same entry point automatically recognizes DSM metadata/native-tool paths
 and uses native Synology role operations. DSM uses the existing vendor

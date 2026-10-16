@@ -476,7 +476,11 @@ if [ ! -f "$0" ] || [ ! -r "$0" ]; then
   ASKDO_VERSION="$TAG" sh "$TMP/install.sh"
   exit "$?"
 fi
-cmp -s "$0" "$TMP/install.sh" || die 'installer differs from selected release; use its matching release install.sh'
+# A release asset differs from source only in the line-5 VERSION default: normalize just that line.
+NORMALIZE_DEFAULT='5s/^VERSION=${ASKDO_VERSION:-[A-Za-z0-9][A-Za-z0-9._-]*}$/VERSION=${ASKDO_VERSION:-latest}/'
+sed "$NORMALIZE_DEFAULT" "$0" > "$TMP/self-body" || die 'could not read installer'
+sed "$NORMALIZE_DEFAULT" "$TMP/install.sh" > "$TMP/asset-body" || die 'could not read release installer'
+cmp -s "$TMP/self-body" "$TMP/asset-body" || die 'installer differs from selected release; use its matching release install.sh'
 for FILE in $COMMON; do [ "$FILE" = install.sh ] || asset_get "$FILE"; done
 for BINARY in "$ASSET" "$HELPER"; do
   asset_get "$BINARY"
