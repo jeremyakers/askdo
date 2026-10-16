@@ -55,7 +55,9 @@ func pollFailure(err error) (retry bool, after time.Duration, reason string) {
 			return true, 0, "network"
 		}
 	}
-	return false, 0, "transport"
+	// Any other network/read transport failure retries with backoff from the
+	// committed offset instead of latching the bot and failing its tickets.
+	return true, 0, "transport"
 }
 
 func pollBackoff(attempt int) time.Duration {

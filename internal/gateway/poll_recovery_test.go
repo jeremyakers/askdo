@@ -379,11 +379,12 @@ func TestPollFailureClassification(t *testing.T) {
 		{"http_429_read_no_metadata", call(telegram.FailureRead, 429, io.EOF), false},
 		{"timeout", call(telegram.FailureNetwork, 0, &net.DNSError{IsTimeout: true}), true},
 		{"temporary", call(telegram.FailureNetwork, 0, &net.DNSError{IsTemporary: true}), true},
-		{"dns_permanent", call(telegram.FailureNetwork, 0, &net.DNSError{IsNotFound: true}), false},
+		{"dns_not_found", call(telegram.FailureNetwork, 0, &net.DNSError{IsNotFound: true}), true},
 		{"trust", call(telegram.FailureNetwork, 0, &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}), false},
 		{"hostname", call(telegram.FailureNetwork, 0, x509.HostnameError{}), false},
 		{"certificate", call(telegram.FailureNetwork, 0, x509.CertificateInvalidError{}), false},
-		{"unknown_transport", call(telegram.FailureNetwork, 0, errors.New("unrecognized")), false},
+		{"unknown_transport", call(telegram.FailureNetwork, 0, errors.New("unrecognized")), true},
+		{"unknown_read_transport", call(telegram.FailureRead, 200, errors.New("unrecognized")), true},
 		{"sentinel_only", telegram.ErrTransport, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -505,6 +506,197 @@ func TestPollRecoveryCancellationDoesNotPoison(t *testing.T) {
 	awaitSignal(t, done)
 	if !bot.healthy() || strings.Contains(logs.String(), "level=ERROR") {
 		t.Fatal("shutdown latched/logged terminal failure")
+	}
+}
+
+// A network/read transport failure whose cause is not individually classified
+// is a transient outage: the same poller retries with backoff from its
+// committed offset and recovers without a restart.
+func TestPollRecoveryUnclassifiedTransportRetries(t *testing.T) {
+	store, _, data, sub, _ := ticketFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, err := store.Create(ctx, data, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	update, err := json.Marshal(callback(41, 2, 1, 7, telegram.ActionApprove, sub.Ticket.Binding.Nonce))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hijack := func(w http.ResponseWriter, response string) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_, _ = buf.WriteString(response)
+		_ = buf.Flush()
+		_ = conn.Close()
+	}
+	var exchanges atomic.Int32
+	observed := make(chan int64, 16)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Offset int64 `json:"offset"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		observed <- request.Offset
+		switch exchanges.Add(1) {
+		case 1:
+			// Unclassified FailureNetwork: the peer answer is not HTTP.
+			hijack(w, "garbage not http\r\n\r\n")
+		case 2:
+			_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+		case 3:
+			// Unclassified FailureRead recurring after a previous recovery.
+			hijack(w, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")
+		case 4:
+			_, _ = io.WriteString(w, `{"ok":true,"result":[`+string(update)+`]}`)
+		case 5:
+			// The peer replays an already-acknowledged update.
+			_, _ = io.WriteString(w, `{"ok":true,"result":[`+string(update)+`]}`)
+		default:
+			<-r.Context().Done()
+		}
+	}))
+	defer server.Close()
+	const token = "42:poll_transport_canary"
+	file := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(file, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := telegram.NewClient(telegram.ClientConfig{TokenFile: file, BaseURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	var delays []time.Duration
+	d := &dispatcher{ctx: ctx, store: store, logger: slog.New(slog.NewTextHandler(&logs, nil)), pollWait: func(ctx context.Context, delay time.Duration) bool {
+		delays = append(delays, delay)
+		return ctx.Err() == nil
+	}}
+	bot := &dispatchBot{client: client, hash: "fixture"}
+	done := make(chan struct{})
+	go func() { defer close(done); d.poll(bot) }()
+	for _, want := range []int64{0, 0, 0, 0, 42, 42} {
+		select {
+		case got := <-observed:
+			if got != want {
+				t.Fatalf("offset = %d, want committed %d", got, want)
+			}
+		case <-done:
+			t.Fatal("poller permanently exited during unclassified transport outage")
+		case <-ctx.Done():
+			t.Fatal("poller did not recover")
+		}
+	}
+	cancel()
+	<-done
+	if !bot.healthy() {
+		t.Fatal("unclassified transport outage poisoned the bot")
+	}
+	if len(delays) != 2 || delays[0] != time.Second || delays[1] != time.Second {
+		t.Fatal("backoff did not apply and reset across the recurrence", delays)
+	}
+	if offset, err := store.Offset(context.Background(), bot.hash); err != nil || offset != 42 {
+		t.Fatalf("durable offset = %d, %v", offset, err)
+	}
+	entries, err := store.Inbox(context.Background())
+	if err != nil || len(entries) != 1 || entries[0].update != 41 {
+		t.Fatal("acknowledged callback replayed into a duplicate", entries, err)
+	}
+	record, err := store.Get(context.Background(), string(sub.Ticket.Binding.HostID), string(sub.Ticket.Binding.JobID))
+	if err != nil || record.State != fleetproto.TicketCreated {
+		t.Fatal("outage changed ticket authority", record, err)
+	}
+	text := logs.String()
+	if strings.Count(text, "telegram polling unavailable") != 2 || strings.Count(text, "reason=transport") != 2 || strings.Count(text, "telegram polling recovered") != 2 || strings.Contains(text, "telegram polling failed") {
+		t.Fatalf("outage events wrong: %s", text)
+	}
+	for _, secret := range []string{token, server.URL} {
+		if strings.Contains(text, secret) {
+			t.Fatal("outage log leaked endpoint material")
+		}
+	}
+}
+
+// A DNS lookup that answers "no such host" is still just a poll transport
+// failure: the same poller backs off and recovers when the name resolves.
+type dnsFixtureTransport struct {
+	failures atomic.Int32
+	inner    http.RoundTripper
+}
+
+func (t *dnsFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if t.failures.Add(1) <= 1 {
+		return nil, &net.DNSError{IsNotFound: true, Name: r.URL.Host}
+	}
+	return t.inner.RoundTrip(r)
+}
+
+func TestPollRecoveryDNSNotFoundRetries(t *testing.T) {
+	store, _, _, _, _ := ticketFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var exchanges atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if exchanges.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":41}]}`)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	// The production client uses http.DefaultTransport; rewrite it like the
+	// existing codexFixtureTransport seam so one lookup answers NXDOMAIN.
+	old := http.DefaultTransport
+	transport := &dnsFixtureTransport{inner: old}
+	http.DefaultTransport = transport
+	defer func() { http.DefaultTransport = old }()
+	file := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(file, []byte("42:poll_dns_canary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := telegram.NewClient(telegram.ClientConfig{TokenFile: file, BaseURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first exchange fails before any dial with a typed FailureNetwork
+	// whose cause is an unrecognized-by-policy DNS negative answer.
+	var logs bytes.Buffer
+	var delays []time.Duration
+	d := &dispatcher{ctx: ctx, store: store, logger: slog.New(slog.NewTextHandler(&logs, nil)), pollWait: func(ctx context.Context, delay time.Duration) bool {
+		delays = append(delays, delay)
+		return ctx.Err() == nil
+	}}
+	bot := &dispatchBot{client: client, hash: "fixture"}
+	done := make(chan struct{})
+	go func() { defer close(done); d.poll(bot) }()
+	eventually(t, func() bool {
+		offset, err := store.Offset(ctx, bot.hash)
+		return err == nil && offset == 42
+	})
+	cancel()
+	<-done
+	if !bot.healthy() {
+		t.Fatal("DNS not-found poisoned the bot")
+	}
+	if len(delays) != 1 || delays[0] != time.Second {
+		t.Fatal("backoff not applied exactly once", delays)
+	}
+	if exchanges.Load() == 0 {
+		t.Fatal("poller never reached the server after the DNS failure")
+	}
+	text := logs.String()
+	if strings.Count(text, "telegram polling unavailable") != 1 || strings.Count(text, "reason=transport") != 1 || strings.Count(text, "telegram polling recovered") != 1 || strings.Contains(text, "telegram polling failed") {
+		t.Fatalf("outage events wrong: %s", text)
+	}
+	if strings.Contains(text, server.URL) {
+		t.Fatal("outage log leaked endpoint material")
 	}
 }
 
