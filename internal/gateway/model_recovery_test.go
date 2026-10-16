@@ -231,3 +231,127 @@ func TestModelRecoveryCanceledJoinNeverStartsAnotherCall(t *testing.T) {
 		t.Fatal("canceled unjoined session reconstructed", got)
 	}
 }
+
+type recoveryCancelNotice struct {
+	inner    reviewer.ModelTurn
+	canceled chan struct{}
+	once     sync.Once
+}
+
+func (m *recoveryCancelNotice) ChatTurn(ctx context.Context, request reviewer.ModelRequest) (reviewer.ModelResponse, error) {
+	m.once.Do(func() { context.AfterFunc(ctx, func() { close(m.canceled) }) })
+	return m.inner.ChatTurn(ctx, request)
+}
+
+func TestModelRecoveryCarriesConsecutiveFailuresAcrossOwnership(t *testing.T) {
+	for _, beforeCommit := range []bool{true, false} {
+		t.Run(map[bool]string{true: "reserved_before_commit", false: "already_committed"}[beforeCommit], func(t *testing.T) {
+			// Given consecutive real HTTP failures, when recovery owns the
+			// successor before/after predecessor commit, then its backoff inherits
+			// the outcome exactly once. A cached valid response resets the chain.
+			var calls atomic.Int32
+			service, host, turn, _, _ := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				switch calls.Add(1) {
+				case 1, 5:
+					_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"valid"}}]}`))
+				default:
+					w.WriteHeader(503)
+				}
+			}), 5*time.Second, 1)
+			initial := service.modelTurn(context.Background(), host, turn, true)
+			if initial.Response == nil {
+				t.Fatal(initial)
+			}
+			notice := &recoveryCancelNotice{canceled: make(chan struct{})}
+			service.mu.Lock()
+			session := service.sessions[sessionKey{turn.Binding.HostID, turn.Binding.JobID, turn.Binding.Attempt}]
+			notice.inner = session.adapter
+			session.adapter = notice
+			service.mu.Unlock()
+			reached, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			defer releaseOnce.Do(func() { close(release) })
+			var completions atomic.Int32
+			if beforeCommit {
+				service.beforeModelCompletion = func() {
+					if completions.Add(1) == 1 {
+						close(reached)
+						<-release
+					}
+				}
+			}
+			turn.Binding.Turn++
+			turn.RetryTransient = true
+			turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", Content: initial.Response.Content})
+			oldDone := make(chan fleetproto.ModelResult, 1)
+			go func() { oldDone <- service.modelTurn(context.Background(), host, turn, true) }()
+			var first fleetproto.ModelResult
+			if beforeCommit {
+				select {
+				case <-reached:
+				case <-time.After(time.Second):
+					t.Fatal("first transient did not reach precommit gate")
+				}
+			} else {
+				select {
+				case first = <-oldDone:
+				case <-time.After(time.Second):
+					t.Fatal("first transient did not commit")
+				}
+			}
+			next := turn
+			next.Binding.Turn++
+			next.RecoverPrevious = true
+			nextDone := make(chan fleetproto.ModelResult, 1)
+			go func() { nextDone <- service.modelTurn(context.Background(), host, next, true) }()
+			if beforeCommit {
+				// The real adapter's call context is canceled only after recovery
+				// reserves ownership; the predecessor is still held at completion.
+				select {
+				case <-notice.canceled:
+				case <-time.After(time.Second):
+					t.Fatal("successor did not reserve/cancel predecessor")
+				}
+				releaseOnce.Do(func() { close(release) })
+				select {
+				case first = <-oldDone:
+				case <-time.After(time.Second):
+					t.Fatal("predecessor did not finish")
+				}
+			}
+			var second fleetproto.ModelResult
+			select {
+			case second = <-nextDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("successor did not finish")
+			}
+			if first.Retry == nil || first.Retry.AfterMS != 250 || second.Retry == nil || second.Retry.AfterMS != 500 {
+				t.Fatalf("lost/doubled predecessor failure: first=%+v second=%+v", first.Retry, second.Retry)
+			}
+			next.Binding.Turn++
+			next.RecoverPrevious = false
+			third := service.modelTurn(context.Background(), host, next, true)
+			if third.Retry == nil || third.Retry.AfterMS != 1000 {
+				t.Fatalf("third failure backoff=%+v", third.Retry)
+			}
+			next.Binding.Turn++
+			next.RecoverPrevious = true
+			success := service.modelTurn(context.Background(), host, next, true)
+			if success.Response == nil {
+				t.Fatal(success)
+			}
+			next.Binding.Turn++
+			adopted := service.modelTurn(context.Background(), host, next, true)
+			if adopted.Response == nil || calls.Load() != 5 {
+				t.Fatal("cached success made another provider call", adopted, calls.Load())
+			}
+			next.Binding.Turn++
+			next.RecoverPrevious = false
+			next.Request.Messages = append(next.Request.Messages, modelwire.Message{Role: "assistant", Content: adopted.Response.Content})
+			afterSuccess := service.modelTurn(context.Background(), host, next, true)
+			if afterSuccess.Retry == nil || afterSuccess.Retry.AfterMS != 250 || calls.Load() != 6 {
+				t.Fatalf("successful recovery did not reset failures: retry=%+v calls=%d", afterSuccess.Retry, calls.Load())
+			}
+		})
+	}
+}

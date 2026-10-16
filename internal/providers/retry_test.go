@@ -3,15 +3,83 @@ package providers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/modelwire"
+	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 )
+
+type redirectReviewPipe struct{ review proto.ReviewComplete }
+
+func (*redirectReviewPipe) Inspect(context.Context, proto.InspectRequest) (proto.InspectResult, error) {
+	return proto.InspectResult{}, errors.New("redirect fixture must not inspect")
+}
+
+func (p *redirectReviewPipe) WriteReview(review proto.ReviewComplete) error {
+	p.review = review
+	return nil
+}
+
+func TestProviderRejectedRedirectAdvancesWithoutRetry(t *testing.T) {
+	for _, crossOrigin := range []bool{true, false} {
+		t.Run(map[bool]string{true: "cross_origin", false: "redirect_limit"}[crossOrigin], func(t *testing.T) {
+			// Given a deterministic redirect rejection, when the actual provider
+			// loop fails over, then the rejected turn is attempted once rather
+			// than spending the remaining retry budget on the same refusal.
+			var forbidden, attempts, redirectHops, fallbackCalls atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { forbidden.Add(1) }))
+			defer target.Close()
+			bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/chat/completions" {
+					attempts.Add(1)
+				} else {
+					redirectHops.Add(1)
+				}
+				location := "/loop"
+				if crossOrigin {
+					location = target.URL + "/forbidden"
+				}
+				http.Redirect(w, r, location, http.StatusTemporaryRedirect)
+			}))
+			defer bad.Close()
+			good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				fallbackCalls.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []chatToolCall{marshalChatToolCall(reviewer.ToolCall{ID: "submit", Name: "submit_review", Arguments: json.RawMessage(codexFixtureReportArgs)})}}}}})
+			}))
+			defer good.Close()
+			boot := proto.Bootstrap{Operation: proto.WorkerOperation{Mode: "argv", Argv: []string{"/unused"}}, ReviewDeadlineUnixMS: time.Now().Add(10 * time.Second).UnixMilli(), ConfigProjection: proto.ConfigProjection{Models: []proto.ProjectedModel{
+				{Name: "rejected", API: "openai_chat", BaseURL: bad.URL, Model: "fixture", RequestTimeoutMS: 1000},
+				{Name: "fallback", API: "openai_chat", BaseURL: good.URL, Model: "fixture", RequestTimeoutMS: 1000},
+			}, Limits: proto.WorkerLimits{MaxModelCallsPerAttempt: 3, MaxOutputTokens: 100}}}
+			pipe := &redirectReviewPipe{}
+			review, history, err := reviewer.RunWithFallback(context.Background(), boot, pipe, ModelFactory())
+			if err != nil || review.Report.Risk != "1" || pipe.review.Report.Risk != "1" {
+				t.Fatalf("fallback did not review: %v", err)
+			}
+			if attempts.Load() != 1 || fallbackCalls.Load() != 1 || forbidden.Load() != 0 {
+				t.Fatalf("rejected redirect repeated: attempts=%d fallback=%d forbidden=%d", attempts.Load(), fallbackCalls.Load(), forbidden.Load())
+			}
+			wantHops := int32(9)
+			if crossOrigin {
+				wantHops = 0
+			}
+			if redirectHops.Load() != wantHops {
+				t.Fatalf("existing redirect policy changed: hops=%d want=%d", redirectHops.Load(), wantHops)
+			}
+			if len(history) != 2 || history[0].Name != "rejected" || history[0].Outcome != "api_error" || history[0].Error != "connection unavailable" || history[1].Name != "fallback" || history[1].Outcome != "ok" {
+				t.Fatalf("transport/fallback taxonomy changed: %+v", history)
+			}
+		})
+	}
+}
 
 func TestProviderRetryClassificationAndHeaders(t *testing.T) {
 	// Given a bounded provider failure, when classified, then only temporary

@@ -27,6 +27,8 @@ const maxResponseBodyBytes = 32 << 20 // 32 MiB
 // credentials can never be forwarded to a host the operator did not configure.
 var errCrossOriginRedirect = errors.New("refused cross-origin redirect")
 
+var errRedirectLimit = errors.New("redirect limit exceeded")
+
 // boundedClient performs exactly one non-streaming HTTP exchange per call.
 // It uses the standard library default transport: normal TLS verification is
 // in effect and no retry, failover, backoff, or circuit-breaking logic exists
@@ -44,7 +46,7 @@ func newBoundedClient(timeout time.Duration, credential string) *boundedClient {
 		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
-				return errors.New("redirect limit exceeded")
+				return errRedirectLimit
 			}
 			if len(via) > 0 && !sameOrigin(req.URL, via[0].URL) {
 				return errCrossOriginRedirect
@@ -171,7 +173,13 @@ func classifyRequestError(err error, credential string) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
-	return &modelwire.TransientError{Cause: fmt.Errorf("%w: %s", ErrTransport, normalizeDiagnostic(err.Error(), credential))}
+	failure := fmt.Errorf("%w: %s", ErrTransport, normalizeDiagnostic(err.Error(), credential))
+	if errors.Is(err, errCrossOriginRedirect) || errors.Is(err, errRedirectLimit) {
+		// The existing redirect policy rejected this request deterministically;
+		// retain its transport category without repeating the same refusal.
+		return failure
+	}
+	return &modelwire.TransientError{Cause: failure}
 }
 
 func isNetTimeout(err error) bool {

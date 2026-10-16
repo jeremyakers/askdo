@@ -28,7 +28,6 @@ type modelSession struct {
 	response   modelwire.ModelResponse
 	next       uint32
 	retrying   bool
-	failures   int
 	busy, dead bool
 	localOnly  bool
 	ctx        context.Context
@@ -50,6 +49,9 @@ type modelOperation struct {
 	result      fleetproto.ModelResult
 	recoverable bool
 	retryAt     time.Time
+	// Consecutive transient physical failures through this outcome. Cached
+	// reconciliation/wait cancellation carries it; a valid response resets it.
+	failures int
 }
 
 // DropSession releases conversation/adapter state but keeps a replay tombstone
@@ -154,6 +156,9 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 	session.next++ // Reserve before doing I/O, including a predecessor join.
 	callCtx, cancel := context.WithTimeout(session.ctx, profile.RequestTimeout.Value())
 	operation := &modelOperation{turn: b.Turn, request: turn.Request, granted: turn.RetryTransient, cancel: cancel, done: make(chan struct{})}
+	if previous != nil && !turn.RecoverPrevious {
+		operation.failures = previous.failures
+	}
 	session.operation = operation
 	adapter := session.adapter
 	s.mu.Unlock()
@@ -169,6 +174,7 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 		select {
 		case <-previous.done:
 			adapter = previous.adapter
+			operation.failures = previous.failures
 			// A successor can itself lose its reply while waiting. Carry the
 			// known provider minimum forward even if this wait is canceled.
 			operation.retryAt = previous.retryAt
@@ -220,9 +226,10 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 				result.Failure.Code = fleetproto.ErrCodeSession
 			}
 			callerCanceled = errors.Is(err, context.Canceled)
-			delay, retry := modelwire.RetryDelay(err, session.failures)
+			delay, retry := modelwire.RetryDelay(err, operation.failures)
 			transient = retry
 			if retry {
+				operation.failures++
 				operation.retryAt = time.Now().Add(delay)
 			}
 			if retry && turn.RetryTransient && b.Turn < 128 && operation.retryAt.Before(time.Unix(b.Deadline, 0)) {
@@ -244,6 +251,7 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 		} else {
 			result = delivered
 			response = *delivered.Response
+			operation.failures = 0
 		}
 	}
 	if s.beforeModelCompletion != nil {
@@ -276,11 +284,6 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 			session.request = turn.Request
 			session.response = response
 			session.retrying = result.Retry != nil
-			if session.retrying {
-				session.failures++
-			} else {
-				session.failures = 0
-			}
 		}
 	}
 	close(operation.done)
