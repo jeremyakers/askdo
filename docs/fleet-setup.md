@@ -245,6 +245,8 @@ instant offline revocation.
   from the last committed update offset. Backoff grows from 1 to 30 seconds;
   a valid rate-limit `retry_after` can require a longer wait. Cancellation stops
   the wait, and a successful poll plus inbox/cursor commit resets the backoff.
+  Network/read transport errors retry the same way even when their cause is
+  not individually recognized.
   Existing ticket expiries are never extended. This recovery is in source after
   rc.2; already-running rc.2 gateways still require operator repair/restart if
   their poller has latched a failure.

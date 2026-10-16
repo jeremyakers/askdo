@@ -17,11 +17,14 @@ import (
 type ModelFailureCode string
 
 const (
-	ModelAuth                  ModelFailureCode = "auth"
-	ModelGatewayTransport      ModelFailureCode = "gateway_transport"
-	ModelSignature             ModelFailureCode = "signature"
-	ModelProtocol              ModelFailureCode = "protocol"
-	ModelSession               ModelFailureCode = "session"
+	ModelAuth             ModelFailureCode = "auth"
+	ModelGatewayTransport ModelFailureCode = "gateway_transport"
+	ModelSignature        ModelFailureCode = "signature"
+	ModelProtocol         ModelFailureCode = "protocol"
+	ModelSession          ModelFailureCode = "session"
+	// Root's own HTTPS timer expired without a verified outcome. This is NOT
+	// provider availability and cannot authorize fallback or NO AI approval.
+	ModelRequestTimeout        ModelFailureCode = "request_timeout"
 	ModelRevision              ModelFailureCode = "revision"
 	ModelRevoked               ModelFailureCode = "revoked"
 	ModelExpired               ModelFailureCode = "expired"
@@ -36,7 +39,8 @@ const (
 )
 
 type ModelFailure struct {
-	Code ModelFailureCode `json:"code"`
+	Code  ModelFailureCode `json:"code"`
+	Retry *modelwire.Retry `json:"retry,omitempty"`
 }
 
 func (f *ModelFailure) Error() string { return "root model turn failed: " + string(f.Code) }
@@ -44,10 +48,11 @@ func (f *ModelFailure) Error() string { return "root model turn failed: " + stri
 // RequestSeq increases across all choices on one worker pipe (starting at 1).
 // Root owns the network attempt/turn binding; choice is an immutable bootstrap name.
 type ModelTurnRequest struct {
-	Type       string                 `json:"type"`
-	RequestSeq uint64                 `json:"request_seq"`
-	ChoiceName string                 `json:"choice_name"`
-	Request    modelwire.ModelRequest `json:"request"`
+	Type           string                 `json:"type"`
+	RequestSeq     uint64                 `json:"request_seq"`
+	ChoiceName     string                 `json:"choice_name"`
+	Request        modelwire.ModelRequest `json:"request"`
+	RetryTransient bool                   `json:"retry_transient,omitempty"`
 }
 type ModelTurnResult struct {
 	Type       string                   `json:"type"`
@@ -100,8 +105,11 @@ func validateModelTurnResult(m ModelTurnResult) error {
 		}
 		return validateModelCalls(m.Response.ToolCalls)
 	}
-	if !oneOf(string(m.Failure.Code), "auth", "gateway_transport", "signature", "protocol", "session", "revision", "revoked", "expired", "delivery", "safety", "upstream_quota_rate", "upstream_transport", "upstream_timeout", "upstream_invalid_config", "upstream_malformed_wire", "upstream_codex_relogin") {
+	if !oneOf(string(m.Failure.Code), "auth", "gateway_transport", "signature", "protocol", "session", "request_timeout", "revision", "revoked", "expired", "delivery", "safety", "upstream_quota_rate", "upstream_transport", "upstream_timeout", "upstream_invalid_config", "upstream_malformed_wire", "upstream_codex_relogin") {
 		return errors.New("unknown model failure code")
+	}
+	if m.Failure.Retry != nil && (!m.Failure.Retry.Valid() || !oneOf(string(m.Failure.Code), "upstream_transport", "upstream_timeout", "upstream_quota_rate", "request_timeout")) {
+		return errors.New("invalid model retry metadata")
 	}
 	return nil
 }

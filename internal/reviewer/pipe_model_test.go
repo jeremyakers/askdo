@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
@@ -28,6 +29,20 @@ func privatePipes(t *testing.T) (*os.File, *os.File, *os.File, *os.File) {
 		t.Cleanup(func() { _ = f.Close() })
 	}
 	return workerIn, workerOut, rootIn, rootOut
+}
+
+func TestPipeUnknownRequestTimeoutNeverBecomesAvailability(t *testing.T) {
+	// Given root cannot verify a request outcome, when retry slots exhaust,
+	// then that infrastructure cause must never authorize fallback/NO AI.
+	for _, retry := range []*modelwire.Retry{nil, {AfterMS: 250}} {
+		err := modelFailureError(&proto.ModelFailure{Code: proto.ModelRequestTimeout, Retry: retry})
+		if classifyModelError(err) == classAvailability || errors.Is(err, ErrTimeout) || errors.Is(err, ErrTransport) {
+			t.Fatalf("unknown timeout became provider availability: %v", err)
+		}
+		if _, allowed := modelwire.RetryDelay(err, 0); allowed != (retry != nil) {
+			t.Fatal("explicit unknown retry grant lost")
+		}
+	}
 }
 
 func readPrivateMessage(t *testing.T, in *os.File) any {

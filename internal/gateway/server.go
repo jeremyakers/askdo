@@ -297,6 +297,7 @@ func (s *Server) reap() {
 						session.adapter = nil
 						session.request = modelwire.ModelRequest{}
 						session.response = modelwire.ModelResponse{}
+						session.operation = nil
 					}
 					// Retain only the key until the original root deadline: an
 					// earlier resource expiry must not permit replay of turn one.

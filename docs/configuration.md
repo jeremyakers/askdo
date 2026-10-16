@@ -214,7 +214,7 @@ for the distinction between fixture checks and deployment evidence.
 | `models` | yes | — | Ordered fallback list. May be empty only with explicit `approval_only` or `required` plus nonempty `approval_only_users`; non-exempt/forced-review submitters then fail closed. Adding a model does not itself change `approval_only` policy. |
 | `request_timeout` | no | `"2m"` | Per-request provider timeout; Go duration > 0. |
 | `total_timeout` | no | `"20m"` | Whole-review budget across all fallback choices; > 0 and ≥ `request_timeout`. Becomes the worker's `review_deadline_unix_ms`. |
-| `max_model_calls_per_attempt` | no | `32` | 1–128; bound on model turns per attempt. |
+| `max_model_calls_per_attempt` | no | `32` | 1–128; bound on physical model calls per choice, including failed calls and retries, not just successful conversation turns. |
 | `max_output_tokens` | no | `8192` | 1–200000; bound on tokens per model response. |
 
 Auto-approval requires an administrator grant and a submitter preference. The
@@ -277,10 +277,50 @@ inspectable content — there are no per-file or per-provider permissions. The
 list order is the fallback order. Without `--review=yes`, only exhaustion
 of typed provider availability failures can offer a **NO AI REVIEW** Telegram
 approval instead of a report; safety refusal, malformed final review,
-broker/capture/changed-evidence failures, and elapsed deadlines fail closed.
+broker/capture/changed-evidence failures, and elapsed deadlines without a complete
+typed availability history fail closed. An actual final provider timeout retains
+its availability type even when the review budget expires; client cancellation
+and the client's pre-dispatch deadline still take precedence.
 `--review=yes` requires a completed AI review and fails if no model is
 configured or every choice is unavailable. **NO AI REVIEW** never qualifies
 for auto-approval.
+
+Transient provider network/read failures, per-request timeouts, HTTP 408/5xx,
+and temporary HTTP 429 rate limits retry the **same failed conversation** before
+advancing the ordered fallback list. Backoff starts at 250 ms and doubles up to
+one second; a provider's `Retry-After` minimum (seconds or HTTP date) is never
+shortened. Retries use remaining call slots and the original whole-review/client
+deadline, with the existing timeout on each physical request. There is no new
+retry-count setting or hidden adapter retry. Completed tool results are reused;
+tools and privileged operations are not replayed. Explicit hard quota codes,
+invalid credentials/configuration, and Codex re-login requirements do not retry;
+safety refusal still stops without shopping for another model.
+
+Fleet retries use optional `retry_transient` requests and signed, secret-free
+`retry.after_ms` results, with a new sequence for each counted upstream attempt.
+Requests without the extension retain the original terminal-on-error behavior.
+Older strict peers reject the new extension: update the gateway before deploying
+the matching broker/reviewer binaries. This adds no startup negotiation or new
+configuration prerequisite. Root still enforces the frozen per-request HTTPS cap;
+the fleet reviewer waits on the unchanged whole-review/job deadline rather than
+racing root with a duplicate per-request timer. Direct reviewers retain their
+per-request timer.
+
+If **root's own request timer** expires before it verifies an outcome, its private
+pipe reports `request_timeout` (unknown outcome, **not** provider unavailability).
+Only an identical, charged next sequence can request `recover_previous`. The
+gateway cancels and joins any active predecessor before another upstream call;
+if the predecessor already completed successfully, it returns that cached response
+under the new sequence without re-running the provider or tools. Every recovery
+sequence conservatively consumes a call slot even when it only reconciles a cached
+outcome. A known provider `Retry-After` remains in force across recovery.
+
+Generic network, TLS, authentication, signature and protocol errors do not grant
+this recovery. Unknown-outcome exhaustion cannot authorize fallback models or
+**NO AI REVIEW** approval. Recovery cannot reconstruct a missing/restarted session
+or bypass its profile/binding, original expiry, cancellation, capacity, DropSession
+or terminal-failure tombstone. No new attempt, timeout margin or grace period is
+introduced.
 
 For all group members to submit without models, use this `review` excerpt
 alongside valid `inspection`, `limits`, and `telegram` sections:

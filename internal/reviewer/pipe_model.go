@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
@@ -19,6 +20,10 @@ type pipeModel struct {
 	maxOutputTokens int
 }
 
+// Only the private fleet model has this seam: root owns the HTTPS request cap.
+// Loop must not race it with another timer and abandon a correlated pipe result.
+func (*pipeModel) rootOwnsRequestTimeout() {}
+
 func (m *pipeModel) ChatTurn(ctx context.Context, request ModelRequest) (ModelResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return ModelResponse{}, context.Cause(ctx)
@@ -26,7 +31,7 @@ func (m *pipeModel) ChatTurn(ctx context.Context, request ModelRequest) (ModelRe
 	if request.Model != m.choice.Model || request.MaxOutputTokens < 1 || request.MaxOutputTokens > m.maxOutputTokens {
 		return ModelResponse{}, errors.New("pipe model request differs from frozen choice or token bound")
 	}
-	result, err := m.broker.modelTurn(ctx, proto.ModelTurnRequest{Type: "model_turn_request", ChoiceName: m.choice.Name, Request: request})
+	result, err := m.broker.modelTurn(ctx, proto.ModelTurnRequest{Type: "model_turn_request", ChoiceName: m.choice.Name, Request: request, RetryTransient: true})
 	if err != nil {
 		return ModelResponse{}, err
 	}
@@ -50,6 +55,11 @@ func (e *pipeAvailabilityError) Unwrap() []error { return []error{e.failure, e.c
 func modelFailureError(f *proto.ModelFailure) error {
 	var category error
 	switch f.Code {
+	case proto.ModelRequestTimeout:
+		if f.Retry != nil {
+			return &modelwire.TransientError{Cause: f, After: time.Duration(f.Retry.AfterMS) * time.Millisecond}
+		}
+		return f
 	case proto.ModelUpstreamQuotaRate:
 		category = ErrQuotaRate
 	case proto.ModelUpstreamTransport:
@@ -65,7 +75,11 @@ func modelFailureError(f *proto.ModelFailure) error {
 	default:
 		return f
 	}
-	return &pipeAvailabilityError{failure: f, category: category}
+	failure := &pipeAvailabilityError{failure: f, category: category}
+	if f.Retry != nil {
+		return &modelwire.TransientError{Cause: failure, After: time.Duration(f.Retry.AfterMS) * time.Millisecond}
+	}
+	return failure
 }
 
 func (c *asyncBroker) closeModelWaiters() {

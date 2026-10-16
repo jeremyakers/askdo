@@ -110,5 +110,8 @@ func CheckModelResult(result ModelResult, frozen ModelTurn, now int64) error {
 	if result.Binding != frozen.Binding {
 		return ErrBinding
 	}
+	if result.Retry != nil && !frozen.RetryTransient {
+		return ErrBinding
+	}
 	return nil
 }

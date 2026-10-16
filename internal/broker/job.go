@@ -1107,6 +1107,13 @@ func (j *jobRuntime) receiveReviewOutcome(ctx context.Context, session WorkerSes
 // Preflight failures are broker-owned and inserted back in configured order.
 func (j *jobRuntime) validUnavailableHistory(history []proto.AvailabilityFailure) bool {
 	if j.fleet != nil {
+		f := j.fleet
+		if f.unknown != nil {
+			return false
+		}
+		if f.retryFailure != nil && len(history) == len(j.models) && len(history) == len(f.failures)+1 && slices.Equal(history[:len(f.failures)], f.failures) && history[len(f.failures)] == *f.retryFailure {
+			f.finishRetryFailure()
+		}
 		return len(history) == len(j.models) && len(history) != 0 && slices.Equal(history, j.fleet.failures)
 	}
 	if len(history) != len(j.preflightFailures)+len(j.models) || len(j.models) == 0 {

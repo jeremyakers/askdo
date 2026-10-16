@@ -60,16 +60,18 @@ func TestCodexFactoryRetainsReasoningOnlyWithinAttempt(t *testing.T) {
 		hit := sessions[id]
 		mu.Unlock()
 		reasoning := false
+		reasoningItems := 0
 		for _, raw := range body.Input {
 			if strings.Contains(string(raw), "opaque-fixture") {
 				reasoning = true
+				reasoningItems++
 			}
 		}
 		if hit == 1 && reasoning {
 			t.Error("reasoning leaked across sessions")
 		}
 		if hit == 2 {
-			if !reasoning {
+			if !reasoning || reasoningItems != 1 {
 				t.Error("reasoning lost")
 			}
 			mu.Lock()
@@ -113,11 +115,18 @@ func TestCodexFactoryRetainsReasoningOnlyWithinAttempt(t *testing.T) {
 	}
 	turn.Binding.ProfileRevision = metadata.Revision
 	turn.Request.Messages[0].Content = "fixture-evidence-not-persisted"
+	turn.RetryTransient = true
 	first := service.modelTurn(context.Background(), host, turn, false)
 	if first.Response == nil {
 		t.Fatal(first)
 	}
 	turn.Binding.Turn = 2
+	turn.RecoverPrevious = true
+	if adopted := service.modelTurn(context.Background(), host, turn, false); adopted.Response == nil || len(adopted.Response.ToolCalls) != 1 || adopted.Response.ToolCalls[0].ID != "call_exact" {
+		t.Fatal("cached Codex outcome not adopted", adopted)
+	}
+	turn.Binding.Turn = 3
+	turn.RecoverPrevious = false
 	turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", ToolCalls: first.Response.ToolCalls}, modelwire.Message{Role: "tool", ToolCallID: "call_exact", Content: "result"})
 	if second := service.modelTurn(context.Background(), host, turn, false); second.Response == nil || second.Response.Content != "done" {
 		t.Fatal(second)
