@@ -3,10 +3,14 @@ package providers
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,6 +80,68 @@ func TestProviderRejectedRedirectAdvancesWithoutRetry(t *testing.T) {
 			}
 			if len(history) != 2 || history[0].Name != "rejected" || history[0].Outcome != "api_error" || history[0].Error != "connection unavailable" || history[1].Name != "fallback" || history[1].Outcome != "ok" {
 				t.Fatalf("transport/fallback taxonomy changed: %+v", history)
+			}
+		})
+	}
+}
+
+func TestProviderUntrustedTLSAdvancesWithoutRetry(t *testing.T) {
+	// Given a real TLS peer whose CA is not trusted, when the actual review loop
+	// selects it, then verification fails once and the next frozen provider can
+	// review without wasting retry slots on the same trust failure.
+	var handshakes, rejectedRequests, fallbackCalls atomic.Int32
+	bad := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { rejectedRequests.Add(1) }))
+	bad.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			handshakes.Add(1)
+		}
+	}
+	bad.StartTLS()
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"tool_calls": []chatToolCall{marshalChatToolCall(reviewer.ToolCall{ID: "submit", Name: "submit_review", Arguments: json.RawMessage(codexFixtureReportArgs)})}}}}})
+	}))
+	defer good.Close()
+	boot := proto.Bootstrap{Operation: proto.WorkerOperation{Mode: "argv", Argv: []string{"/unused"}}, ReviewDeadlineUnixMS: time.Now().Add(10 * time.Second).UnixMilli(), ConfigProjection: proto.ConfigProjection{Models: []proto.ProjectedModel{
+		{Name: "untrusted", API: "openai_chat", BaseURL: bad.URL, Model: "fixture", RequestTimeoutMS: 1000},
+		{Name: "fallback", API: "openai_chat", BaseURL: good.URL, Model: "fixture", RequestTimeoutMS: 1000},
+	}, Limits: proto.WorkerLimits{MaxModelCallsPerAttempt: 3, MaxOutputTokens: 100}}}
+	pipe := &redirectReviewPipe{}
+	review, history, err := reviewer.RunWithFallback(context.Background(), boot, pipe, ModelFactory())
+	if err != nil || review.Report.Risk != "1" || pipe.review.Report.Risk != "1" {
+		t.Fatalf("fallback did not review: %v", err)
+	}
+	if handshakes.Load() != 1 || rejectedRequests.Load() != 0 || fallbackCalls.Load() != 1 {
+		t.Fatalf("trust rejection retried or bypassed: handshakes=%d rejected_requests=%d fallback=%d", handshakes.Load(), rejectedRequests.Load(), fallbackCalls.Load())
+	}
+	if len(history) != 2 || history[0].Name != "untrusted" || history[0].Error != "connection unavailable" || history[1].Name != "fallback" || history[1].Outcome != "ok" {
+		t.Fatalf("transport/fallback taxonomy changed: %+v", history)
+	}
+}
+
+func TestProviderTypedCertificateErrorsAreNotTransient(t *testing.T) {
+	// The URL wrapper is what net/http returns. Inspect typed causes, not error
+	// prose, and retain ordinary DNS failures as retryable transport errors.
+	for _, tc := range []struct {
+		name  string
+		cause error
+		retry bool
+	}{
+		{"tls_verification", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, false},
+		{"unknown_authority", x509.UnknownAuthorityError{}, false},
+		{"hostname", x509.HostnameError{Certificate: &x509.Certificate{DNSNames: []string{"fixture.invalid"}}, Host: "other.invalid"}, false},
+		{"expired", x509.CertificateInvalidError{Cert: &x509.Certificate{}, Reason: x509.Expired}, false},
+		{"dns_not_found", &net.DNSError{Name: "fixture.invalid", Err: "no such host", IsNotFound: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyRequestError(&url.Error{Op: "Post", URL: "https://fixture.invalid/private?key=fixture-secret", Err: tc.cause}, "fixture-secret")
+			_, retry := modelwire.RetryDelay(err, 0)
+			if !errors.Is(err, ErrTransport) || retry != tc.retry {
+				t.Fatalf("typed transport classification changed: retry=%v err=%v", retry, err)
+			}
+			if strings.Contains(err.Error(), "fixture-secret") {
+				t.Fatal("credential escaped normalized diagnostic")
 			}
 		})
 	}

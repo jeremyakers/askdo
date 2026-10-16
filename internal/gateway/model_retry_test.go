@@ -110,6 +110,132 @@ func TestModelTransientRetrySignedSequence(t *testing.T) {
 	}
 }
 
+func TestModelOrdinaryRetryEnforcesMinimum(t *testing.T) {
+	for _, limited := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default_backoff", true: "retry_after"}[limited], func(t *testing.T) {
+			// An ordinary immediate next sequence must wait at the gateway too,
+			// even if the worker ignored the minimum in the signed failure.
+			minimum := 250 * time.Millisecond
+			if limited {
+				minimum = time.Second
+			}
+			contacted := make(chan time.Time, 3)
+			var calls atomic.Int32
+			service, host, turn, _, bearer := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				contacted <- time.Now()
+				if calls.Add(1) == 1 {
+					if limited {
+						w.Header().Set("Retry-After", "1")
+						w.WriteHeader(429)
+					} else {
+						w.WriteHeader(503)
+					}
+					return
+				}
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"valid"}}]}`))
+			}), 2*time.Second, 1)
+			server := httptest.NewTLSServer(service.Handler())
+			defer server.Close()
+			send := func() fleetproto.ModelResult {
+				t.Helper()
+				wire, err := json.Marshal(turn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/model-turns", bytes.NewReader(wire))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("X-Askdo-Host", host.HostID)
+				req.Header.Set("Authorization", "Bearer "+bearer)
+				req.Header.Set("X-Askdo-Local-Only", "true")
+				resp, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				wire, err = io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, _, err := fleetproto.Verify[fleetproto.ModelResult](service.key.Public().(ed25519.PublicKey), wire)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got
+			}
+			turn.RetryTransient = true
+			first := send()
+			if first.Retry == nil || first.Retry.AfterMS != minimum.Milliseconds() {
+				t.Fatalf("missing promised minimum: %+v", first)
+			}
+			firstContact := <-contacted
+			turn.Binding.Turn++
+			second := send()
+			if second.Response == nil {
+				t.Fatalf("retry failed: %+v", second)
+			}
+			if elapsed := (<-contacted).Sub(firstContact); elapsed < minimum {
+				t.Fatalf("ordinary retry contacted provider early: %s < %s", elapsed, minimum)
+			}
+			// Valid successful continuations remain permitted without another
+			// retry wait or conversation reset.
+			turn.Binding.Turn++
+			turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", Content: second.Response.Content})
+			if third := send(); third.Response == nil || calls.Load() != 3 {
+				t.Fatalf("successful continuation failed: %+v calls=%d", third, calls.Load())
+			}
+		})
+	}
+}
+
+func TestModelOrdinaryRetryCanceledWaitPreservesKnownOutcome(t *testing.T) {
+	// Given an ordinary early retry, when its wait expires without contacting
+	// the provider, then recovery retains the known failure/minimum/count rather
+	// than fabricating a new physical timeout or shortening the absolute delay.
+	contacted := make(chan time.Time, 3)
+	var calls atomic.Int32
+	service, host, turn, _, _ := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		contacted <- time.Now()
+		switch calls.Add(1) {
+		case 1:
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(429)
+		case 2:
+			w.WriteHeader(503)
+		default:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"recovered"}}]}`))
+		}
+	}), 2*time.Second, 1)
+	turn.RetryTransient = true
+	first := service.modelTurn(context.Background(), host, turn, true)
+	if first.Retry == nil || first.Retry.AfterMS != 1000 {
+		t.Fatalf("missing minimum: %+v", first)
+	}
+	firstContact := <-contacted
+	turn.Binding.Turn++
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	waited := service.modelTurn(ctx, host, turn, true)
+	if ctx.Err() != context.DeadlineExceeded || waited.Response != nil || waited.Failure == nil || waited.Failure.Code != fleetproto.ErrCodeUpstreamQuota || waited.Retry == nil || calls.Load() != 1 {
+		t.Fatalf("canceled wait changed known outcome or contacted provider: %+v calls=%d", waited, calls.Load())
+	}
+	turn.Binding.Turn++
+	turn.RecoverPrevious = true
+	recovered := service.modelTurn(context.Background(), host, turn, true)
+	if recovered.Retry == nil || recovered.Retry.AfterMS != 500 || calls.Load() != 2 {
+		t.Fatalf("no-contact wait changed physical-failure count: %+v calls=%d", recovered, calls.Load())
+	}
+	if elapsed := (<-contacted).Sub(firstContact); elapsed < time.Second {
+		t.Fatalf("canceled ordinary wait shortened original minimum: %s", elapsed)
+	}
+	turn.Binding.Turn++
+	turn.RecoverPrevious = false
+	if got := service.modelTurn(context.Background(), host, turn, true); got.Response == nil || calls.Load() != 3 {
+		t.Fatalf("following bounded ordinary retry did not recover: %+v calls=%d", got, calls.Load())
+	}
+}
+
 func TestModelFinalRetryFailureKeepsInitialTombstone(t *testing.T) {
 	// Given one allowed retry slot followed by a final failure, when any earlier
 	// or later sequence is replayed, then the original session remains dead.
@@ -159,6 +285,11 @@ func TestModelProviderTimeoutCanRetryAtNextSequence(t *testing.T) {
 	if first.Failure == nil || first.Failure.Code != fleetproto.ErrCodeUpstreamTimeout || first.Retry == nil {
 		t.Fatalf("timeout=%+v", first)
 	}
+	// Like the real Loop, wait the advertised delay before starting another
+	// 60ms request; gateway enforcement must not widen that per-request cap.
+	delay := time.NewTimer(time.Duration(first.Retry.AfterMS) * time.Millisecond)
+	defer delay.Stop()
+	<-delay.C
 	turn.Binding.Turn++
 	turn.RetryTransient = false
 	second := service.modelTurn(context.Background(), host, turn, true)

@@ -158,6 +158,9 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 	operation := &modelOperation{turn: b.Turn, request: turn.Request, granted: turn.RetryTransient, cancel: cancel, done: make(chan struct{})}
 	if previous != nil && !turn.RecoverPrevious {
 		operation.failures = previous.failures
+		if previous.result.Response == nil {
+			operation.retryAt = previous.retryAt
+		}
 	}
 	session.operation = operation
 	adapter := session.adapter
@@ -185,26 +188,33 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 				result.Binding = b
 				result.Retry = nil
 				resolved = true
-			} else if wait := time.Until(previous.retryAt); wait > 0 {
-				timer := time.NewTimer(wait)
-				select {
-				case <-timer.C:
-				case <-callCtx.Done():
-					// No upstream call was made in this sequence. Preserve the
-					// prior known provider failure, not an invented timeout, and
-					// keep its absolute minimum for any further recovery.
-					result = previous.result
-					result.Binding = b
-					if !turn.RetryTransient {
-						result.Retry = nil
-					}
-					resolved, waitCanceled = true, true
-				}
-				timer.Stop()
 			}
 		case <-callCtx.Done():
 			err = callCtx.Err()
 			joinCanceled = true
+		}
+	}
+	// Both ordinary retries and lost-outcome recovery enforce the predecessor's
+	// absolute minimum. An already-waited caller incurs no second delay, and a
+	// valid successful continuation has no failed-request minimum to wait for.
+	if !resolved && !joinCanceled {
+		if wait := time.Until(operation.retryAt); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-callCtx.Done():
+			}
+			timer.Stop()
+			if callCtx.Err() != nil {
+				// No upstream call was made in this sequence. Preserve the known
+				// failure, counter and absolute minimum, not an invented timeout.
+				result = previous.result
+				result.Binding = b
+				if !turn.RetryTransient {
+					result.Retry = nil
+				}
+				resolved, waitCanceled = true, true
+			}
 		}
 	}
 	var response modelwire.ModelResponse

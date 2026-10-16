@@ -3,6 +3,8 @@ package providers
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -177,6 +179,15 @@ func classifyRequestError(err error, credential string) error {
 	if errors.Is(err, errCrossOriginRedirect) || errors.Is(err, errRedirectLimit) {
 		// The existing redirect policy rejected this request deterministically;
 		// retain its transport category without repeating the same refusal.
+		return failure
+	}
+	var verification *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	if errors.As(err, &verification) || errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) {
+		// Verification already refused this peer. Retain the transport category
+		// without retrying a deterministic trust failure or changing TLS policy.
 		return failure
 	}
 	return &modelwire.TransientError{Cause: failure}
