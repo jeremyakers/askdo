@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 )
 
@@ -408,7 +409,11 @@ func (a *openAICodex) codexStreamFailure(kind string, data []byte) error {
 	if wantQuota(event.Code) || wantQuota(nested) || wantQuota(response) {
 		classification = ErrQuotaRate
 	}
-	return fmt.Errorf("%w: openai_codex %s: %s", classification, kind, providerDiagnostic(data, a.accessToken))
+	failure := fmt.Errorf("%w: openai_codex %s: %s", classification, kind, providerDiagnostic(data, a.accessToken))
+	if classification == ErrTransport || (classification == ErrQuotaRate && !hardQuotaCode(event.Code) && !hardQuotaCode(nested) && !hardQuotaCode(response)) {
+		return &modelwire.TransientError{Cause: failure}
+	}
+	return failure
 }
 
 // toResponse maps the assembled output items onto the reviewer ModelResponse
@@ -459,9 +464,9 @@ func (a *openAICodex) toResponse(items []json.RawMessage) (reviewer.ModelRespons
 // informational x-codex-* headers alone never widen the classification, so a
 // 401/5xx merely decorated with them keeps its shared mapping
 // (401/403/404 → ErrInvalidConfig, 5xx → ErrTransport).
-func classifyCodexStatus(status int, _ http.Header, body []byte, credential string) error {
-	if status == http.StatusTooManyRequests || strings.Contains(strings.ToLower(string(body)), "usage_limit_reached") {
+func classifyCodexStatus(status int, header http.Header, body []byte, credential string) error {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden && status != http.StatusNotFound && strings.Contains(strings.ToLower(string(body)), "usage_limit_reached") {
 		return fmt.Errorf("%w: status %d: %s", ErrQuotaRate, status, bodyExcerpt(body, credential))
 	}
-	return classifyStatus(status, body, credential)
+	return classifyHTTPStatus(status, header, body, credential)
 }

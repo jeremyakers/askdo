@@ -280,6 +280,12 @@ type ModelTurn struct {
 	Kind    Kind                   `json:"kind"`
 	Binding TurnBinding            `json:"binding"`
 	Request modelwire.ModelRequest `json:"request"`
+	// Opt-in only: old requests keep terminal-on-error session semantics. Root
+	// grants this only while another physical call fits its frozen call budget.
+	RetryTransient bool `json:"retry_transient,omitempty"`
+	// Root alone sets this after its request timer lost the previous outcome.
+	// It reconciles exactly the immediate predecessor, never a missing session.
+	RecoverPrevious bool `json:"recover_previous,omitempty"`
 }
 type ModelResult struct {
 	Version  int                      `json:"version"`
@@ -287,6 +293,7 @@ type ModelResult struct {
 	Binding  TurnBinding              `json:"binding"`
 	Response *modelwire.ModelResponse `json:"response,omitempty"`
 	Failure  *Failure                 `json:"failure,omitempty"`
+	Retry    *modelwire.Retry         `json:"retry,omitempty"`
 }
 type Envelope struct {
 	Payload   string `json:"payload"`

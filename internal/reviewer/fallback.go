@@ -74,7 +74,8 @@ func classifyModelError(err error) failureClass {
 }
 
 // UnavailableError is produced only after all choices failed for an
-// adapter-typed availability reason. It is not used for elapsed budgets.
+// adapter-typed availability reason. An elapsed budget alone never fabricates
+// availability, but cannot erase the last actual provider timeout either.
 type UnavailableError struct {
 	History []proto.AvailabilityFailure
 	Detail  []proto.ModelHistoryEntry
@@ -105,9 +106,9 @@ func availabilityCode(err error) proto.AvailabilityCode {
 }
 
 // Fallback drives the §7 whole-review fallback algorithm over the ordered
-// configured model choices. There are no retries, backoff, cooldowns, or
-// health tables: each job starts at the first choice, each choice gets one
-// fresh session, and only one session runs at a time.
+// configured model choices. Each choice gets one fresh session; Loop may retry
+// its transient failed calls within the existing physical-call and time budgets.
+// There are no cooldowns or health tables, and sessions never overlap.
 type Fallback struct {
 	Bootstrap proto.Bootstrap
 	Pipe      ReviewPipe
@@ -167,10 +168,11 @@ func (f *Fallback) Run(ctx context.Context) (proto.ReviewComplete, []proto.Model
 		if ctx.Err() != nil {
 			return proto.ReviewComplete{}, history, context.Cause(ctx)
 		}
-		if !now().Before(deadline) {
+		class := classifyModelError(err)
+		if !now().Before(deadline) && (class != classAvailability || len(typed)+1 != len(models)) {
 			return proto.ReviewComplete{}, history, errors.New("client wait deadline or total review budget expired during review")
 		}
-		switch classifyModelError(err) {
+		switch class {
 		case classAvailability:
 			// Log the actual error, close the session, try the next choice.
 			slog.Info("reviewer model choice failed; trying next choice", "model", choice.Name, "error", err)
@@ -187,9 +189,6 @@ func (f *Fallback) Run(ctx context.Context) (proto.ReviewComplete, []proto.Model
 			history = append(history, historyEntry(choice.Name, "invalid", err))
 			return proto.ReviewComplete{}, history, fmt.Errorf("review failed with model %q: %w", choice.Name, err)
 		}
-	}
-	if !now().Before(deadline) {
-		return proto.ReviewComplete{}, history, errors.New("client wait deadline or total review budget expired during review")
 	}
 	return proto.ReviewComplete{}, history, &UnavailableError{History: typed, Detail: history}
 }

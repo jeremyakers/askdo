@@ -27,11 +27,29 @@ type modelSession struct {
 	request    modelwire.ModelRequest
 	response   modelwire.ModelResponse
 	next       uint32
+	retrying   bool
+	failures   int
 	busy, dead bool
 	localOnly  bool
 	ctx        context.Context
 	cancel     context.CancelFunc
 	expires    time.Time
+	operation  *modelOperation
+}
+
+// One current operation also retains the last recoverable outcome. A successor
+// reserves ownership before cancel/join, so its predecessor cannot overwrite it.
+// Fields written at completion are read only under mu or after done closes.
+type modelOperation struct {
+	turn        uint32
+	request     modelwire.ModelRequest
+	granted     bool
+	cancel      context.CancelFunc
+	done        chan struct{}
+	adapter     reviewer.ModelTurn
+	result      fleetproto.ModelResult
+	recoverable bool
+	retryAt     time.Time
 }
 
 // DropSession releases conversation/adapter state but keeps a replay tombstone
@@ -47,6 +65,7 @@ func (s *Server) DropSession(host, job fleetproto.ID, attempt uint32) {
 			session.adapter = nil
 			session.request = modelwire.ModelRequest{}
 			session.response = modelwire.ModelResponse{}
+			session.operation = nil
 		}
 	}
 }
@@ -106,7 +125,7 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 	session := s.sessions[key]
 	if session == nil {
 		// Missing continuation is never reconstructed after restart or expiry.
-		if b.Turn != 1 || len(s.sessions) >= s.capacity {
+		if turn.RecoverPrevious || b.Turn != 1 || len(s.sessions) >= s.capacity {
 			s.mu.Unlock()
 			return fail(fleetproto.ErrCodeSession)
 		}
@@ -117,38 +136,106 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 	}
 	frozen := session.binding
 	frozen.Turn = b.Turn
-	if session.busy || session.dead || session.next != b.Turn || frozen != b || session.localOnly != localOnly || session.ctx.Err() != nil {
+	if (session.busy && !turn.RecoverPrevious) || session.dead || session.next != b.Turn || frozen != b || session.localOnly != localOnly || session.ctx.Err() != nil {
 		s.mu.Unlock()
 		return fail(fleetproto.ErrCodeSession)
 	}
-	if b.Turn > 1 && !continues(session, turn.Request) {
+	previous := session.operation
+	if turn.RecoverPrevious {
+		if previous == nil || !previous.granted || previous.turn+1 != b.Turn || !reflect.DeepEqual(previous.request, turn.Request) {
+			s.mu.Unlock()
+			return fail(fleetproto.ErrCodeSession)
+		}
+	} else if b.Turn > 1 && ((previous != nil && previous.result.Response == nil && previous.result.Retry == nil) || !continues(session, turn.Request)) {
 		s.mu.Unlock()
 		return fail(fleetproto.ErrCodeSession)
 	}
 	session.busy = true
-	s.mu.Unlock()
-	// Failure is terminal, retaining only a bounded tombstone until the original
-	// deadline; replay must not create a second upstream call.
+	session.next++ // Reserve before doing I/O, including a predecessor join.
 	callCtx, cancel := context.WithTimeout(session.ctx, profile.RequestTimeout.Value())
+	operation := &modelOperation{turn: b.Turn, request: turn.Request, granted: turn.RetryTransient, cancel: cancel, done: make(chan struct{})}
+	session.operation = operation
+	adapter := session.adapter
+	s.mu.Unlock()
+	// At most one upstream exchange per charged sequence (cached recovery: zero).
+	// A terminal failure retains a bounded
+	// tombstone. Only an opted-in transient result may retain the failed request
+	// for an identical retry at the NEXT sequence; replay never makes a call.
 	stop := context.AfterFunc(ctx, cancel)
 	defer func() { stop(); cancel() }()
-	adapter := session.adapter
-	if adapter == nil {
-		adapter, err = newAdapter(callCtx, profile)
+	resolved, joinCanceled, waitCanceled := false, false, false
+	if turn.RecoverPrevious {
+		previous.cancel()
+		select {
+		case <-previous.done:
+			adapter = previous.adapter
+			// A successor can itself lose its reply while waiting. Carry the
+			// known provider minimum forward even if this wait is canceled.
+			operation.retryAt = previous.retryAt
+			if previous.result.Response != nil || !previous.recoverable {
+				// A valid completed response is adopted, not recomputed. This also
+				// avoids appending Codex reasoning twice after a lost signed reply.
+				result = previous.result
+				result.Binding = b
+				result.Retry = nil
+				resolved = true
+			} else if wait := time.Until(previous.retryAt); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-callCtx.Done():
+					// No upstream call was made in this sequence. Preserve the
+					// prior known provider failure, not an invented timeout, and
+					// keep its absolute minimum for any further recovery.
+					result = previous.result
+					result.Binding = b
+					if !turn.RetryTransient {
+						result.Retry = nil
+					}
+					resolved, waitCanceled = true, true
+				}
+				timer.Stop()
+			}
+		case <-callCtx.Done():
+			err = callCtx.Err()
+			joinCanceled = true
+		}
 	}
 	var response modelwire.ModelResponse
-	if err == nil {
-		response, err = adapter.ChatTurn(callCtx, turn.Request)
+	transient, callerCanceled := waitCanceled, false
+	if !resolved {
+		if err == nil && adapter == nil {
+			adapter, err = newAdapter(callCtx, profile)
+		}
+		if err == nil {
+			response, err = adapter.ChatTurn(callCtx, turn.Request)
+		}
+		result.Response = &response
+		if err != nil {
+			result.Response = nil
+			result.Failure = &fleetproto.Failure{Code: providerCode(err)}
+			if joinCanceled {
+				// The predecessor did not finish: no provider outcome was
+				// established and no new call was made. Never invent availability.
+				result.Failure.Code = fleetproto.ErrCodeSession
+			}
+			callerCanceled = errors.Is(err, context.Canceled)
+			delay, retry := modelwire.RetryDelay(err, session.failures)
+			transient = retry
+			if retry {
+				operation.retryAt = time.Now().Add(delay)
+			}
+			if retry && turn.RetryTransient && b.Turn < 128 && operation.retryAt.Before(time.Unix(b.Deadline, 0)) {
+				afterMS := delay.Milliseconds()
+				// Never round a provider minimum down on the wire.
+				if delay%time.Millisecond != 0 {
+					afterMS++
+				}
+				result.Retry = &modelwire.Retry{AfterMS: afterMS}
+			}
+		}
 	}
-	if err == nil && callCtx.Err() != nil {
-		err = callCtx.Err()
-	}
-	result.Response = &response
-	if err != nil {
-		result.Response = nil
-		result.Failure = &fleetproto.Failure{Code: providerCode(err)}
-	}
-	if err == nil {
+	if result.Response != nil {
 		var delivered fleetproto.ModelResult
 		delivered, err = normalizeModelPayload(result)
 		if err != nil {
@@ -163,26 +250,40 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 		s.beforeModelCompletion()
 	}
 	s.mu.Lock()
-	session.busy = false
-	session.next++
 	// A submit_review tool name is not a lifecycle signal: the reviewer may
 	// reject its report or require another turn after captured-input results.
 	// Authoritative root freeze/ticket handlers release through DropSession.
 	if session.dead || session.ctx.Err() != nil {
 		result.Response = nil
 		result.Failure = &fleetproto.Failure{Code: fleetproto.ErrCodeSession}
+		result.Retry = nil
 	}
-	if err != nil || s.ctx.Err() != nil || ctx.Err() != nil || session.dead || session.ctx.Err() != nil {
-		session.dead = true
-		session.cancel()
-		session.adapter = nil
-		session.request = modelwire.ModelRequest{}
-		session.response = modelwire.ModelResponse{}
-	} else {
-		session.adapter = adapter
-		session.request = turn.Request
-		session.response = response
+	operation.result = result
+	operation.adapter = adapter
+	operation.recoverable = !joinCanceled && turn.RetryTransient && (result.Response != nil || transient || callerCanceled) && !session.dead && session.ctx.Err() == nil && s.ctx.Err() == nil
+	if session.operation == operation {
+		session.busy = false
+		if (!operation.recoverable && result.Response == nil) || joinCanceled || s.ctx.Err() != nil || session.dead || session.ctx.Err() != nil || (ctx.Err() != nil && !turn.RetryTransient) {
+			result.Retry = nil
+			session.dead = true
+			session.cancel()
+			session.adapter = nil
+			session.request = modelwire.ModelRequest{}
+			session.response = modelwire.ModelResponse{}
+			session.operation = nil
+		} else {
+			session.adapter = adapter
+			session.request = turn.Request
+			session.response = response
+			session.retrying = result.Retry != nil
+			if session.retrying {
+				session.failures++
+			} else {
+				session.failures = 0
+			}
+		}
 	}
+	close(operation.done)
 	s.mu.Unlock()
 	return result
 }
@@ -198,6 +299,9 @@ func normalizeModelPayload[T fleetproto.Payload](value T) (T, error) {
 
 func continues(session *modelSession, next modelwire.ModelRequest) bool {
 	old := session.request
+	if session.retrying {
+		return reflect.DeepEqual(old, next)
+	}
 	if next.Model != old.Model || next.MaxOutputTokens != old.MaxOutputTokens || !reflect.DeepEqual(next.Tools, old.Tools) || len(next.Messages) <= len(old.Messages) || !reflect.DeepEqual(next.Messages[:len(old.Messages)], old.Messages) {
 		return false
 	}

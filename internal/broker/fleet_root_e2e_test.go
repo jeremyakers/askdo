@@ -57,6 +57,7 @@ type rootFleetFixture struct {
 	statuses          []int
 	modelResponseHeld chan struct{}
 	providerRequests  [][]byte
+	modelTurns        [][]byte
 	hostConfigFile    string
 	originalBundle    string
 	canary            string // disposable enrollment bearer; never printed
@@ -73,18 +74,19 @@ func (w *rootFixtureStatusWriter) WriteHeader(status int) {
 }
 
 type rootFleetOptions struct {
-	providerHandler       http.Handler
-	configure             func(*config.Config)
-	socketPath            string
-	foreground            bool
-	maxRisk               int
-	profileTimeout        time.Duration
-	holdModelResponse     bool
-	hostOutputTokens      int
-	originalBundle        bool
-	protectOriginalBundle bool
-	profileCondition      string
-	exemptRoot            bool
+	providerHandler        http.Handler
+	configure              func(*config.Config)
+	socketPath             string
+	foreground             bool
+	maxRisk                int
+	profileTimeout         time.Duration
+	holdModelResponse      bool
+	holdFirstModelResponse bool
+	hostOutputTokens       int
+	originalBundle         bool
+	protectOriginalBundle  bool
+	profileCondition       string
+	exemptRoot             bool
 }
 
 func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unreviewed bool, options ...rootFleetOptions) *rootFleetFixture {
@@ -188,6 +190,17 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 			f.puts = append(f.puts, append([]byte(nil), data...))
 			f.mu.Unlock()
 		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/model-turns" {
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(data))
+			f.mu.Lock()
+			f.modelTurns = append(f.modelTurns, append([]byte(nil), data...))
+			f.mu.Unlock()
+		}
 		if f.offline.Load() {
 			select {
 			case f.lost <- struct{}{}:
@@ -201,9 +214,11 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 			http.Error(w, "fixture starting", 503)
 			return
 		}
-		if opts.holdModelResponse && r.URL.Path == "/v1/model-turns" {
+		hold := opts.holdModelResponse || (opts.holdFirstModelResponse && f.modelRequests.Load() == 1)
+		if hold && r.URL.Path == "/v1/model-turns" {
 			// A transport fixture holds an actual production-handler signed result;
 			// root must bound the HTTPS wait independently of provider completion.
+			// holdFirstModelResponse loses only the first signed success.
 			response := httptest.NewRecorder()
 			s.Handler().ServeHTTP(response, r)
 			f.modelResponseHeld <- struct{}{}
@@ -514,7 +529,14 @@ func TestRootFleetTurnUsesFrozenChoiceTimeout(t *testing.T) {
 		t.Fatalf("frozen rounded profile projection: %+v", models)
 	}
 	_, request := fleetTurnFixture()
-	s, err := (protocolWorker{run: func(_ context.Context, c net.Conn) error { _, err := readWorker(c, proto.BrokerToWorker); return err }}).Start(context.Background())
+	outcome := make(chan *proto.ModelTurnResult, 1)
+	s, err := (protocolWorker{run: func(_ context.Context, c net.Conn) error {
+		message, err := readWorker(c, proto.BrokerToWorker)
+		if result, ok := message.(*proto.ModelTurnResult); ok {
+			outcome <- result
+		}
+		return err
+	}}).Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,13 +553,161 @@ func TestRootFleetTurnUsesFrozenChoiceTimeout(t *testing.T) {
 	// signed response is held in HTTPS, then root must cancel at the choice cap.
 	select {
 	case err := <-finished:
-		if err == nil {
-			t.Fatal("held HTTPS response unexpectedly succeeded")
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Logf("root HTTPS wait honored frozen %dms choice below global %s: %v", models[0].RequestTimeoutMS, j.daemon.cfg.Review.RequestTimeout.Value(), err)
+		select {
+		case result := <-outcome:
+			if result.Failure == nil || result.Failure.Code != proto.ModelRequestTimeout || result.Response != nil {
+				t.Fatalf("held HTTPS result was not an unknown local timeout: %+v", result)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("root did not report the bounded request outcome")
+		}
+		t.Logf("root HTTPS wait honored frozen %dms choice below global %s with unknown outcome, not fabricated provider availability", models[0].RequestTimeoutMS, j.daemon.cfg.Review.RequestTimeout.Value())
 	case <-time.After(2 * time.Second):
 		t.Fatal("root HTTPS wait outlasted the frozen choice timeout")
 	}
+}
+
+// A signed successful model result lost inside HTTPS is an unknown outcome,
+// never a failed choice: the actual reviewer child retries the identical turn,
+// root charges recover_previous at the next sequence, the gateway adopts its
+// cached signed result with zero new provider calls, and the recovered review
+// still gates exactly one human-approved root dispatch.
+func TestRootFleetHeldSignedSuccessRecoversPrevious(t *testing.T) {
+	requireRootTest(t)
+	f := newRootFleetFixture(t, buildFleetReviewer(t), "1", false, true, false, rootFleetOptions{profileTimeout: 500 * time.Millisecond, holdFirstModelResponse: true})
+	id := reserveForTest(t, f.broker.socket, 0)
+	request := capturedRequest(id, "/usr/bin/id -u\n")
+	conn, err := net.Dial("unix", f.broker.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sendFrame(t, conn, request)
+	readFrame(t, conn)
+	// The signed read_path result is computed but held inside HTTPS until the
+	// frozen one-second root choice cancels the exchange.
+	select {
+	case <-f.modelResponseHeld:
+	case <-time.After(15 * time.Second):
+		t.Fatal("signed first model result never reached the hold gate")
+	}
+	// Poll durable state directly: the retry/recover round trip legitimately
+	// outlives the two-second per-frame deadline readFrame enforces.
+	poll := func(states ...store.State) store.Job {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			job, err := f.broker.daemon.store.GetJob(context.Background(), 0, id)
+			if err == nil {
+				for _, state := range states {
+					if job.State == state {
+						return job
+					}
+				}
+			}
+			if time.Now().After(deadline) {
+				return job
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	job := poll(store.StateAwaitingHuman, store.StateFailed)
+	if job.State != store.StateAwaitingHuman {
+		log, _ := os.ReadFile(filepath.Join(job.SpoolDir, "reviewer-stderr.log"))
+		t.Fatalf("held signed success was not recovered: state=%s worker=%s", job.State, log)
+	}
+	// Three charged network turns (initial, recover_previous, next tool turn)
+	// but only two physical provider exchanges: cached recovery adds none.
+	if got := f.modelRequests.Load(); got != 3 {
+		t.Fatalf("network model turns=%d, want 3 charged (recover included)", got)
+	}
+	f.mu.Lock()
+	turns := append([][]byte(nil), f.modelTurns...)
+	requests := append([][]byte(nil), f.providerRequests...)
+	f.mu.Unlock()
+	if len(turns) != 3 {
+		t.Fatalf("recorded model turns=%d, want 3", len(turns))
+	}
+	if len(requests) != 2 {
+		t.Fatalf("physical provider calls=%d, want 2", len(requests))
+	}
+	var frozen fleetproto.TurnBinding
+	for i, raw := range turns {
+		var turn fleetproto.ModelTurn
+		if err := json.Unmarshal(raw, &turn); err != nil {
+			t.Fatalf("decode model turn %d: %v", i+1, err)
+		}
+		if turn.Binding.Attempt != 1 || turn.Binding.Turn != uint32(i+1) || turn.Binding.JobID != fleetproto.ID(id) {
+			t.Fatalf("turn %d not the frozen attempt sequence: %+v", i+1, turn.Binding)
+		}
+		b := turn.Binding
+		b.Turn = 0
+		if i == 0 {
+			frozen = b
+		} else if b != frozen {
+			t.Fatalf("turn %d changed the frozen binding: %+v vs %+v", i+1, b, frozen)
+		}
+		if turn.RecoverPrevious != (i == 1) {
+			t.Fatalf("turn %d recover_previous=%t, want %t", i+1, turn.RecoverPrevious, i == 1)
+		}
+	}
+	// The captured bundle stdin was read exactly once before submit_review.
+	var secondTurn struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(requests[1], &secondTurn); err != nil {
+		t.Fatal(err)
+	}
+	toolResults := 0
+	for _, m := range secondTurn.Messages {
+		if m.Role == "tool" {
+			toolResults++
+		}
+	}
+	if toolResults != 1 {
+		t.Fatalf("captured input read %d times, want exactly one", toolResults)
+	}
+	card, ok := f.bot.Card()
+	if !ok {
+		t.Fatal("human card missing after recovered review")
+	}
+	f.bot.QueueCallback(1, "held-recover", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
+	job = poll(store.StateFinished, store.StateFailed)
+	if job.State != store.StateFinished {
+		t.Fatalf("approved dispatch state=%s", job.State)
+	}
+	output, err := os.ReadFile(filepath.Join(job.SpoolDir, "stdout.log"))
+	if err != nil || !bytes.Equal(output, []byte("0\n")) {
+		t.Fatalf("root dispatch did not run exactly once: %q %v", output, err)
+	}
+	data, err := os.ReadFile(filepath.Join(job.SpoolDir, "fleet-submission.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sub fleetproto.TicketSubmission
+	if err := json.Unmarshal(data, &sub); err != nil {
+		t.Fatal(err)
+	}
+	if sub.Ticket.Display.Report == nil || sub.Ticket.Display.Report.Risk != "1" || sub.Ticket.Display.UnreviewedReason != "" {
+		t.Fatal("recovered review did not complete with a full AI report")
+	}
+	var audit struct {
+		FleetEvents [][]byte `json:"fleet_events"`
+	}
+	if json.Unmarshal(job.ApprovalJSON, &audit) != nil || len(audit.FleetEvents) != 2 {
+		t.Fatal("complete signed human audit missing")
+	}
+	for _, envelope := range audit.FleetEvents {
+		if _, _, err := fleetproto.Verify[fleetproto.Event](f.publicKey, envelope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Logf("held signed success recovered: network_turns=3 physical_provider_calls=2 captured_reads=1 frozen_attempt_deadline=true report=AI risk=1 root_uid_output=%q", output)
 }
 
 func TestRootFleetEvidenceCancelAndLocalRestart(t *testing.T) {

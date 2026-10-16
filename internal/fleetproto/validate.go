@@ -328,6 +328,9 @@ func Validate[T Payload](value T) error {
 		if err := turnBinding(v.Binding); err != nil {
 			return err
 		}
+		if v.Retry != nil && (v.Failure == nil || !v.Retry.Valid() || (v.Failure.Code != ErrCodeUpstreamTransport && v.Failure.Code != ErrCodeUpstreamTimeout && v.Failure.Code != ErrCodeUpstreamQuota)) {
+			return ErrProtocol
+		}
 		if v.Response != nil && v.Failure == nil {
 			return response(*v.Response)
 		}

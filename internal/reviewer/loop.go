@@ -115,16 +115,37 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 	// The webfetch tool is only ever offered when the root-owned config
 	// projected it; submit_review stays terminal either way.
 	tools := DefinitionsForCapabilities(l.Bootstrap.ConfigProjection.Limits.InspectionCaps, l.Bootstrap.ConfigProjection.Limits.WebfetchEnabled)
+	consecutiveFailures := 0
+	// The limit counts physical model attempts, including failed/ambiguous HTTP
+	// exchanges. A retry consumes the next slot without appending any messages or
+	// executing tools. Each exchange retains its per-request timeout; the total
+	// deadline above never moves.
 	for turn := 0; turn < maxCalls; turn++ {
 		if !now().Before(deadline) {
 			return proto.ReviewComplete{}, context.DeadlineExceeded
 		}
-		requestCtx, requestCancel := context.WithTimeout(ctx, time.Duration(choice.RequestTimeoutMS)*time.Millisecond)
+		requestCtx, requestCancel := ctx, func() {}
+		if _, rootOwned := l.Model.(interface{ rootOwnsRequestTimeout() }); !rootOwned {
+			requestCtx, requestCancel = context.WithTimeout(ctx, time.Duration(choice.RequestTimeoutMS)*time.Millisecond)
+		}
 		response, callErr := l.Model.ChatTurn(requestCtx, ModelRequest{Model: choice.Model, Messages: append([]Message{}, messages...), Tools: tools, MaxOutputTokens: l.Bootstrap.ConfigProjection.Limits.MaxOutputTokens})
 		requestCancel()
 		if callErr != nil {
-			return proto.ReviewComplete{}, callErr
+			delay, retry := modelwire.RetryDelay(callErr, consecutiveFailures)
+			if !retry || turn+1 >= maxCalls || !now().Add(delay).Before(deadline) {
+				return proto.ReviewComplete{}, callErr
+			}
+			consecutiveFailures++
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return proto.ReviewComplete{}, context.Cause(ctx)
+			case <-timer.C:
+			}
+			continue
 		}
+		consecutiveFailures = 0
 		// This successful ChatTurn included the preceding batch's tool results
 		// in its request. Reads issued by the response below are not yet visible
 		// to the model and must not qualify a same-batch submit_review.

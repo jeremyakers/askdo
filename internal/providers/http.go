@@ -10,10 +10,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/diagnostic"
+	"github.com/jeremyakers/askdo/internal/modelwire"
 )
 
 // maxResponseBodyBytes is the fixed provider HTTP response body cap from
@@ -84,7 +86,7 @@ func (c *boundedClient) postJSON(ctx context.Context, endpoint string, payload a
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, classifyStatus(resp.StatusCode, body, c.credential)
+		return nil, classifyHTTPStatus(resp.StatusCode, resp.Header, body, c.credential)
 	}
 	return body, nil
 }
@@ -112,7 +114,7 @@ func (c *boundedClient) get(ctx context.Context, endpoint string, authorize func
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, classifyStatus(resp.StatusCode, body, c.credential)
+		return nil, classifyHTTPStatus(resp.StatusCode, resp.Header, body, c.credential)
 	}
 	return body, nil
 }
@@ -164,12 +166,12 @@ func (c *boundedClient) classifyRequestError(err error) error {
 
 func classifyRequestError(err error, credential string) error {
 	if errors.Is(err, context.DeadlineExceeded) || isNetTimeout(err) {
-		return fmt.Errorf("%w: %s", ErrTimeout, normalizeDiagnostic(err.Error(), credential))
+		return &modelwire.TransientError{Cause: fmt.Errorf("%w: %s", ErrTimeout, normalizeDiagnostic(err.Error(), credential))}
 	}
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
-	return fmt.Errorf("%w: %s", ErrTransport, normalizeDiagnostic(err.Error(), credential))
+	return &modelwire.TransientError{Cause: fmt.Errorf("%w: %s", ErrTransport, normalizeDiagnostic(err.Error(), credential))}
 }
 
 func isNetTimeout(err error) bool {
@@ -182,19 +184,73 @@ func isNetTimeout(err error) bool {
 // status) are distinguished from invalid key/model/endpoint (401/403/404 and
 // other 4xx) and from availability failures (5xx).
 func classifyStatus(status int, body []byte, credential string) error {
+	return classifyHTTPStatus(status, nil, body, credential)
+}
+
+func classifyHTTPStatus(status int, header http.Header, body []byte, credential string) error {
 	excerpt := bodyExcerpt(body, credential)
+	failure := func(category error) error { return fmt.Errorf("%w: status %d: %s", category, status, excerpt) }
 	switch {
-	case status == http.StatusPaymentRequired || status == http.StatusTooManyRequests:
-		return fmt.Errorf("%w: status %d: %s", ErrQuotaRate, status, excerpt)
 	case status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound:
-		return fmt.Errorf("%w: status %d: %s", ErrInvalidConfig, status, excerpt)
+		return failure(ErrInvalidConfig)
+	case status == http.StatusPaymentRequired || hardQuota(body):
+		return failure(ErrQuotaRate)
+	case status == http.StatusTooManyRequests:
+		return &modelwire.TransientError{Cause: failure(ErrQuotaRate), After: retryAfter(header.Get("Retry-After"), time.Now())}
+	case status == http.StatusRequestTimeout:
+		return &modelwire.TransientError{Cause: failure(ErrTimeout), After: retryAfter(header.Get("Retry-After"), time.Now())}
 	case looksLikeQuota(body):
-		return fmt.Errorf("%w: status %d: %s", ErrQuotaRate, status, excerpt)
+		if status >= 500 {
+			return &modelwire.TransientError{Cause: failure(ErrQuotaRate), After: retryAfter(header.Get("Retry-After"), time.Now())}
+		}
+		return failure(ErrQuotaRate)
 	case status >= 500:
-		return fmt.Errorf("%w: status %d: %s", ErrTransport, status, excerpt)
+		return &modelwire.TransientError{Cause: failure(ErrTransport), After: retryAfter(header.Get("Retry-After"), time.Now())}
 	default:
-		return fmt.Errorf("%w: status %d: %s", ErrInvalidConfig, status, excerpt)
+		return failure(ErrInvalidConfig)
 	}
+}
+
+// Only explicit, already-supported quota codes/types distinguish hard quota
+// from a temporary 429. Prose in an opaque diagnostic is not retry authority.
+func hardQuota(body []byte) bool {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return false
+	}
+	for _, code := range []string{envelope.Error.Code, envelope.Error.Type} {
+		if hardQuotaCode(code) {
+			return true
+		}
+	}
+	return false
+}
+
+func hardQuotaCode(code string) bool {
+	switch code {
+	case "usage_limit_reached", "insufficient_quota", "quota_exceeded":
+		return true
+	}
+	return false
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	seconds, err := strconv.ParseUint(value, 10, 64)
+	if errors.Is(err, strconv.ErrRange) || (err == nil && seconds > uint64((1<<63-1)/time.Second)) {
+		return time.Duration(1<<63 - 1)
+	}
+	if err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 // looksLikeQuota detects provider error bodies that signal quota exhaustion or

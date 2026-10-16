@@ -29,6 +29,10 @@ func TestModelTurnStrictVariants(t *testing.T) {
 		`{"type":"model_turn_result","request_seq":1,"response":null,"failure":{"code":"auth"}}`,
 		`{"type":"model_turn_result","request_seq":1,"response":{"content":null}}`,
 		`{"type":"model_turn_result","request_seq":1,"response":{"tool_calls":[{"id":"a","name":"read_path"}]}}`,
+		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"safety","retry":{"after_ms":250}}}`,
+		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":-1}}}`,
+		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":9223372036854775807}}}`,
+		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":250,"cause":"secret"}}}`,
 	} {
 		if _, err := DecodeWorkerMessage([]byte(raw), BrokerToWorker); err == nil {
 			t.Fatalf("accepted %s", raw)
@@ -93,6 +97,11 @@ func TestModelTurnRequestRequiredFieldsAndBounds(t *testing.T) {
 	}
 	if _, err := DecodeWorkerMessage(body, WorkerToBroker); err != nil {
 		t.Fatal(err)
+	}
+	// Recovery is a root-owned network decision, never a worker-supplied flag.
+	withRecovery := strings.TrimSuffix(string(body), "}") + `,"recover_previous":true}`
+	if _, err := DecodeWorkerMessage([]byte(withRecovery), WorkerToBroker); err == nil {
+		t.Fatal("worker acquired network recovery authority")
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {

@@ -33,6 +33,23 @@ type Error struct{ Code fleetproto.ErrorCode }
 func (e *Error) Error() string                { return "fleet: " + string(e.Code) }
 func (e *Error) IsUpstreamAvailability() bool { return e.Code.IsUpstreamAvailability() }
 
+// requestContextError retains only the caller's typed cancellation cause. It
+// still classifies as gateway transport, never as signed provider availability;
+// URL errors, response bodies and other network diagnostics stay off the wire.
+type requestContextError struct{ cause error }
+
+func (e *requestContextError) Error() string { return "fleet: gateway_transport" }
+func (e *requestContextError) Unwrap() []error {
+	return []error{&Error{fleetproto.ErrCodeTransport}, e.cause}
+}
+
+func requestError(ctx context.Context, err error) error {
+	if ctx.Err() != nil && (errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
+		return &requestContextError{cause: context.Cause(ctx)}
+	}
+	return &Error{fleetproto.ErrCodeTransport}
+}
+
 var validateFile = config.ValidateRootFile
 
 type Client struct {
@@ -149,11 +166,14 @@ func (c *Client) Request(ctx context.Context, method, target string, body []byte
 		if errors.As(err, &verification) {
 			return nil, &Error{fleetproto.ErrCodeSignature}
 		}
-		return nil, &Error{fleetproto.ErrCodeTransport}
+		return nil, requestError(ctx, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, fleetproto.MaxEnvelopeBytes+1))
-	if err != nil || len(data) > fleetproto.MaxEnvelopeBytes {
+	if err != nil {
+		return nil, requestError(ctx, err)
+	}
+	if len(data) > fleetproto.MaxEnvelopeBytes {
 		return nil, &Error{fleetproto.ErrCodeTransport}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

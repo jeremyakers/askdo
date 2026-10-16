@@ -21,6 +21,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/fleetclient"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 	"github.com/jeremyakers/askdo/internal/store"
@@ -37,11 +38,16 @@ type fleetJob struct {
 	turn           uint32
 	responded      bool
 	failures       []proto.AvailabilityFailure
-	ticket         fleetproto.Ticket
-	submission     []byte
-	cursor         uint64
-	receipt        *fleetproto.Receipt
-	proofs         [][]byte
+	// A retryable failure is not a failed choice until the reviewer advances or
+	// reports unavailability. Cancellation/insufficient remaining time can prevent
+	// the offered retry; root must still retain the actual typed outcome.
+	retryFailure *proto.AvailabilityFailure
+	unknown      *fleetproto.ModelTurn
+	ticket       fleetproto.Ticket
+	submission   []byte
+	cursor       uint64
+	receipt      *fleetproto.Receipt
+	proofs       [][]byte
 }
 
 // fleetManifest deliberately excludes ManifestDigest: the digest binds this
@@ -118,7 +124,14 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 		return bad(fleetproto.ErrCodeProtocol)
 	}
 	choice := len(f.failures)
+	advance := f.retryFailure != nil && choice+1 < len(j.models) && r.ChoiceName == j.models[choice+1].Name
+	if advance {
+		choice++
+	}
 	if r.ChoiceName != j.models[choice].Name {
+		return bad(fleetproto.ErrCodeProtocol)
+	}
+	if f.unknown != nil && r.ChoiceName != j.models[f.choice].Name {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
 	if f.choice != choice {
@@ -138,8 +151,28 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 		return bad(fleetproto.ErrCodeExpired)
 	}
 	turn := fleetproto.ModelTurn{Version: 1, Kind: fleetproto.KindModelTurn, Binding: fleetproto.TurnBinding{HostID: fleetproto.ID(j.daemon.cfg.Fleet.HostID), JobID: fleetproto.ID(j.req.RequestID), Attempt: uint32(choice + 1), Turn: f.turn + 1, ProfileID: p.ProfileID, ProfileRevision: p.Revision, Deadline: f.reviewDeadline.Unix()}, Request: r.Request}
-	if err := fleetproto.Validate(turn); err != nil {
+	// Each wire turn consumes a physical-call slot, even a cached reconciliation
+	// that makes no new upstream request. No turn may hide multiple upstream calls
+	// or enlarge root's cap.
+	turn.RetryTransient = r.RetryTransient && f.turn+1 < uint32(j.daemon.cfg.Review.MaxModelCallsPerAttempt)
+	wire, err := json.Marshal(turn)
+	if err != nil {
 		return bad(fleetproto.ErrCodeProtocol)
+	}
+	turn, err = fleetproto.Parse[fleetproto.ModelTurn](wire)
+	if err != nil {
+		return bad(fleetproto.ErrCodeProtocol)
+	}
+	if f.unknown != nil {
+		previous := *f.unknown
+		previous.Binding.Turn++
+		if previous.Binding != turn.Binding || !reflect.DeepEqual(previous.Request, turn.Request) {
+			return bad(fleetproto.ErrCodeProtocol)
+		}
+		turn.RecoverPrevious = true
+	}
+	if advance {
+		f.finishRetryFailure()
 	}
 	f.seq++
 	f.turn++
@@ -179,23 +212,70 @@ func (j *jobRuntime) receiveFleetTurn(session WorkerSession, r proto.ModelTurnRe
 		}
 	}()
 	requestTimeout := time.Duration(j.models[j.fleet.choice].RequestTimeoutMS) * time.Millisecond
-	requestCtx, requestCancel := context.WithTimeout(ctx, min(requestTimeout, j.daemon.cfg.Review.RequestTimeout.Value()))
+	requestCtx, requestCancel := context.WithTimeoutCause(ctx, min(requestTimeout, j.daemon.cfg.Review.RequestTimeout.Value()), errFleetRequestTimeout)
 	defer requestCancel()
 	result, err := j.daemon.fleet.ModelTurn(requestCtx, j.fleet.selection, turn)
+	// A verified terminal result wins over our timer firing just after delivery.
+	// Only an error carrying this exact local timer cause is an unknown outcome.
+	if errors.Is(err, errFleetRequestTimeout) && ctx.Err() == nil && time.Now().Before(j.fleet.reviewDeadline) {
+		select {
+		case <-j.done:
+			return context.Canceled
+		default:
+		}
+		response := j.fleetRequestTimeout(r, turn)
+		return writeWorker(session, response, proto.BrokerToWorker)
+	}
+	response, err := j.fleetTurnResult(r, result, err)
+	if err != nil {
+		return err
+	}
+	return writeWorker(session, response, proto.BrokerToWorker)
+}
+
+var errFleetRequestTimeout = errors.New("root fleet model request timer expired")
+
+func (j *jobRuntime) fleetRequestTimeout(r proto.ModelTurnRequest, turn fleetproto.ModelTurn) proto.ModelTurnResult {
+	j.fleet.unknown = &turn
+	j.fleet.retryFailure = nil
+	j.fleet.responded = false
+	failure := &proto.ModelFailure{Code: proto.ModelRequestTimeout}
+	if turn.RetryTransient {
+		failure.Retry = &modelwire.Retry{AfterMS: 250}
+	}
+	return proto.ModelTurnResult{Type: "model_turn_result", RequestSeq: r.RequestSeq, Failure: failure}
+}
+
+// fleetTurnResult records only a fleetclient-verified, bound model outcome. A
+// temporary failed call is not yet a failed choice; root still owns that history.
+func (j *jobRuntime) fleetTurnResult(r proto.ModelTurnRequest, result fleetproto.ModelResult, err error) (proto.ModelTurnResult, error) {
 	response := proto.ModelTurnResult{Type: "model_turn_result", RequestSeq: r.RequestSeq, Response: result.Response}
 	if err != nil {
 		var failure *fleetclient.Error
 		if !errors.As(err, &failure) || !failure.IsUpstreamAvailability() {
-			return fmt.Errorf("fleet model turn: %w", err)
+			return proto.ModelTurnResult{}, fmt.Errorf("fleet model turn: %w", err)
 		}
 		code := fleetAvailability(failure.Code)
-		j.fleet.failures = append(j.fleet.failures, proto.AvailabilityFailure{Name: r.ChoiceName, Code: code})
+		j.fleet.unknown = nil
+		if result.Retry == nil {
+			j.fleet.retryFailure = nil
+			j.fleet.failures = append(j.fleet.failures, proto.AvailabilityFailure{Name: r.ChoiceName, Code: code})
+		} else {
+			j.fleet.retryFailure = &proto.AvailabilityFailure{Name: r.ChoiceName, Code: code}
+		}
 		response.Response = nil
-		response.Failure = &proto.ModelFailure{Code: proto.ModelFailureCode(failure.Code)}
+		response.Failure = &proto.ModelFailure{Code: proto.ModelFailureCode(failure.Code), Retry: result.Retry}
 	} else {
+		j.fleet.unknown = nil
+		j.fleet.retryFailure = nil
 		j.fleet.responded = true
 	}
-	return writeWorker(session, response, proto.BrokerToWorker)
+	return response, nil
+}
+
+func (f *fleetJob) finishRetryFailure() {
+	f.failures = append(f.failures, *f.retryFailure)
+	f.retryFailure = nil
 }
 
 func fleetAvailability(code fleetproto.ErrorCode) proto.AvailabilityCode {
@@ -218,7 +298,7 @@ func fleetAvailability(code fleetproto.ErrorCode) proto.AvailabilityCode {
 
 func (j *jobRuntime) fleetReviewHistory(r *proto.ReviewComplete) bool {
 	f := j.fleet
-	if !f.responded || len(f.failures) >= len(j.models) || len(r.ModelHistory) != len(f.failures)+1 || f.choice != len(f.failures) {
+	if f.unknown != nil || f.retryFailure != nil || !f.responded || len(f.failures) >= len(j.models) || len(r.ModelHistory) != len(f.failures)+1 || f.choice != len(f.failures) {
 		return false
 	}
 	for i, failure := range f.failures {
