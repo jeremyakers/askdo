@@ -224,37 +224,45 @@ print('PASS typed options/source/records/provenance serialization, source freeze
 PY
   exit 0
 fi
+make_validators() {
+  TMP=$1
+  # A legitimate cross-architecture static ELF, but deliberately not a sudo parser.
+  cat > "$TMP/validator.go" <<'GO'
+package main
+import "fmt"
+func main() { fmt.Println("SYNTHETIC producer fixture; not upstream visudo 1.9.5p2 grammar 48") }
+GO
+  for arch in amd64 arm64; do
+    mkdir "$TMP/$arch"
+    GOOS=linux GOARCH="$arch" CGO_ENABLED=0 GOFLAGS='' GOTOOLCHAIN=local \
+      go build -trimpath -o "$TMP/$arch/visudo-linux-$arch" "$TMP/validator.go"
+    cp "$ROOT/contrib/validator/source.env" "$TMP/$arch/visudo-SOURCE"
+    printf '%s\n' 'SYNTHETIC producer fixture license, not an upstream license' > "$TMP/$arch/visudo-LICENSE"
+    printf 'visudo-linux-%s version 1.9.5p2\nvisudo-linux-%s grammar version 48\n' "$arch" "$arch" > "$TMP/$arch/visudo-V.stdout"
+    : > "$TMP/$arch/visudo-V.stderr"
+    image=$(awk -F= '$1 == "VALIDATOR_IMAGE" { print $2 }' "$ROOT/contrib/validator/source.env")
+    printf 'image=%s\narchitecture=%s\ntargets=lib/util/libsudo_util.la plugins/sudoers/visudo\ninstallation=none; artifact mode=0755; no capabilities or setuid\n' "$image" "$arch" > "$TMP/$arch/visudo-BUILD"
+    if [ "$arch" = arm64 ]; then
+      cross_image=$(awk -F= '$1 == "CROSS_IMAGE" { print $2 }' "$ROOT/scripts/build-sudo-validator-arm64.sh")
+      cross_index=$(awk -F= '$1 == "CROSS_INDEX" { print $2 }' "$ROOT/scripts/build-sudo-validator-arm64.sh")
+      selected=${cross_image#*@}
+      printf 'image=%s\nimage_index=%s\nselected_manifest=%s\narchitecture=arm64\nmethod=AMD64 cross GCC; source-built musl; explicit qemu-aarch64-static user mode\n' "$cross_image" "$cross_index" "$selected" > "$TMP/$arch/visudo-BUILD"
+      printf 'cross_image=%s\ncross_image_index=%s\nselected_manifest=%s\nmethod=arm64-cross-explicit-qemu-user; no binfmt; not native ARM64 kernel\nheader_VALIDATOR_IMAGE=native AMD64 build default only; not actual cross image\n' "$cross_image" "$cross_index" "$selected" >> "$TMP/$arch/visudo-SOURCE"
+    fi
+    (cd "$TMP/$arch" && sha256sum "visudo-linux-$arch" > "visudo-linux-$arch.sha256")
+  done
+}
+if [ "${1:-}" = --make-validators ]; then
+  test "$#" -eq 2 && test -d "$2" || { printf '%s\n' 'expected EXISTING DIR' >&2; exit 1; }
+  make_validators "$2"; exit 0
+fi
 TMPROOT=${TMPDIR:-/var/tmp}
 test -d "$TMPROOT" || { printf '%s\n' 'temporary parent is missing' >&2; exit 1; }
 TMP=$(mktemp -d "$TMPROOT/askdo-release-test.XXXXXX")
 trap 'rm -rf -- "$TMP"' 0
 trap 'exit 1' 1 2 3 15
 
-# A legitimate cross-architecture static ELF, but deliberately not a sudo parser.
-cat > "$TMP/validator.go" <<'GO'
-package main
-import "fmt"
-func main() { fmt.Println("SYNTHETIC producer fixture; not upstream visudo 1.9.5p2 grammar 48") }
-GO
-for arch in amd64 arm64; do
-  mkdir "$TMP/$arch"
-  GOOS=linux GOARCH="$arch" CGO_ENABLED=0 GOFLAGS='' GOTOOLCHAIN=local \
-    go build -trimpath -o "$TMP/$arch/visudo-linux-$arch" "$TMP/validator.go"
-  cp "$ROOT/contrib/validator/source.env" "$TMP/$arch/visudo-SOURCE"
-  printf '%s\n' 'SYNTHETIC producer fixture license, not an upstream license' > "$TMP/$arch/visudo-LICENSE"
-  printf 'visudo-linux-%s version 1.9.5p2\nvisudo-linux-%s grammar version 48\n' "$arch" "$arch" > "$TMP/$arch/visudo-V.stdout"
-  : > "$TMP/$arch/visudo-V.stderr"
-  image=$(awk -F= '$1 == "VALIDATOR_IMAGE" { print $2 }' "$ROOT/contrib/validator/source.env")
-  printf 'image=%s\narchitecture=%s\ntargets=lib/util/libsudo_util.la plugins/sudoers/visudo\ninstallation=none; artifact mode=0755; no capabilities or setuid\n' "$image" "$arch" > "$TMP/$arch/visudo-BUILD"
-  if [ "$arch" = arm64 ]; then
-    cross_image=$(awk -F= '$1 == "CROSS_IMAGE" { print $2 }' "$ROOT/scripts/build-sudo-validator-arm64.sh")
-    cross_index=$(awk -F= '$1 == "CROSS_INDEX" { print $2 }' "$ROOT/scripts/build-sudo-validator-arm64.sh")
-    selected=${cross_image#*@}
-    printf 'image=%s\nimage_index=%s\nselected_manifest=%s\narchitecture=arm64\nmethod=AMD64 cross GCC; source-built musl; explicit qemu-aarch64-static user mode\n' "$cross_image" "$cross_index" "$selected" > "$TMP/$arch/visudo-BUILD"
-    printf 'cross_image=%s\ncross_image_index=%s\nselected_manifest=%s\nmethod=arm64-cross-explicit-qemu-user; no binfmt; not native ARM64 kernel\nheader_VALIDATOR_IMAGE=native AMD64 build default only; not actual cross image\n' "$cross_image" "$cross_index" "$selected" >> "$TMP/$arch/visudo-SOURCE"
-  fi
-  (cd "$TMP/$arch" && sha256sum "visudo-linux-$arch" > "visudo-linux-$arch.sha256")
-done
+make_validators "$TMP"
 
 # This assertion fails against the old eight-file producer before any implementation.
 GOFLAGS=-tags=askdo_fleet_fixture sh "$ROOT/scripts/build-release.sh" "$TMP/release" --snapshot producer-contract \
@@ -368,6 +376,20 @@ producer = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = producer
 spec.loader.exec_module(producer)
 assert producer.valid_tag('v1.2.3') and not producer.valid_tag('latest')
+source_installer = (root / 'install.sh').read_bytes()
+bound = producer.bind_installer_tag(source_installer, 'v1.0.0-rc.11')
+old_lines, new_lines = source_installer.split(b'\n'), bound.split(b'\n')
+assert len(old_lines) == len(new_lines)
+assert [i for i, (a, b) in enumerate(zip(old_lines, new_lines)) if a != b] == [4]
+assert new_lines[4] == b'VERSION=${ASKDO_VERSION:-v1.0.0-rc.11}'
+assert old_lines[4] == b'VERSION=${ASKDO_VERSION:-latest}'
+for malformed in (source_installer.replace(b':-latest}', b':-stable}'),
+                  source_installer + b'VERSION=${ASKDO_VERSION:-latest}\n'):
+    try:
+        producer.bind_installer_tag(malformed, 'v1')
+        raise AssertionError('accepted unexpected installer shape')
+    except producer.BuildError:
+        pass
 with patch.object(producer, 'git', return_value=b'1' * 40 + b'\n'):
     producer.clean_release('v1', '1' * 40, b'')
     try:

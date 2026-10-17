@@ -184,14 +184,23 @@ class Provenance:
     source_archive_sha256: str
     source_meaning: str
     source_files: Mapping[str, str]
+    # RELEASE only: tag bound as the install.sh default; that asset differs from
+    # source_files['install.sh'] by exactly the one VERSION= line.
+    installer_default_tag: str | None = None
+    installer_asset_sha256: str | None = None
 
     def json_value(self) -> JsonValue:
         """Serialize the fixed provenance schema without an untyped tree."""
-        return {'mode': self.mode, 'release_ready': self.release_ready,
-                'bundle_complete': self.bundle_complete, 'base_commit': self.base_commit,
-                'release': self.release, 'dirty_checkout': self.dirty_checkout,
-                'repository': self.repository, 'source_archive_sha256': self.source_archive_sha256,
-                'source_meaning': self.source_meaning, 'source_files': dict(self.source_files)}
+        value: dict[str, JsonValue] = {
+            'mode': self.mode, 'release_ready': self.release_ready,
+            'bundle_complete': self.bundle_complete, 'base_commit': self.base_commit,
+            'release': self.release, 'dirty_checkout': self.dirty_checkout,
+            'repository': self.repository, 'source_archive_sha256': self.source_archive_sha256,
+            'source_meaning': self.source_meaning, 'source_files': dict(self.source_files)}
+        if self.installer_default_tag is not None:
+            value.update(installer_default_tag=self.installer_default_tag,
+                         installer_asset_sha256=self.installer_asset_sha256)
+        return value
 
 
 def require(condition: bool, message: str) -> None:
@@ -218,6 +227,18 @@ def digest(data: bytes) -> str:
 def valid_tag(tag: str) -> bool:
     return bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', tag)) and tag not in {
         'latest', 'main', 'master'}
+
+
+INSTALLER_DEFAULT: Final = b'VERSION=${ASKDO_VERSION:-latest}'
+
+
+def bind_installer_tag(source: bytes, tag: str) -> bytes:
+    """Replace only install.sh line 5 so a bare piped RELEASE install selects its own tag."""
+    lines = source.split(b'\n')
+    require(len(lines) > 5 and lines[4] == INSTALLER_DEFAULT and lines.count(INSTALLER_DEFAULT) == 1,
+            'install.sh source lacks the expected VERSION default line')
+    lines[4] = b'VERSION=${ASKDO_VERSION:-' + tag.encode('ascii') + b'}'
+    return b'\n'.join(lines)
 
 
 def new_destination(value: Path) -> Path:
@@ -514,7 +535,12 @@ def build(args: BuildOptions) -> None:
             notice += inputs.version_trace.encode('ascii')
         _ = (assets / 'visudo-SOURCE').write_bytes(notice)
         for name, original in COMMON.items():
-            _ = (assets / name).write_bytes(files[original][0])
+            data = files[original][0]
+            if release and name == 'install.sh':
+                data = bind_installer_tag(data, release)
+                provenance = replace(provenance, installer_default_tag=release,
+                                     installer_asset_sha256=digest(data))
+            _ = (assets / name).write_bytes(data)
         env = os.environ.copy()
         env.update(CGO_ENABLED='0', GOTOOLCHAIN='local', GOFLAGS='', GOWORK='off', GOEXPERIMENT='',
                    GOAMD64='v1', GOARM64='v8.0', GOOS='linux', GOENV='off')
