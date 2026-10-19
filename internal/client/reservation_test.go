@@ -18,6 +18,8 @@ import (
 
 const testCanonicalID = "2026-09-27_#1"
 
+const testCancelCapability = "d5e6cde05a91f843fa0b38df39ed769de6b4024f625190567a6df579573d8071"
+
 // acceptReservedSubmit models the broker's separate, closed reservation exchange.
 func acceptReservedSubmit(listener *net.UnixListener) (*net.UnixConn, error) {
 	return acceptReservedSubmitID(listener, testCanonicalID)
@@ -37,7 +39,7 @@ func acceptReservedSubmitID(listener *net.UnixListener, id string) (*net.UnixCon
 		err = req.Validate()
 	}
 	if err == nil {
-		b, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: id})
+		b, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: testCancelCapability})
 		err = proto.WriteFrame(reserve, b)
 	}
 	_ = reserve.Close()
@@ -121,7 +123,7 @@ func TestQueuedSubmitReportsPendingReviewBeforeNotification(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run(context.Background(), []string{"--detach", "--", "/bin/true"}, Options{SocketPath: path, Stdout: &stdout, Stderr: &stderr})
 	want := "JOB_ID=" + secondID + "\nqueued: broker accepted; review/notification pending\ndenied\n"
-	if code != 126 || stderr.String() != want || stdout.Len() != 0 || strings.Contains(strings.ToLower(stderr.String()), "card sent") {
+	if code != 126 || withoutHandleLine(stderr.String()) != want || stdout.Len() != 0 || strings.Contains(strings.ToLower(stderr.String()), "card sent") {
 		t.Errorf("B exit=%d stderr=%q stdout=%q; want stderr=%q before any reviewing/Telegram event", code, stderr.String(), stdout.String(), want)
 	}
 	close(releaseA)
@@ -267,7 +269,7 @@ func testJobIDWriteFailure(t *testing.T, writer io.Writer) {
 		}
 		_, err = proto.ReadFrame(conn, proto.MaxFrameLength)
 		if err == nil {
-			b, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: testCanonicalID})
+			b, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: testCanonicalID, CancelCapability: testCancelCapability})
 			err = proto.WriteFrame(conn, b)
 		}
 		_ = conn.Close()
@@ -323,7 +325,7 @@ func TestConcurrentReservationsAreIndependent(t *testing.T) {
 				}
 				if e == nil {
 					reserved++
-					b, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: fmt.Sprintf("2026-09-27_#%d", reserved)})
+					b, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: fmt.Sprintf("2026-09-27_#%d", reserved), CancelCapability: testCancelCapability})
 					e = proto.WriteFrame(conn, b)
 				}
 			} else if e == nil && kind.Op == "submit" {

@@ -29,6 +29,9 @@ func run() error {
 	if err := preflight(os.Args[1:], os.Geteuid); err != nil {
 		return err
 	}
+	if os.Getenv("ASKDO_LAUNCH_CONTROLLER") == "1" {
+		return runController()
+	}
 	stdinInfo, err := os.Stdin.Stat()
 	if err != nil {
 		return err
@@ -84,19 +87,7 @@ func run() error {
 	if cred == nil || cred.Uid != 0 {
 		return errors.New("launch socket peer is not root")
 	}
-	body, err := json.Marshal(claim)
-	if err != nil {
-		return err
-	}
-	if err = proto.WriteFrame(conn, body); err != nil {
-		return err
-	}
-	spec, cwd, err := foreground.ReceiveLaunch(conn)
-	if err != nil {
-		return err
-	}
-	defer cwd.Close()
-	return launchAndComplete(conn, spec, cwd, tty, foreground.Launch)
+	return superviseController(conn, tty, claim)
 }
 
 // /dev/tty is an alias device (5:0), not the actual controlling PTY. Bind the

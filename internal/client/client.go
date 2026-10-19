@@ -40,8 +40,10 @@ type Options struct {
 	// HasControllingTTY overrides the /dev/tty probe in tests only.
 	HasControllingTTY func() bool
 	// launchHelper is a test-only replacement for the fixed sudo invocation.
-	launchHelper func(token, digest string) error
-	detached     bool
+	launchHelper     func(token, digest string) error
+	detached         bool
+	cancelCapability string
+	cancelHandleFile string
 }
 
 // Run executes the default invocation or a status, attach, or cancel command.
@@ -243,7 +245,7 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	if !deadline.IsZero() {
 		_ = reserveConn.SetDeadline(deadline)
 	}
-	if err = send(reserveConn, proto.ReserveRequest{Op: "reserve", ProtocolVersion: proto.CanonicalProtocolVersion}); err != nil {
+	if err = send(reserveConn, proto.ReserveRequest{Op: "reserve", ProtocolVersion: proto.CanonicalProtocolVersion, CancelCapability: true}); err != nil {
 		_ = reserveConn.Close()
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return usageErrorCode(options, "reservation timed out; no command submitted", 124)
@@ -275,8 +277,16 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	if proto.StrictUnmarshal(body, &reserved) != nil || reserved.Validate() != nil {
 		return usageError(options, "invalid reservation response; no command submitted")
 	}
+	if reserved.CancelCapability == "" {
+		return usageError(options, "broker lacks creator cancellation; upgrade broker/client/helper together; no command submitted")
+	}
 	requestID := reserved.RequestID
 	request.RequestID = requestID
+	handleFile, err := writeCancelHandle(requestID, reserved.CancelCapability, options.SocketPath)
+	if err != nil {
+		return usageError(options, "cannot save private cancellation handle; no command submitted")
+	}
+	options.cancelHandleFile, options.cancelCapability = handleFile, reserved.CancelCapability
 	if timeout > 0 {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -292,7 +302,7 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 		fmt.Fprintln(options.Stderr, "askdo:", err)
 		return 125
 	}
-	jobLine := "JOB_ID=" + requestID + "\n"
+	jobLine := "JOB_ID=" + requestID + "\nCANCEL_HANDLE_FILE=" + handleFile + "\n"
 	if n, err := options.Stderr.Write([]byte(jobLine)); err != nil || n != len(jobLine) {
 		return 125
 	}
@@ -428,15 +438,48 @@ func runAttach(ctx context.Context, args []string, options Options) int {
 }
 
 func runCancel(ctx context.Context, args []string, options Options) int {
-	if len(args) != 1 {
-		return usageError(options, "usage: askdo cancel JOB_ID")
+	const usage = "usage: askdo cancel --handle-file PATH [--force] (or cancel JOB_ID for legacy pre-dispatch jobs)"
+	var handleFile, id string
+	force := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--handle-file":
+			if handleFile != "" || i+1 >= len(args) {
+				return usageError(options, usage)
+			}
+			i++
+			handleFile = args[i]
+		case "--force":
+			force = true
+		default:
+			if id != "" || strings.HasPrefix(args[i], "-") {
+				return usageError(options, usage)
+			}
+			id = args[i]
+		}
+	}
+	request := proto.CancelRequest{Op: "cancel", RequestID: id, Force: force}
+	if handleFile != "" {
+		if id != "" {
+			return usageError(options, usage)
+		}
+		handle, err := readCancelHandle(handleFile)
+		if err != nil {
+			return usageError(options, "cannot read private cancellation handle")
+		}
+		request.RequestID, request.CancelCapability = handle.JobID, handle.Capability
+		options.SocketPath = handle.Socket
+	} else if id == "" || force {
+		return usageError(options, usage)
 	}
 	conn, err := dial(ctx, options.SocketPath)
 	if err != nil {
 		return 125
 	}
 	defer conn.Close()
-	if err := send(conn, proto.CancelRequest{Op: "cancel", RequestID: args[0]}); err != nil {
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	if err := send(conn, request); err != nil {
 		return 125
 	}
 	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
@@ -444,13 +487,29 @@ func runCancel(ctx context.Context, args []string, options Options) int {
 		return 125
 	}
 	var result proto.ResultEvent
-	if proto.StrictUnmarshal(body, &result) == nil && result.Validate() == nil && matchingResultID(result, args[0]) {
-		fmt.Fprintf(options.Stderr, "%s: %s\n", args[0], result.Message)
+	if proto.StrictUnmarshal(body, &result) == nil && result.Validate() == nil && matchingResultID(result, request.RequestID) {
+		if handleFile == "" {
+			fmt.Fprintf(options.Stderr, "%s: %s\n", request.RequestID, result.Message)
+		} else {
+			fmt.Fprintf(options.Stderr, "%s: %s\n", request.RequestID, result.State)
+		}
 		if result.State == "starting" || result.State == "running" {
 			return 125
 		}
+		if handleFile != "" && terminalState(result.State) {
+			_ = os.Remove(handleFile)
+		}
 		return outcomeCode(result)
 	}
+	var ack proto.CancelAckEvent
+	if handleFile != "" && proto.StrictUnmarshal(body, &ack) == nil && ack.Validate() == nil && ack.RequestID == request.RequestID {
+		fmt.Fprintf(options.Stderr, "%s: stop requested (level %d, delivery %s); not proof of exit; use status/attach\n", ack.RequestID, ack.DesiredLevel, ack.Delivery)
+		if ack.Delivery == "unavailable" || ack.Delivery == "failed" {
+			return 125
+		}
+		return 0
+	}
+	fmt.Fprintln(options.Stderr, "cancellation rejected or unconfirmed; handle retained")
 	return 125
 }
 
@@ -503,10 +562,18 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 		err  error
 	}
 	incoming := make(chan received, 1)
+	stopRead := make(chan struct{})
+	readerDone := make(chan struct{})
+	defer func() { close(stopRead); _ = conn.Close(); <-readerDone }()
 	go func() {
+		defer close(readerDone)
 		for {
 			body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
-			incoming <- received{body: body, err: err}
+			select {
+			case incoming <- received{body: body, err: err}:
+			case <-stopRead:
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -539,7 +606,7 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 				var ready proto.ForegroundReadyEvent
 				if !original || options.detached || handoff || !preDispatch(state) || proto.StrictUnmarshal(item.body, &ready) != nil || ready.Validate() != nil || ready.RequestID != requestID || ready.ExpiryUnixMS <= time.Now().UnixMilli() || (!deadline.IsZero() && !time.Now().Before(deadline)) || waitingCode != 0 {
 					if original && !handoff && preDispatch(state) {
-						_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID})
+						_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID, CancelCapability: options.cancelCapability})
 					}
 					fmt.Fprintf(options.Stderr, "invalid foreground handoff; recover with: askdo status %s\n", requestID)
 					return 125
@@ -555,7 +622,7 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 					fmt.Fprintf(options.Stderr, "foreground handoff failed; recover with: askdo status %s\n", requestID)
 					// Cancellation is effective only if the broker has not claimed
 					// the grant. An error from sudo cannot prove that it did not.
-					_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID})
+					_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID, CancelCapability: options.cancelCapability})
 				}
 				continue
 			}
@@ -564,6 +631,9 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 				state = nextState
 			}
 			if terminal {
+				if terminalState(nextState) && options.cancelHandleFile != "" {
+					_ = os.Remove(options.cancelHandleFile)
+				}
 				if handoff && code == 125 && (nextState == "" || nextState == "unknown" || nextState == "failed") {
 					fmt.Fprintf(options.Stderr, "foreground outcome uncertain; recover with: askdo status %s\n", requestID)
 				}
@@ -578,7 +648,7 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 			}
 		case <-timer:
 			if original && preDispatch(state) {
-				_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID})
+				_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID, CancelCapability: options.cancelCapability})
 				waitingCode = 124
 				timer = nil
 				continue
@@ -590,7 +660,7 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 				continue
 			} // the terminal child owns job control now
 			if original && preDispatch(state) {
-				_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID})
+				_ = send(conn, proto.CancelRequest{Op: "cancel", RequestID: requestID, CancelCapability: options.cancelCapability})
 				waitingCode = 130
 				continue
 			}
@@ -635,6 +705,12 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		return 125, true, ""
 	}
 	switch discriminator.Op {
+	case "cancel_ack":
+		var event proto.CancelAckEvent
+		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil || event.RequestID != requestID {
+			return 125, true, ""
+		}
+		return 0, false, event.State
 	case "accepted":
 		var event proto.AcceptedEvent
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil || event.RequestID != requestID {
@@ -713,6 +789,14 @@ func outcomeCode(event proto.ResultEvent) int {
 
 func preDispatch(state string) bool {
 	return state != "starting" && state != "running" && state != "finished"
+}
+
+func terminalState(state string) bool {
+	switch state {
+	case "finished", "failed", "unknown", "cancelled", "expired", "denied":
+		return true
+	}
+	return false
 }
 
 func matchingResultID(event proto.ResultEvent, requestID string) bool {

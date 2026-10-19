@@ -45,10 +45,11 @@ type jobRuntime struct {
 	handoffReady       chan proto.ForegroundReadyEvent // original submit follower only
 	handoffHash        [32]byte
 
-	mu     sync.Mutex
-	state  store.State
-	done   chan struct{}
-	closed bool
+	mu      sync.Mutex
+	creator creatorCancellation
+	state   store.State
+	done    chan struct{}
+	closed  bool
 	// models is the projected model list computed at review start by
 	// projectModels (codex refresh-at-review-start); nil until then.
 	models                 []proto.ProjectedModel
@@ -1215,6 +1216,13 @@ func (j *jobRuntime) execute(ctx context.Context) {
 		recorder.close()
 		j.recordLaunchFailure(ctx)
 		return
+	}
+	if controller, ok := execution.(interface{ Cancel(bool) error }); ok {
+		j.publishCancelController(func(level store.CancelLevel) string {
+			return cancelDelivery(controller.Cancel(level == store.CancelKill))
+		})
+	} else {
+		j.publishCancelController(func(store.CancelLevel) string { return "unavailable" })
 	}
 	if changed, err := j.transition(ctx, store.StateStarting, store.StateRunning); err != nil || !changed {
 		// The commit was already durable; reap the child exactly once and

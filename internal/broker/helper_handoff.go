@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"time"
@@ -110,7 +111,7 @@ func (d *daemon) handleHelper(conn *net.UnixConn) {
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(frameDeadline))
 	body, err := proto.ReadFrame(conn, 32768)
-	if err != nil || strictHelperObject(body, "type", "token_hex", "digest", "sudo_uid", "tty_dev", "tty_ino", "tty_session") != nil {
+	if err != nil || (strictHelperObject(body, "type", "token_hex", "digest", "sudo_uid", "tty_dev", "tty_ino", "tty_session") != nil && strictHelperObject(body, "type", "token_hex", "digest", "sudo_uid", "tty_dev", "tty_ino", "tty_session", "cancel_control") != nil) {
 		return
 	}
 	var claim foreground.HelperClaim
@@ -131,6 +132,10 @@ func (d *daemon) handleHelper(conn *net.UnixConn) {
 	shuttingDown := d.shuttingDown
 	d.mu.Unlock()
 	if shuttingDown || j == nil || j.foreground == nil || claim.SudoUID != j.uid {
+		return
+	}
+	protected, _, err := d.store.AuthorizeCreatorCancel(context.Background(), j.uid, j.req.RequestID, "")
+	if err != nil || (protected && !claim.CancelControl) {
 		return
 	}
 	// Both processes must still belong to the ORIGINAL session and terminal.
@@ -203,17 +208,49 @@ func (d *daemon) handleHelper(conn *net.UnixConn) {
 		return
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(frameDeadline))
-	if err := foreground.SendLaunch(conn, foreground.LaunchSpec{Argv: op.Argv, Env: op.Env, CWD: op.CWD, TargetUID: 0, Foreground: true, JobID: j.req.RequestID}, []int{int(fd.Fd())}); err != nil {
+	if err := foreground.SendLaunch(conn, foreground.LaunchSpec{Argv: op.Argv, Env: op.Env, CWD: op.CWD, TargetUID: 0, Foreground: true, JobID: j.req.RequestID, CancelControl: claim.CancelControl}, []int{int(fd.Fd())}); err != nil {
 		return
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
+	if claim.CancelControl {
+		j.publishCancelController(func(level store.CancelLevel) string {
+			_ = conn.SetWriteDeadline(time.Now().Add(frameDeadline))
+			err := foreground.WriteControl(conn, foreground.CancelControl{Type: "cancel", JobID: j.req.RequestID, Level: int(level)})
+			_ = conn.SetWriteDeadline(time.Time{})
+			if err != nil {
+				return "unavailable"
+			}
+			return "pending" // delivery is acknowledged by the live helper, not write()
+		})
+	}
 	if changed, err := j.transition(context.Background(), store.StateStarting, store.StateRunning); err != nil || !changed {
 		return
 	}
 	j.progress("running", "foreground handoff sent")
 	_ = conn.SetReadDeadline(time.Now().Add(helperCompletionDeadline))
-	body, err = proto.ReadFrame(conn, 32768)
-	if err != nil || strictHelperObject(body, "type", "job_id", "exit_code", "signal") != nil {
+	for {
+		body, err = proto.ReadFrame(conn, 32768)
+		if err != nil {
+			return
+		}
+		var ack foreground.CancelControlAck
+		if claim.CancelControl && proto.StrictUnmarshal(body, &ack) == nil && ack.Type == "cancel_ack" {
+			if ack.JobID != j.req.RequestID || (ack.Level != 1 && ack.Level != 2) {
+				return
+			}
+			switch ack.Delivery {
+			case "succeeded", "failed", "unavailable":
+			default:
+				return
+			}
+			if d.store.RecordCancelDelivery(context.Background(), j.uid, j.req.RequestID, store.CancelLevel(ack.Level), ack.Delivery) != nil {
+				slog.Warn("cancellation delivery audit failed", "request_id", j.req.RequestID)
+			}
+			continue
+		}
+		break
+	}
+	if strictHelperObject(body, "type", "job_id", "exit_code", "signal") != nil {
 		return
 	}
 	var completion foreground.Completion

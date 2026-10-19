@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 // State is a job lifecycle state persisted in the jobs table.
 type State string
@@ -349,6 +349,15 @@ func (store *Store) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS jobs_canonical_request_id ON jobs(request_id) WHERE canonical_job = 1`,
 		`CREATE TABLE IF NOT EXISTS daily_counters (day TEXT PRIMARY KEY, last_sequence INTEGER NOT NULL CHECK(last_sequence > 0))`,
 		`CREATE TABLE IF NOT EXISTS reservations (request_id TEXT PRIMARY KEY, uid INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','cancelled','consumed')), created_at INTEGER NOT NULL, submit_body BLOB)`,
+		`CREATE TABLE IF NOT EXISTS creator_cancellations (
+			request_id TEXT PRIMARY KEY REFERENCES reservations(request_id),
+			uid INTEGER NOT NULL,
+			token_hash BLOB NOT NULL CHECK(length(token_hash) = 32),
+			desired_level INTEGER NOT NULL DEFAULT 0 CHECK(desired_level BETWEEN 0 AND 2),
+			delivery TEXT NOT NULL DEFAULT 'none' CHECK(delivery IN ('none','pending','succeeded','failed','unavailable')),
+			requested_at INTEGER,
+			delivery_at INTEGER
+		)`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("create reservation schema: %w", err)
@@ -364,7 +373,7 @@ func (store *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if userVersion != schemaVersion {
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version = 4`); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 			return fmt.Errorf("update SQLite schema version: %w", err)
 		}
 	}
