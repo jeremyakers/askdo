@@ -65,13 +65,15 @@ func TestControllerPTYHelper(t *testing.T) {
 	}
 	defer conn.Close()
 	claim := foreground.HelperClaim{Type: "claim", TokenHex: strings.Repeat("1", 64), Digest: strings.Repeat("2", 64), SudoUID: 1000, TTYDev: dev, TTYIno: ino, TTYSession: sid}
-	if err := superviseController(conn, tty, claim); err != nil {
-		t.Fatal(err)
-	}
+	superviseErr := superviseController(conn, tty, claim)
 	group, err := unix.IoctlGetInt(int(tty.Fd()), unix.TIOCGPGRP)
 	modes, modeErr := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
 	if err != nil || group != unix.Getpgrp() || modeErr != nil || modes.Lflag&unix.ECHO == 0 {
 		t.Fatal("original foreground/modes not restored")
+	}
+	if superviseErr != nil {
+		fmt.Fprintln(tty, "HELPER_TTY_RESTORED_AFTER_ERROR")
+		t.Fatal(superviseErr)
 	}
 	fmt.Fprintln(tty, "HELPER_COMPLETE")
 }
@@ -161,7 +163,7 @@ func fixtureWrapperProcesses(t *testing.T, wrapper int32) (int, int) {
 	return parent, controller
 }
 
-func awaitFixtureControllerExit(t *testing.T, pid int) {
+func awaitFixtureProcessExit(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -178,14 +180,46 @@ func awaitFixtureControllerExit(t *testing.T, pid int) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("rejected controller did not exit after broker EOF")
+	t.Fatal("owned fixture process did not exit")
+}
+
+func fixtureProcessState(t *testing.T, pid int) string {
+	t.Helper()
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(body[strings.LastIndex(string(body), ")")+1:]))[0]
+}
+
+func fixtureStillStopped(t *testing.T, pid int) {
+	t.Helper()
+	if state := fixtureProcessState(t, pid); state != "T" {
+		t.Fatalf("single ownership loss changed stopped child: %q", state)
+	}
+}
+
+func awaitFixtureStoppedCleanup(t *testing.T, controller, child int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		state := fixtureProcessState(t, controller)
+		if (state == "" || state == "Z") && fixtureProcessState(t, child) == "" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("both ownership paths lost, but controller=%q child=%q (stopped child was not cleaned up/reaped)", fixtureProcessState(t, controller), fixtureProcessState(t, child))
 }
 
 func TestControllerPTYRemoteCancellation(t *testing.T) {
 	if os.Getenv("ASKDO_CANCEL_ROOT_FIXTURE") != "1" {
 		t.Skip("isolated rootless fixture only")
 	}
-	for _, mode := range []string{"interrupt", "force", "suspended", "early", "wrapper-lost", "handoff-wrapper-lost", "preclaim-reject"} {
+	for _, mode := range []string{"interrupt", "force", "suspended", "early", "wrapper-lost", "handoff-wrapper-lost", "preclaim-reject", "stopped-dual-loss", "stopped-dual-reverse", "stopped-wrapper-loss", "stopped-broker-loss"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "broker.sock")
 			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -297,7 +331,7 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 					// Unclaimed/rejected connections are the broker's lifetime to
 					// close, not inferred from wrapper EOF by the controller.
 					_ = conn.Close()
-					awaitFixtureControllerExit(t, controller)
+					awaitFixtureProcessExit(t, controller)
 					if strings.Contains(seen.text(), "FG_CHILD_READY") {
 						t.Fatal("rejected claim launched a command")
 					}
@@ -319,8 +353,12 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 				script = `trap '' INT; stty -echo; printf 'FG_CHILD_READY\n'; `
 			}
 			script = `for f in /proc/self/fd/*; do case "$(readlink "$f")" in socket:*) printf 'CONTROL_FD_LEAK\n'; exit 99;; esac; done; ` + script
-			if mode == "suspended" {
+			stoppedLoss := strings.HasPrefix(mode, "stopped-")
+			if mode == "suspended" || stoppedLoss {
 				script += `kill -STOP $$; `
+			}
+			if mode == "stopped-broker-loss" {
+				script += `printf 'FG_CHILD_RESUMED\n'; `
 			}
 			script += `while :; do read -r answer; done`
 			spec := foreground.LaunchSpec{Argv: []string{"/bin/bash", "-c", script}, Env: []string{"PATH=/usr/bin:/bin"}, CWD: dir.Name(), TargetUID: 0, Foreground: true, JobID: "fixture-" + mode, CancelControl: true}
@@ -345,7 +383,7 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 				}
 				awaitPTY(t, &seen, "Killed")
 			}
-			if mode == "suspended" {
+			if mode == "suspended" || stoppedLoss {
 				awaitPTY(t, &seen, "Stopped")
 				_, _ = io.WriteString(input, "/bin/sh -c 'printf \"OTHER_READY\\n\"; read answer; printf \"OTHER_DONE\\n\"'\n")
 				awaitPTY(t, &seen, "OTHER_READY\r\n")
@@ -354,6 +392,111 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 				if err != nil || modes.Lflag&unix.ECHO == 0 {
 					t.Fatal("suspend did not restore original echo")
 				}
+			}
+			if stoppedLoss {
+				_, controller := fixtureWrapperProcesses(t, cred.Pid)
+				_, child := fixtureWrapperProcesses(t, int32(controller))
+				fixtureStillStopped(t, child)
+				defer func() {
+					if commandPending {
+						// Failure-only cleanup of these known fixture processes. The
+						// old stopped waiter cannot be cleaned via its closed socket.
+						for _, pid := range []int{child, controller} {
+							state := fixtureProcessState(t, pid)
+							if state != "" && state != "Z" {
+								_ = unix.Kill(pid, unix.SIGKILL)
+							}
+						}
+					}
+				}()
+				before, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checkOther := func() {
+					t.Helper()
+					if fixtureTerminalGroup(t, int32(otherGroup)) != otherGroup {
+						t.Fatal("ownership loss stole another terminal job's foreground")
+					}
+					after, err := unix.IoctlGetTermios(int(tty.Fd()), unix.TCGETS)
+					if err != nil || *after != *before {
+						t.Fatal("ownership loss changed another terminal job's modes")
+					}
+				}
+				if mode == "stopped-dual-reverse" || mode == "stopped-broker-loss" {
+					_ = conn.Close()
+				} else {
+					if err := unix.Kill(int(cred.Pid), unix.SIGKILL); err != nil {
+						t.Fatal(err)
+					}
+					// Bash may defer its job notice while OTHER owns the TTY.
+					awaitFixtureProcessExit(t, int(cred.Pid))
+				}
+				// A surviving path must keep this stopped child available, not
+				// convert either EOF alone into a forced cancellation.
+				time.Sleep(100 * time.Millisecond)
+				fixtureStillStopped(t, child)
+				checkOther()
+				switch mode {
+				case "stopped-dual-loss", "stopped-dual-reverse":
+					if mode == "stopped-dual-loss" {
+						_ = conn.Close()
+					} else {
+						if err := unix.Kill(int(cred.Pid), unix.SIGKILL); err != nil {
+							t.Fatal(err)
+						}
+						awaitFixtureProcessExit(t, int(cred.Pid))
+					}
+					awaitFixtureStoppedCleanup(t, controller, child)
+					if strings.Contains(seen.text(), "FG_INT_FLUSHED") || strings.Contains(seen.text(), "HELPER_COMPLETE") {
+						t.Fatal("orphan cleanup fabricated interrupt/completion")
+					}
+				case "stopped-wrapper-loss":
+					if err := foreground.WriteControl(conn, foreground.CancelControl{Type: "cancel", JobID: spec.JobID, Level: 1}); err != nil {
+						t.Fatal(err)
+					}
+					body, err := proto.ReadFrame(conn, 32768)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var ack foreground.CancelControlAck
+					if proto.StrictUnmarshal(body, &ack) != nil || ack.Type != "cancel_ack" || ack.Level != 1 || ack.Delivery != "succeeded" {
+						t.Fatalf("surviving broker control ack=%s", body)
+					}
+					_, err = proto.ReadFrame(conn, 32768)
+					if !errors.Is(err, io.EOF) {
+						t.Fatalf("lost-wrapper completion must be EOF: %v", err)
+					}
+					awaitPTY(t, &seen, "FG_INT_FLUSHED\r\n")
+					if strings.Count(seen.text(), "FG_INT_FLUSHED\r\n") != 1 || strings.Contains(seen.text(), "HELPER_COMPLETE") {
+						t.Fatal("surviving broker control lost/duplicated real interrupt outcome")
+					}
+					awaitFixtureStoppedCleanup(t, controller, child)
+				}
+				checkOther()
+				_, _ = io.WriteString(input, "\n")
+				awaitPTY(t, &seen, "OTHER_DONE\r\n")
+				if mode == "stopped-broker-loss" {
+					_, _ = io.WriteString(input, "fg\n")
+					awaitPTY(t, &seen, "FG_CHILD_RESUMED\r\n")
+					_, _ = input.Write([]byte{3})
+					awaitPTY(t, &seen, "FG_INT_FLUSHED\r\n")
+					awaitPTY(t, &seen, "HELPER_TTY_RESTORED_AFTER_ERROR\r\n")
+					if strings.Contains(seen.text(), "HELPER_COMPLETE") {
+						t.Fatal("broker loss fabricated successful completion")
+					}
+					awaitFixtureStoppedCleanup(t, controller, child)
+				}
+				commandPending = false
+				_, _ = io.WriteString(input, "exit 0\n")
+				_ = input.Close()
+				waitErr := shell.Wait()
+				waited = true
+				if waitErr != nil {
+					t.Fatalf("stopped ownership-loss shell: %v; %s", waitErr, seen.text())
+				}
+				<-copied
+				return
 			}
 			levels := []int{1}
 			if mode == "force" {

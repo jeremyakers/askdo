@@ -177,11 +177,14 @@ func runController() error {
 	resume := make(chan struct{}, 1)
 	var wrapperAlive atomic.Bool
 	wrapperAlive.Store(true)
+	wrapperLost := make(chan struct{})
+	var wrapperLossOnce sync.Once
+	loseWrapper := func() { wrapperAlive.Store(false); wrapperLossOnce.Do(func() { close(wrapperLost) }) }
 	go func() {
+		defer loseWrapper()
 		for {
 			message, err := readWrapper(parent)
 			if err != nil {
-				wrapperAlive.Store(false)
 				// The broker may already have committed the claim, even before
 				// ReceiveLaunch returns. Only the broker owns this connection's
 				// handoff/rejection lifetime; wrapper EOF is not cancellation.
@@ -212,6 +215,7 @@ func runController() error {
 	})
 	if spec.CancelControl {
 		go func() {
+			defer control.LoseInput()
 			for {
 				request, err := foreground.ReadCancelControl(broker, spec.JobID)
 				if err != nil {
@@ -220,10 +224,12 @@ func runController() error {
 				control.Request(request.Level)
 			}
 		}()
+	} else {
+		control.LoseInput() // this launch has no broker cancellation receiver
 	}
-	jobControl := &foreground.TerminalJobControl{WrapperGroup: session.Group, WrapperAlive: wrapperAlive.Load, Resume: resume, Suspend: func() error {
+	jobControl := &foreground.TerminalJobControl{WrapperGroup: session.Group, WrapperAlive: wrapperAlive.Load, WrapperLost: wrapperLost, Resume: resume, Suspend: func() error {
 		if wrapperAlive.Load() && foreground.WriteControl(parent, wrapperMessage{Type: "suspend"}) != nil {
-			wrapperAlive.Store(false)
+			loseWrapper()
 		}
 		return nil // wrapper death must not turn suspend cleanup into a root kill
 	}}

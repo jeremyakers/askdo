@@ -123,10 +123,16 @@ func launch(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobCont
 	// not run; preserve an error rather than inventing an exit status.
 	live := true
 	wrapperAlive := func() bool { return jobControl == nil || jobControl.WrapperAlive == nil || jobControl.WrapperAlive() }
+	var wrapperLost, brokerLost <-chan struct{}
+	brokerUnavailable := false
+	if jobControl != nil {
+		wrapperLost = jobControl.WrapperLost
+		brokerLost = control.InputLost()
+	}
 	defer func() {
 		if !wrapperAlive() {
-			// A lost wrapper is not permission to kill/retry. Reap normally, but
-			// do not claim a trustworthy restored-terminal completion.
+			// Wrapper loss alone is not permission to kill/retry. Nor may it
+			// produce a trustworthy restored-terminal completion.
 			completion = Completion{}
 			launchErr = errors.Join(launchErr, errors.New("original terminal wrapper lost"))
 		}
@@ -219,10 +225,23 @@ func launch(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobCont
 				}
 			}
 			for control.Level() == levelAtStop {
+				if brokerUnavailable && !wrapperAlive() && child.Stopped() {
+					// Neither original terminal control nor creator control can
+					// recover this stopped child. The owned-child error cleanup
+					// below must reap it, not abandon it or steal another TTY.
+					return Completion{}, errors.New("stopped command lost both wrapper and broker control")
+				}
 				select {
 				case <-jobControl.Resume:
-					goto resume
+					if wrapperAlive() {
+						goto resume
+					}
 				case <-control.Changed():
+				case <-wrapperLost:
+					wrapperLost = nil
+				case <-brokerLost:
+					brokerLost = nil
+					brokerUnavailable = true
 				}
 			}
 			continue // cancel resumes only the child, not some other terminal job

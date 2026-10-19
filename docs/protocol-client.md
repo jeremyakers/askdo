@@ -418,6 +418,12 @@ If the original wrapper dies after handoff, its loss is not an implicit kill:
 the owned controller can still receive explicit cancellation. It does not
 fabricate a restored-terminal completion after losing that original wrapper;
 the broker reports `unknown`, not permission to replay the command.
+Broker-control loss alone also leaves a live original wrapper able to use
+normal `fg`/Ctrl-C. Only when a command is stopped and **both** ownership paths
+are unavailable does the helper report an unrecoverable controller error and
+run its existing owned-child cleanup/reap. That is not a creator cancel request
+or a fabricated completion: the broken helper connection remains `unknown`,
+and cleanup does not take another terminal job's foreground or modes.
 
 **`progress`** — non-terminal lifecycle progress:
 
