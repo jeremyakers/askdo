@@ -33,6 +33,10 @@ type processWorker struct {
 	extraEnv []string
 }
 
+// Only this production factory selects broker-owned standalone human approval.
+// Injected legacy/scripted workers retain their existing private-pipe exchange.
+func (*processWorker) brokerApproval() {}
+
 func (w *processWorker) Start(ctx context.Context) (WorkerSession, error) {
 	return w.start(ctx, os.DevNull)
 }

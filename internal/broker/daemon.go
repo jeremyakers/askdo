@@ -24,6 +24,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewidentity"
 	"github.com/jeremyakers/askdo/internal/store"
+	"github.com/jeremyakers/askdo/internal/telegram"
 	"golang.org/x/sys/unix"
 )
 
@@ -78,6 +79,8 @@ type daemonOptions struct {
 	// (T8.4); nil selects the production client against the real issuer.
 	// Tests inject a client bound to a fake issuer.
 	codex *codexauth.Client
+	// telegramClient is a test-only client factory for a localhost Bot API.
+	telegramClient func(string) (*telegram.Client, error)
 }
 
 type daemon struct {
@@ -96,6 +99,8 @@ type daemon struct {
 	ttyEvidence    func(int64) (ttyIdentity, error)
 	codex          *codexauth.Client
 	fleet          *fleetclient.Client
+	telegramHub    *telegram.Hub
+	telegramClient func(string) (*telegram.Client, error)
 	queue          *jobQueue
 	policy         *inspection.Policy
 	listener       *net.UnixListener
@@ -332,6 +337,13 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail}
+	d.telegramHub = telegram.NewHub(shutdownCtx)
+	d.telegramClient = options.telegramClient
+	if d.telegramClient == nil {
+		d.telegramClient = func(tokenFile string) (*telegram.Client, error) {
+			return telegram.NewClient(telegram.ClientConfig{TokenFile: tokenFile})
+		}
+	}
 	if cfg.Fleet != nil {
 		d.fleet, err = fleetclient.New(*cfg.Fleet)
 		if err != nil {
@@ -375,6 +387,7 @@ func (d *daemon) close() {
 		d.queueWG.Wait()
 		d.deadlineWG.Wait()
 		d.connWG.Wait()
+		d.telegramHub.Close()
 		_ = d.policy.Close()
 		if d.fleet != nil {
 			d.fleet.Close()

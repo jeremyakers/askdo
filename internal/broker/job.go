@@ -490,12 +490,32 @@ func (j *jobRuntime) run(ctx context.Context) {
 		j.fail("review rejected: " + reason)
 		return
 	}
+	_, brokerApproval := j.daemon.worker.(interface{ brokerApproval() })
+	brokerApproval = brokerApproval && j.fleet == nil && autoPlan == nil
+	if brokerApproval {
+		switch value := frozen.(type) {
+		case proto.Frozen:
+			value.BrokerApproval = true
+			frozen = value
+		case proto.ApprovalOnlyFrozen:
+			value.BrokerApproval = true
+			frozen = value
+		}
+	}
 	if err := writeWorker(session, frozen, proto.BrokerToWorker); err != nil {
 		j.fail("send frozen review")
 		return
 	}
 	if j.fleet != nil {
 		j.runFleetTicket(ctx, session, digest, autoPlan)
+		return
+	}
+	if brokerApproval {
+		history := []proto.ModelHistoryEntry{}
+		if review != nil {
+			history = review.ModelHistory
+		}
+		j.runBrokerApproval(ctx, session, frozen, history)
 		return
 	}
 	message, err := j.readApprovalMessage(session)

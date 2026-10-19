@@ -33,6 +33,10 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv(testReviewerHelperEnv) == "standalone-telegram" {
+		reviewer.TelegramBaseURL = os.Getenv(testStandaloneTelegramURL)
+		os.Exit(reviewer.MainWithFactory(context.Background(), []string{"reviewer"}, os.Stdin, os.Stdout, os.Stderr, argvTrueFactory(argvTrueReport)))
+	}
 	if os.Getenv(testReviewerHelperEnv) == "1" {
 		os.Exit(reviewer.Main(context.Background(), []string{"reviewer"}, os.Stdin, os.Stdout, os.Stderr, reviewerHelperModel()))
 	}

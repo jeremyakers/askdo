@@ -456,8 +456,10 @@ For policy bypass or validated total provider unavailability, the broker sends
 `type: "approval_only_frozen"`, `manifest_digest` (64 hex), `reason` (≤ 512),
 and `history` (0–16 typed availability failures; empty for policy bypass).
 There is **no** model report or risk/effects/reversibility assessment. The
-worker sends a **NO AI REVIEW** Telegram card with the reason/history and an
-explicit unassessed warning before waiting for the same human approval.
+legacy worker sends a **NO AI REVIEW** Telegram card with the reason/history
+and an explicit unassessed warning before waiting for the same human approval.
+The optional `broker_approval` boolean selects the broker-owned human stage
+described below; the worker still verifies the frozen availability history.
 
 ### `frozen` (B→W)
 
@@ -472,12 +474,28 @@ will be bound to.
 | `withheld_refs` | array ≤ 16 of distinct strings ≤ 1024 (sorted, capped) |
 | `withheld_count` | int 0–1000000 (≥ `len(withheld_refs)`) |
 | `auto_approval` | optional broker-authored `{score,max_risk,effective_threshold}`; score 1–4, score ≤ cap 1–4 and strictly below threshold 2–5; absent means manual approval |
+| `broker_approval` | optional boolean, default false; true means validate the frozen outcome and exit cleanly without human notification or polling; incompatible with `auto_approval` |
+
+Production standalone process workers receive `broker_approval: true` for human
+approval. The broker requires EOF and successful worker exit before sending any
+card, then runs the same shared rendering and callback validator itself. One
+in-memory poll source/cursor per exact loaded bot token feeds independent job
+mailboxes. Nonces register before sending; callbacks activate only after all
+destinations succeed and the broker durably records the complete binding.
+Cancelled/failed subscriptions cannot regain authority, and idle cursors are
+retained only for the current daemon lifetime. Auto notices and fleet mode keep
+their existing flows. An omitted/false field retains the legacy worker exchange
+for injected workers and direct reviewer callers.
+
+**Matching rollout required:** older strict reviewers reject this new field;
+upgrade the broker and reviewer from the same build. This is not a negotiated
+capability or a new startup prerequisite for unrelated work.
 
 `withheld_refs`/`withheld_count` are **broker-observed facts**: the host path
 spellings and masked bundle paths the broker itself withheld during this job
 (including a credential-like `argv[0]` whose executable resolution was
 necessarily metadata-only). They are a factual access-policy signal, not a
-completeness assessment. The worker renders any non-zero count as a prominent
+completeness assessment. The shared notification stage renders a non-zero count as a prominent
 code-constructed "credential content withheld" notice leading the reviewed
 Telegram summary. The default is a human decision; only a reviewed report with
 both a root-owned submitter UID cap and that UID's preference may receive an
@@ -485,7 +503,7 @@ auto plan, which requires a button-free Telegram notice before dispatch.
 Unreviewed jobs never auto-approve.
 
 There is deliberately **no expiry field** for manual approval: its lifetime
-starts only when the complete Telegram request is sent. The worker computes
+starts only when the complete Telegram request is sent. The notification stage computes
 expiry as send-complete time + `min(approval_ttl_ms, remaining client deadline)`
 and reports it in `notification_sent`. An auto plan produces reviewed summary
 messages and a button-free policy notice, then `auto_notification_sent` with
@@ -603,8 +621,9 @@ ambiguous send never authorizes execution.
 
 ### `decision` (W→B)
 
-The one-use authenticated human decision, code-constructed by the worker from
-a validated Telegram callback.
+The legacy worker's one-use authenticated human decision, code-constructed from
+a validated Telegram callback. Broker-owned human approval constructs the same
+typed decision internally and applies the same dispatch gates, without this frame.
 
 | Field | Type — bounds |
 |---|---|
@@ -617,14 +636,13 @@ a validated Telegram callback.
 | `channel_name` | optional string ≤ 128; non-empty exactly for the named projection (with non-empty `chat_id`; `channel_name`/`chat_id` must be set or empty together), and it must equal the projected channel |
 | `chat_id` | optional int64 ≠ 0; the recipient chat the deciding card was made in |
 
-Trusted reviewer code validates the Telegram callback's operator ID, chat,
+The shared validator (in the legacy reviewer or production broker) validates the Telegram callback's operator ID, chat,
 card ID, nonce, expiry and first-use status — in the named form against every
 projected `(chat, message, operator)` target, in the legacy form against the
 single card. The **first valid decision wins**; once a decision is consumed
 the poller rejects later presses on the pending request ("already decided"),
 so a second admin's button cannot revoke an approved or denied job. The
-broker does **not** poll
-Telegram independently: it trusts the worker's `decision`, re-checks digest,
+legacy broker path does **not** poll Telegram independently: it trusts the worker's `decision`, re-checks digest,
 channel name, operator ID and message ID against the recorded card binding
 (legacy: the single card ID; named: the deciding chat's recorded target),
 pending state,
@@ -643,6 +661,9 @@ Ends review or approval before dispatch.
 
 ## Message lifecycle of one job
 
+The notification/decision frames below belong to the legacy human worker path;
+production `broker_approval: true` exits at the frozen outcome instead.
+
 ```text
 B→W  bootstrap                     (immutable job definition)
 W→B  inspect_request ─┐            (zero or more correlated exchanges;
@@ -650,6 +671,7 @@ B→W  inspect_result  ─┘             request_seq strictly increasing)
 W→B  progress                      (any time; reviewing/fallback/notifying/awaiting_human)
 W→B  review_complete ── or ── review_unavailable ── or ── worker exits without a report
 B→W  frozen ── or ── approval_only_frozen ── or ── review_rejected
+     broker_approval=true: EOF + clean worker exit; broker sends/records/polls independently
 W→B  notification_sent             (Telegram card delivered; approval binding recorded)
 W→B  decision                      (one-use approve/deny) ── job dispatches or is denied
 B→W  cancel                        (any pre-dispatch point; terminates the worker)
@@ -669,10 +691,12 @@ the honest `expired` state when the recorded expiry has passed.
   and schema-checked by trusted worker code and re-validated by the broker
   before freezing. Telegram callback data is parsed by fixed code
   (`<a|d|v>:<32 hex nonce>`); model-crafted text cannot become a decision.
-- **One active worker.** The job queue runs one job at a time and
-  `processWorker` refuses a second concurrent launch, so at most one reviewer
-  process — and therefore at most one pending Telegram approval — exists.
-  Only one long-poller runs per approval.
+- **Independent jobs, one source per bot.** Reviewers, pending human cards and
+  committed commands may overlap. Production standalone human approvals share
+  one broker-owned network poll/cursor per loaded token, not one per request or
+  token-file path. Each job retains its own binding and ordered callback mailbox;
+  Details/ack I/O cannot block another job's routing. Legacy direct pollers are
+  for isolated callers and must not concurrently consume the same bot token.
 - **Serialized writes.** Both sides write frames under a mutex
   (`processWorkerSession.writeMu`, `asyncBroker.writeMu`), and inspection
   exchanges are serialized by `requestMu` plus the `RequestTracker`: one

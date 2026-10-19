@@ -23,10 +23,10 @@
 //     (formatted text is code-constructed — model output, argv, paths and
 //     usernames can never create headings, links or delimiters), and never
 //     sees source bundles.
-//   - Nonce generation and binding to the frozen manifest digest live in
-//     the reviewer's notify stage (Wave 5 lane B). This package takes the
-//     nonce as input, puts it into callback data, and validates inbound
-//     callbacks against it. The broker independently re-checks digest,
+//   - Nonce generation and binding to the frozen manifest digest live in the
+//     shared approval stage, hosted by the broker or a legacy reviewer. This
+//     package takes the nonce as input, puts it into callback data, and validates
+//     inbound callbacks against it. The broker independently re-checks digest,
 //     operator/message IDs and expiry under its dispatch lock.
 package telegram
 
