@@ -1158,6 +1158,9 @@ func (j *jobRuntime) orderedAvailabilityHistory(unavailable *proto.ReviewUnavail
 // outcome after a confirmed start is recorded honestly as unknown. There is
 // no retry of either.
 func (j *jobRuntime) execute(ctx context.Context) {
+	// Dispatch is already committed: shutdown joins this execution rather than
+	// cancelling it, including its running transition and durable result writes.
+	ctx = context.WithoutCancel(ctx)
 	recorder, err := openOutputRecorder(j.spool.stdout, j.spool.stderr, j.daemon.cfg.Limits.MaxLogBytesPerStream)
 	if err != nil {
 		j.recordLaunchFailure(ctx)
@@ -1262,6 +1265,14 @@ func (j *jobRuntime) recordLaunchFailure(ctx context.Context) {
 }
 
 func (j *jobRuntime) fail(detail string) {
+	// Shutdown owns pre-dispatch cancellation. A worker interrupted by the
+	// shared context must not win that race with a generic failure instead.
+	j.daemon.mu.Lock()
+	shuttingDown := j.daemon.shuttingDown
+	j.daemon.mu.Unlock()
+	if shuttingDown {
+		return
+	}
 	j.mu.Lock()
 	from := j.state
 	if !from.IsTerminal() && from != store.StateStarting && from != store.StateRunning {

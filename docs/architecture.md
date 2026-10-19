@@ -53,10 +53,11 @@ At startup it:
    `MarkRestartAmbiguous` plus `SweepExpired`, so nothing from a previous
    daemon lifetime is ever revived (see *Restart semantics* below).
 5. Serves at most 64 concurrent client connections and a FIFO job queue of
-   depth 8. The queue worker serializes review and notification sessions, so
-   at most one reviewer process is active. A foreground job leaves the queue
-   when its approved handoff grant is ready; its subsequently launched terminal
-   child can overlap another job's review or detached execution.
+   depth 8 for pending admissions. Dequeued jobs run independent review,
+   notification and execution lifecycles, each with its own reviewer process.
+   A long-running command or pending human approval does not block another
+   job's review or notification. Shutdown cancels pre-dispatch jobs and joins
+   committed detached executions, including durable results, before teardown.
 
 Before submitting an operation the client reserves a globally unique
 `YYYY-MM-DD_#N` job ID over its own socket connection and prints that same

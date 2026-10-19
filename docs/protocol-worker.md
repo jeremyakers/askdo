@@ -32,9 +32,10 @@ The broker launches the worker as
 - **File descriptors:** stdin/stdout are the private pipe; stderr is
   redirected to the job's root-owned spool file (`0600`, append). No other
   file descriptors are handed to the worker.
-- **Concurrency:** at most one reviewer process is active at a time. The job
-  queue serializes jobs; `processWorker` additionally refuses to start a
-  second process while one is active.
+- **Concurrency:** each dequeued job has an independent reviewer process and
+  private pipes. Review and notification sessions may overlap other jobs'
+  sessions and committed executions; the depth-8 queue bounds pending
+  admissions, not active job lifecycles.
 - **Configuration:** the worker reads no configuration file. Everything it
    may know — model projection (possibly empty for approval-only), limits,
    Telegram settings, the frozen operation, deadlines — arrives in the single

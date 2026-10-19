@@ -389,14 +389,6 @@ func (d *daemon) close() {
 // remain open until close has observed all broker goroutines exit.
 func (d *daemon) beginShutdown() {
 	d.shutdownOnce.Do(func() {
-		d.shutdownCancel()
-		if d.listener != nil {
-			_ = d.listener.Close()
-		}
-		if d.launchListener != nil {
-			_ = d.launchListener.Close()
-		}
-
 		d.mu.Lock()
 		d.shuttingDown = true
 		jobs := make([]*jobRuntime, 0, len(d.jobs))
@@ -409,6 +401,15 @@ func (d *daemon) beginShutdown() {
 		}
 		d.mu.Unlock()
 
+		// Publish shutdown before cancelling the context: interrupted jobs leave
+		// pre-dispatch terminalization to the cancellation loop below.
+		d.shutdownCancel()
+		if d.listener != nil {
+			_ = d.listener.Close()
+		}
+		if d.launchListener != nil {
+			_ = d.launchListener.Close()
+		}
 		for _, job := range jobs {
 			_, _, _ = job.cancel("shutdown")
 		}
@@ -473,12 +474,20 @@ func (d *daemon) serve(ctx context.Context, listener *net.UnixListener) error {
 }
 
 func (d *daemon) runQueue(ctx context.Context) {
+	// Dequeue in FIFO order, but each admitted job owns its full lifecycle.
+	// Keep queueWG held until they all finish, before close tears down resources.
+	var jobs sync.WaitGroup
+	defer jobs.Wait()
 	for {
 		job, ok := d.queue.next(ctx)
 		if !ok {
 			return
 		}
-		job.run(ctx)
+		jobs.Add(1)
+		go func() {
+			defer jobs.Done()
+			job.run(ctx)
+		}()
 	}
 }
 

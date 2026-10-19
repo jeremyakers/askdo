@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/jeremyakers/askdo/internal/client"
@@ -245,10 +246,10 @@ func TestNestedFixtureRealReviewerProcessFreeze(t *testing.T) {
 	t.Logf("frozen manifest digest=%s\n%s", job.ManifestHash, stored)
 }
 
-// TestProcessWorkerOneActiveAtATime proves a second reviewer launch is refused
-// while one session is active, using the current-user test override (the
-// privileged credential-switching boundary is covered separately).
-func TestProcessWorkerOneActiveAtATime(t *testing.T) {
+// Each reviewer owns its process and pipes, using the current-user test
+// override (the privileged credential-switching boundary is covered separately).
+func TestProcessWorkerIndependentSessions(t *testing.T) {
+	// Given a reviewer waiting for its private bootstrap.
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -263,11 +264,24 @@ func TestProcessWorkerOneActiveAtATime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := worker.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("second concurrent start err=%v, want already active", err)
+	defer func() { _ = session.Close(); _ = session.Wait() }()
+	// When another session starts before the first is reaped.
+	second, err := worker.Start(context.Background())
+	if err != nil {
+		t.Fatalf("second concurrent start: %v", err)
 	}
+	defer func() { _ = second.Close(); _ = second.Wait() }()
+	firstProcess := session.(*processWorkerSession).cmd.Process
+	secondProcess := second.(*processWorkerSession).cmd.Process
+	if firstProcess.Pid == secondProcess.Pid {
+		t.Fatal("sessions share a process")
+	}
+	// Then closing/reaping one session leaves the other process alive.
 	_ = session.Close()
 	_ = session.Wait() // helper was killed while awaiting bootstrap
+	if err := secondProcess.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("closing first session affected second: %v", err)
+	}
 	restarted, err := worker.Start(context.Background())
 	if err != nil {
 		t.Fatalf("start after reap: %v", err)
