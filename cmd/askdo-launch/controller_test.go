@@ -219,7 +219,7 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 	if os.Getenv("ASKDO_CANCEL_ROOT_FIXTURE") != "1" {
 		t.Skip("isolated rootless fixture only")
 	}
-	for _, mode := range []string{"interrupt", "force", "suspended", "early", "wrapper-lost", "handoff-wrapper-lost", "preclaim-reject", "stopped-dual-loss", "stopped-dual-reverse", "stopped-wrapper-loss", "stopped-broker-loss"} {
+	for _, mode := range []string{"interrupt", "force", "suspended", "early", "wrapper-lost", "handoff-wrapper-lost", "preclaim-reject", "stopped-dual-loss", "stopped-dual-reverse", "stopped-wrapper-loss", "stopped-broker-loss", "stale-continue"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "broker.sock")
 			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -360,6 +360,9 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 			if mode == "stopped-broker-loss" {
 				script += `printf 'FG_CHILD_RESUMED\n'; `
 			}
+			if mode == "stale-continue" {
+				script += `read -r gate; kill -STOP $$; printf 'FG_CHILD_RESUMED\n'; `
+			}
 			script += `while :; do read -r answer; done`
 			spec := foreground.LaunchSpec{Argv: []string{"/bin/bash", "-c", script}, Env: []string{"PATH=/usr/bin:/bin"}, CWD: dir.Name(), TargetUID: 0, Foreground: true, JobID: "fixture-" + mode, CancelControl: true}
 			if err := foreground.SendLaunch(conn, spec, []int{int(dir.Fd())}); err != nil {
@@ -374,6 +377,48 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 			otherGroup := 0
 			if mode != "early" {
 				awaitPTY(t, &seen, "FG_CHILD_READY\r\n")
+			}
+			if mode == "stale-continue" {
+				parent, controller := fixtureWrapperProcesses(t, cred.Pid)
+				_, child := fixtureWrapperProcesses(t, int32(controller))
+				// Failure-only wake of this known fixture wrapper, after the
+				// existing deferred bound force request; never an unrelated PID.
+				resumeShell = func() {
+					if fixtureProcessState(t, int(cred.Pid)) == "T" {
+						_ = unix.Kill(int(cred.Pid), unix.SIGCONT)
+					}
+				}
+				if fixtureProcessState(t, int(cred.Pid)) == "T" {
+					t.Fatal("fixture wrapper was not running before unsolicited CONT")
+				}
+				if err := unix.Kill(int(cred.Pid), unix.SIGCONT); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(100 * time.Millisecond) // let Notify/private forwarding run before child STOP
+				_, _ = io.WriteString(input, "\n")
+				deadline := time.Now().Add(3 * time.Second)
+				for fixtureProcessState(t, int(cred.Pid)) != "T" {
+					if time.Now().After(deadline) {
+						t.Fatal("fixture wrapper did not suspend")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				time.Sleep(100 * time.Millisecond) // distinguish a held stop from transient WSTOPPED
+				if state := fixtureProcessState(t, child); state != "T" || strings.Contains(seen.text(), "FG_CHILD_RESUMED\r\n") {
+					t.Fatalf("stale running-state CONT prematurely resumed child: child=%q wrapper=%q", state, fixtureProcessState(t, int(cred.Pid)))
+				}
+				group, err := unix.Getpgid(parent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fixtureTerminalGroup(t, int32(parent)) != group {
+					t.Fatal("stale CONT stole terminal foreground before legitimate fg")
+				}
+				_, _ = io.WriteString(input, "fg\n")
+				awaitPTY(t, &seen, "FG_CHILD_RESUMED\r\n")
+				if strings.Count(seen.text(), "FG_CHILD_RESUMED\r\n") != 1 {
+					t.Fatal("legitimate fg did not resume exactly once")
+				}
 			}
 			if mode == "wrapper-lost" {
 				// Only this freshly spawned fixture peer, inside the rootless

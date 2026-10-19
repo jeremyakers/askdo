@@ -107,11 +107,16 @@ func superviseController(broker *net.UnixConn, tty *os.File, claim foreground.He
 			}
 		}
 	}()
+	resumePending := false
 	for {
 		select {
 		case err := <-waited:
 			return err
 		case <-continued:
+			if !resumePending {
+				continue
+			}
+			resumePending = false
 			if err := foreground.WriteControl(conn, wrapperMessage{Type: "resume"}); err != nil {
 				return <-waited
 			}
@@ -127,6 +132,9 @@ func superviseController(broker *net.UnixConn, tty *os.File, claim foreground.He
 			if err := unix.Kill(-unix.Getpgrp(), unix.SIGSTOP); err != nil {
 				return err
 			}
+			// A self-stop returns after actual continuation. Even a previously
+			// buffered CONT can authorize resume only after that suspension.
+			resumePending = true
 		}
 	}
 }
