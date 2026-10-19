@@ -220,7 +220,7 @@ func TestSubmitWriteBoundedByOriginalDeadline(t *testing.T) {
 		}
 		_, e = proto.ReadFrame(reserve, proto.MaxFrameLength)
 		if e == nil {
-			body, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: testCanonicalID})
+			body, _ := json.Marshal(proto.ReservedEvent{Op: "reserved", RequestID: testCanonicalID, CancelCapability: testCancelCapability})
 			e = proto.WriteFrame(reserve, body)
 		}
 		_ = reserve.Close()

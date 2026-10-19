@@ -51,8 +51,9 @@ var terminalTypePattern = regexp.MustCompile(`^[A-Za-z0-9+._-]{1,128}$`)
 // ReserveRequest allocates a job ID without providing an operation or caller
 // identity. The broker authenticates the caller through its connection.
 type ReserveRequest struct {
-	Op              string `json:"op"`
-	ProtocolVersion int    `json:"protocol_version"`
+	Op               string `json:"op"`
+	ProtocolVersion  int    `json:"protocol_version"`
+	CancelCapability bool   `json:"cancel_capability,omitempty"`
 }
 
 // Validate checks the reservation protocol discriminator.
@@ -67,11 +68,13 @@ func (r ReserveRequest) Validate() error {
 type ReservedEvent struct {
 	Op        string `json:"op"`
 	RequestID string `json:"request_id"`
+	// Only returned on an opted-in reservation connection. Never a job event.
+	CancelCapability string `json:"cancel_capability,omitempty"`
 }
 
 // Validate accepts only a canonical reserved job ID.
 func (e ReservedEvent) Validate() error {
-	if e.Op != "reserved" || jobid.Validate(e.RequestID) != nil {
+	if e.Op != "reserved" || jobid.Validate(e.RequestID) != nil || (e.CancelCapability != "" && !validCancelCapability(e.CancelCapability)) {
 		return errors.New("invalid reserved event")
 	}
 	return nil
@@ -148,10 +151,35 @@ type AttachRequest struct {
 	RequestID string `json:"request_id"`
 }
 
-// CancelRequest asks to cancel a job before dispatch.
+// CancelRequest without a capability retains the legacy pre-dispatch contract.
+// The capability is a private wire credential, not part of the submit body.
 type CancelRequest struct {
-	Op        string `json:"op"`
-	RequestID string `json:"request_id"`
+	Op               string `json:"op"`
+	RequestID        string `json:"request_id"`
+	CancelCapability string `json:"cancel_capability,omitempty"`
+	Force            bool   `json:"force,omitempty"`
+}
+
+// CancelAckEvent acknowledges durable stop intent, NOT process termination.
+// Only the explicit capability requester receives it, never other subscribers.
+type CancelAckEvent struct {
+	Op           string `json:"op"`
+	RequestID    string `json:"request_id"`
+	State        string `json:"state"`
+	DesiredLevel int    `json:"desired_level"`
+	Delivery     string `json:"delivery"`
+}
+
+func (e CancelAckEvent) Validate() error {
+	if e.Op != "cancel_ack" || !validKnownJobID(e.RequestID) || (e.DesiredLevel != 1 && e.DesiredLevel != 2) {
+		return errors.New("invalid cancel acknowledgment")
+	}
+	switch e.Delivery {
+	case "pending", "succeeded", "failed", "unavailable":
+	default:
+		return errors.New("invalid cancel delivery")
+	}
+	return (AcceptedEvent{Op: "accepted", RequestID: e.RequestID, State: e.State}).Validate()
 }
 
 // AutoApprovalRequest reads or updates only the authenticated peer's preference.
@@ -354,7 +382,27 @@ func (r StatusRequest) Validate() error { return validateSimpleRequest(r.Op, "st
 func (r AttachRequest) Validate() error { return validateSimpleRequest(r.Op, "attach", r.RequestID) }
 
 // Validate validates a cancel request.
-func (r CancelRequest) Validate() error { return validateSimpleRequest(r.Op, "cancel", r.RequestID) }
+func (r CancelRequest) Validate() error {
+	if err := validateSimpleRequest(r.Op, "cancel", r.RequestID); err != nil {
+		return err
+	}
+	if (r.CancelCapability != "" && !validCancelCapability(r.CancelCapability)) || (r.Force && r.CancelCapability == "") {
+		return errors.New("invalid cancellation credential")
+	}
+	return nil
+}
+
+func validCancelCapability(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // Validate rejects absent thresholds on set and any threshold on get.
 func (r AutoApprovalRequest) Validate() error {

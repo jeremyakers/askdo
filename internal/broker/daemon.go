@@ -3,6 +3,9 @@ package broker
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,6 +119,9 @@ type daemon struct {
 	deadlineWG     sync.WaitGroup
 	connWG         sync.WaitGroup
 	serveWG        sync.WaitGroup
+	cancelWG       sync.WaitGroup
+	cancelStop     chan struct{}
+	cancelRetired  bool // mu: no actor Add after the shutdown join begins
 
 	mu            sync.Mutex
 	jobs          map[string]*jobRuntime
@@ -336,7 +342,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	admissionTail := make(chan struct{})
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail}
+	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
 	d.telegramClient = options.telegramClient
 	if d.telegramClient == nil {
@@ -387,6 +393,16 @@ func (d *daemon) close() {
 		d.queueWG.Wait()
 		d.deadlineWG.Wait()
 		d.connWG.Wait()
+		// Connections (including helper handoffs), job lifecycles and deadlines
+		// can no longer produce actors. Retire idle actors, but join an in-flight
+		// delivery AND its audit while the store is still open.
+		d.mu.Lock()
+		d.cancelRetired = true
+		if d.cancelStop != nil {
+			close(d.cancelStop)
+		}
+		d.mu.Unlock()
+		d.cancelWG.Wait()
 		d.telegramHub.Close()
 		_ = d.policy.Close()
 		if d.fleet != nil {
@@ -628,16 +644,25 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			return
 		}
 		var request proto.ReserveRequest
-		if strictHelperObject(body, "op", "protocol_version") != nil || proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
+		if (strictHelperObject(body, "op", "protocol_version") != nil && strictHelperObject(body, "op", "protocol_version", "cancel_capability") != nil) || proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid reserve request"})
 			return
 		}
-		id, err := d.store.ReserveJobID(context.Background(), uid, time.Now())
+		var id, bearer string
+		if request.CancelCapability {
+			var token [32]byte
+			if _, err = rand.Read(token[:]); err == nil {
+				id, err = d.store.ReserveCancelableJobID(context.Background(), uid, time.Now(), sha256.Sum256(token[:]))
+				bearer = hex.EncodeToString(token[:])
+			}
+		} else {
+			id, err = d.store.ReserveJobID(context.Background(), uid, time.Now())
+		}
 		if err != nil {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "reservation failed"})
 			return
 		}
-		_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id})
+		_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
 	case "submit":
 		if fenced, _ := admissionFence(d.fencePath, d.fenceOwner); fenced {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "migration_in_progress", Message: "submissions are temporarily unavailable"})
@@ -673,7 +698,7 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid cancel request"})
 			return
 		}
-		d.handleCancel(conn, uid, request.RequestID)
+		_ = writeClient(conn, d.cancelResponse(uid, request))
 	case "auto_approval":
 		var request proto.AutoApprovalRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
@@ -864,6 +889,9 @@ func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisc
 		private = job.handoffReady
 	}
 	disconnected := make(chan struct{})
+	stopReading := make(chan struct{})
+	defer func() { close(stopReading); _ = conn.Close(); <-disconnected }()
+	controlReplies := make(chan any, 1)
 	go func() {
 		defer close(disconnected)
 		for {
@@ -873,12 +901,40 @@ func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisc
 			}
 			var cancel proto.CancelRequest
 			if proto.StrictUnmarshal(body, &cancel) == nil && cancel.Validate() == nil && cancel.RequestID == job.req.RequestID {
-				_, _, _ = job.cancel("client")
+				// These frames are also timeout/failed-handoff cleanup from a
+				// client whose view may lag dispatch. Even with a credential they
+				// retain the old pre-dispatch-only semantics. Running stop intent
+				// is an explicit one-shot cancel control exchange, never detach.
+				protected, authorized, err := d.store.AuthorizeCreatorCancel(context.Background(), job.uid, cancel.RequestID, cancel.CancelCapability)
+				var reply any
+				if err != nil {
+					reply = proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "cancellation authority unavailable"}
+				} else if (protected && !authorized) || (cancel.CancelCapability != "" && !authorized) {
+					reply = proto.ErrorEvent{Op: "error", Code: "permission_denied", Message: "cancellation handle required"}
+				} else {
+					_, _, _ = job.cancel("client")
+					continue
+				}
+				// The follower goroutine remains the sole writer of framed replies.
+				select {
+				case controlReplies <- reply:
+				case <-job.done:
+					return
+				case <-stopReading:
+					return
+				}
 			}
 		}
 	}()
 	for {
 		select {
+		case reply := <-controlReplies:
+			_ = conn.SetWriteDeadline(time.Now().Add(subscriberWriteDeadline))
+			err := writeClient(conn, reply)
+			_ = conn.SetWriteDeadline(time.Time{})
+			if err != nil {
+				return
+			}
 		case ready := <-private:
 			private = nil
 			_ = conn.SetWriteDeadline(time.Now().Add(subscriberWriteDeadline))
@@ -976,48 +1032,59 @@ func (d *daemon) handleAttach(conn *net.UnixConn, uid uint32, requestID string, 
 	}
 }
 
-func (d *daemon) handleCancel(conn *net.UnixConn, uid uint32, requestID string) {
+func (d *daemon) cancelResponse(uid uint32, request proto.CancelRequest) cancelReply {
+	requestID := request.RequestID
+	protected, authorized, err := d.store.AuthorizeCreatorCancel(context.Background(), uid, requestID, request.CancelCapability)
+	if err != nil {
+		return proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "cancellation authority unavailable"}
+	}
+	if protected && !authorized {
+		return proto.ErrorEvent{Op: "error", Code: "permission_denied", Message: "cancellation handle required"}
+	}
+	if authorized {
+		return d.creatorCancelResponse(uid, request)
+	}
 	job, err := d.store.GetJob(context.Background(), uid, requestID)
 	if err != nil {
 		if state, reservationErr := d.store.GetReservation(context.Background(), uid, requestID); reservationErr == nil {
 			switch state {
 			case store.ReservationCancelled:
-				_ = writeClient(conn, cancelledReservationEvent(requestID))
-				return
+				return cancelledReservationEvent(requestID)
 			case store.ReservationReserved:
+				if request.CancelCapability != "" {
+					return proto.ErrorEvent{Op: "error", Code: "permission_denied", Message: "no creator cancellation grant"}
+				}
 				if err := d.store.CancelReservation(context.Background(), uid, requestID); err == nil {
-					_ = writeClient(conn, cancelledReservationEvent(requestID))
-					return
+					return cancelledReservationEvent(requestID)
 				}
 				// An intervening cancel may have won. If submit instead won,
 				// inspect its durable job rather than claiming it was cancelled.
 				if current, lookupErr := d.store.GetReservation(context.Background(), uid, requestID); lookupErr == nil && current == store.ReservationCancelled {
-					_ = writeClient(conn, cancelledReservationEvent(requestID))
-					return
+					return cancelledReservationEvent(requestID)
 				}
 				job, err = d.store.GetJob(context.Background(), uid, requestID)
 			}
 		}
 	}
 	if err != nil {
-		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "not_found", Message: "job not found"})
-		return
+		return proto.ErrorEvent{Op: "error", Code: "not_found", Message: "job not found"}
+	}
+	if request.CancelCapability != "" {
+		return proto.ErrorEvent{Op: "error", Code: "permission_denied", Message: "no creator cancellation grant"}
 	}
 	runtime := d.runtime(uid, requestID)
 	if runtime == nil {
-		_ = writeClient(conn, resultEvent(requestID, job.State, decodeStoredResult(job)))
-		return
+		return resultEvent(requestID, job.State, decodeStoredResult(job))
 	}
 	state, cancelled, err := runtime.cancel("client")
 	if err != nil {
-		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: err.Error()})
-		return
+		return proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "cancellation failed"}
 	}
 	message := "dispatch committed; operation may be running"
 	if cancelled {
 		message = "cancelled before dispatch"
 	}
-	_ = writeClient(conn, proto.ResultEvent{Op: "result", RequestID: requestID, State: string(state), Message: message})
+	return proto.ResultEvent{Op: "result", RequestID: requestID, State: string(state), Message: message}
 }
 
 func cancelledReservationEvent(requestID string) proto.ResultEvent {

@@ -52,7 +52,10 @@ frame the daemon obtains `SO_PEERCRED` and fails closed if the peer's UID
 cannot be determined. Nothing the client asserts (username, arguments,
 environment) is used for authentication. All later operations on a job are
 scoped to the owning UID: only the UID that submitted a job may
-`status`, `attach`, or `cancel` it.
+`status` or `attach` it. Cancellation of a new protected job additionally
+requires its private creator capability, even before dispatch and on explicit
+cancel frames within submit/attach connections. Disconnect/deadline cleanup
+remains pre-dispatch-only; disconnect is never authority to kill a running job.
 
 ## Message types
 
@@ -71,6 +74,40 @@ must receive and print this ID **before** sending the command in a new v4
 `submit` connection. Lost acknowledgements can leave unused reservations;
 reservation creates no executable job, spool or Telegram approval. A reserved
 ID is owner-scoped for status/cancel and cannot be submitted by another UID.
+
+The current CLI opts in with `"cancel_capability":true` on `reserve`. Only
+that private reply adds `"cancel_capability":"<64 lowercase hex>"`: 32 bytes
+from the broker's cryptographic RNG. The allocation transaction binds its
+SHA-256 hash to `(peer UID, job ID)`. The bearer is disclosed exactly once;
+status, attach, accepted/progress/result streams, duplicate submits, spool,
+manifest, reviewer and Telegram never return it. A legacy reserve without the
+opt-in still receives exactly the old two-field reply, with no new grant.
+
+Before sending any operation, the CLI durably writes an exclusive random-named
+0600 receipt under `$XDG_STATE_HOME/askdo/cancel-handles` (default
+`~/.local/state/askdo/cancel-handles`, directory 0700), syncing file and directory.
+It contains only the bearer, job ID, absolute socket path and informative host
+name. Only `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...` are printed, never the
+bearer. If the private file cannot be saved, nothing is submitted. The receipt
+survives interruption, timeout, disconnect and client exit. Automatic removal
+requires an observed terminal result on that submitting/cancelling client;
+otherwise keep it, or explicitly remove it yourself after checking status.
+No cancel command searches a shared-UID cache by public job ID.
+
+This is a cooperative, guess-resistant capability, **not an OS boundary against
+malicious same-UID agents** able to read each other's files/memory. Do not share
+receipt contents. Host metadata helps identify the endpoint; renaming a host
+does not revoke the grant. The authoritative binding is peer UID plus job
+capability at the receipt's socket. A different broker/job will not match.
+
+Roll out matching client, broker and `askdo-launch` binaries together, with
+separately authorized installation/service actions. Old strict brokers reject
+the extension; the new CLI does not silently fall back to unprotected submit.
+Protected foreground claims require a helper advertising `cancel_control`
+**before** claim consumption. Old helpers still serve legacy jobs. Jobs created
+without a grant cannot acquire one retrospectively. The jobs DB migrates from
+schema 4 to 5, preserving historical jobs/reservations; older brokers cannot
+open the newer schema. No optional cancellation feature gates daemon startup.
 
 **`submit`** — create or retrieve a job:
 
@@ -263,14 +300,59 @@ terminal or receive the handoff bearer. Only one attach subscriber per job:
 a second concurrent attach gets `{"op":"error","code":"already_attached",...}`.
 Attach never cancels the job on disconnect.
 
-**`cancel`** — pre-dispatch cancellation: `{"op":"cancel","request_id":"2026-09-27_#1"}`.
-Replies with a `result` event. If the job was cancelled before dispatch the
-state is `cancelled` with message `"cancelled before dispatch"`; if dispatch
-was already committed the state is `starting` or `running` with message
-`"dispatch committed; operation may be running"` — cancellation is reported
-only once confirmed, and never falsely claimed after the commit point. A
-`cancel` frame with the job's `request_id` is also accepted mid-stream on a
-live submit-follow connection.
+**`cancel`** — the creator uses:
+
+```sh
+askdo cancel --handle-file /path/printed/by/askdo/job-random.json
+askdo cancel --handle-file /path/printed/by/askdo/job-random.json --force
+```
+
+The CLI reads only the explicitly provided private receipt. It sends the typed
+`cancel_capability` wire credential with `op: "cancel"` and `request_id`; the
+optional boolean `force: true` requests level 2 (`SIGKILL`) rather than level 1
+(`SIGINT`, Ctrl-C). No raw-secret CLI flag/environment variable exists. The
+capability cannot approve, modify, rerun or target a process ID/UID/signal.
+
+Before dispatch, cancellation prevents launch and returns an honest `cancelled`
+result (including revoking an unconsumed foreground handoff). Once committed,
+the broker durably records monotonic desired level **before** notifying this
+job's owned controller, independently of the execution queue. It promptly
+returns only to the requester:
+
+```json
+{"op":"cancel_ack","request_id":"2026-09-27_#1","state":"running","desired_level":1,"delivery":"pending"}
+```
+
+`pending`, `succeeded`, `failed` or `unavailable` describe control delivery,
+**not actual exit**. Repeat cancellation can observe its durable delivery;
+repeating a level never resends a signal. Explicit force escalates once. There
+is no automatic timeout, retry, escalation or new human approval. Early intent
+survives the starting/controller-publication gap. A terminal job instead returns
+its actual result. Continue with `status`/`attach`: a command may ignore SIGINT,
+flush output then exit 0, or die by its actual signal. Nothing undoes already
+performed side effects or erases the dispatch commit.
+
+The legacy form `askdo cancel JOB_ID` / `{"op":"cancel","request_id":"..."}`
+retains pre-dispatch-only, owning-UID behavior **only for jobs without a grant**.
+After commit it still returns `starting`/`running`, not a false cancellation.
+It cannot cancel a protected job at any stage. Explicit cancel frames on
+submit/attach require the same credential but retain **pre-dispatch-only**
+cleanup semantics (the client's view can lag dispatch). Running stop intent
+uses a separate one-shot cancel exchange; acknowledgments are not broadcast
+to other followers. Client disconnect/timeout still detaches after dispatch.
+
+Execution groups include ordinary descendants and timeout wrappers, including
+different-UID descendants when controlled by root. Signals are serialized with
+final reap using Linux `waitid(WNOWAIT)`; a released/restarted/unknown controller
+never signals a cached numeric PID/PGID. Detached execution owns its output-copy
+pipes and joins them before final `cmd.Wait` reap and result publication,
+preserving captured-input delivery. An exited leader remains unreaped as the
+group's identity anchor while ordinary same-group descendants retain those
+pipes. SIGINT and explicit force remain available during that drain; the real
+leader exit status is preserved. Only after the drain is settled does final
+reap disable group signaling.
+Daemons escaping the job's process group/session are outside this authority;
+there is no UID-wide descendant hunt.
 
 **`auto_approval`** — the authenticated submitting UID's preference, not an
 administrator grant. `{"op":"auto_approval","action":"get"}` reads it;
@@ -318,6 +400,24 @@ permission to resubmit. Only foreground completion/error/status travels on
 the submit socket; stdout/stderr go directly to the original terminal, not
 the base64 stream log. Rootless/container tests cover Ctrl-C, stop/resume and
 resize; SSH-host behavior and host cutover remain unverified.
+
+The matching helper re-execs only its fixed, no-argument root binary as a
+per-job controller in a separate group of that **same original terminal
+session**, using inherited root-parent/broker-authenticated sockets and the
+original terminal descriptor. It is not a standalone daemon or an arbitrary
+root-command interface. Bound cancel/ack frames use the existing consumed
+claim's broker connection. Its receiver runs before child publication and
+survives Ctrl-Z while the original wrapper group is suspended; only the owned
+child group receives SIGINT/explicit SIGKILL (SIGCONT lets a stopped child
+process its interrupt). Completion follows reap and terminal restoration.
+Remote cancellation of a suspended job does not steal the foreground/modes
+from a different terminal job. The deliberately suspended wrapper remains a
+shell job until normal `fg` resumes it; status can already show the child's real
+result. Native SSH/NAS acceptance is separate from rootless-fixture evidence.
+If the original wrapper dies after handoff, its loss is not an implicit kill:
+the owned controller can still receive explicit cancellation. It does not
+fabricate a restored-terminal completion after losing that original wrapper;
+the broker reports `unknown`, not permission to replay the command.
 
 **`progress`** — non-terminal lifecycle progress:
 
@@ -407,7 +507,7 @@ direct rather than streamed over this protocol:
 | `0`–`255` (command's own) | `result` carried `exit_code`; the CLI exits with the command's verbatim status (including 0) |
 | `128 + signal` | `result` carried `signal` (e.g. SIGKILL → 137) |
 | `124` | client waiting timeout: `--timeout` expired (pre-dispatch the job is cancelled first; post-dispatch the CLI detaches and the operation keeps running) or a `wait_timeout` event was received |
-| `125` | infrastructure/review failure, invalid config/usage, connection loss, or terminal `failed`/`unknown` outcome; also `cancel` against a committed (`starting`/`running`) job |
+| `125` | infrastructure/review failure, invalid config/usage, connection loss, terminal `failed`/`unknown`, rejected/unavailable cancellation, or legacy public-ID `cancel` against a committed job |
 | `126` | terminal `denied`, `expired`, or `cancelled` before dispatch |
 | `130` | SIGINT during the wait (pre-dispatch the job is cancelled first) |
 
@@ -415,3 +515,7 @@ A dispatched command may itself exit with 124/125/126/130; `status`/`attach`
 output and the stored result (result kind `exit`/`signal` vs
 `launch_failure`/`wrapper`) distinguish the command's own codes from wrapper
 codes.
+
+`cancel --handle-file` exits 0 for a durable request with pending/successful
+delivery, not proof of termination. A returned terminal result instead uses
+the outcome codes above. Failed/unavailable delivery retains the receipt.

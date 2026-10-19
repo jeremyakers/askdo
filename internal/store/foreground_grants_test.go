@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -272,10 +273,10 @@ func TestForegroundSchemaMigration(t *testing.T) {
 			}
 			defer s.Close()
 			var v int
-			if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 4 {
+			if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
 				t.Fatalf("user_version: %d %v", v, err)
 			}
-			if err := s.db.QueryRow(`SELECT schema_version FROM meta`).Scan(&v); err != nil || v != 4 {
+			if err := s.db.QueryRow(`SELECT schema_version FROM meta`).Scan(&v); err != nil || v != schemaVersion {
 				t.Fatalf("meta: %d %v", v, err)
 			}
 			if version > 0 {
@@ -305,7 +306,7 @@ func TestForegroundUnsupportedVersionDoesNotMutate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`PRAGMA user_version = 5`); err != nil {
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {

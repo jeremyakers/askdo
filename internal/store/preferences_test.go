@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,7 +23,7 @@ func TestAutoApprovalPreferences(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 || userVersion != 4 {
+	if version != schemaVersion || userVersion != schemaVersion {
 		t.Fatalf("fresh versions = %d, %d", version, userVersion)
 	}
 	ctx := context.Background()
@@ -112,7 +113,7 @@ func TestMigrateVersionOnePreservesJobBytes(t *testing.T) {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&userVersion); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 || userVersion != 4 {
+	if version != schemaVersion || userVersion != schemaVersion {
 		t.Fatalf("versions = %d, %d", version, userVersion)
 	}
 	var submit, operation, approval []byte
@@ -132,8 +133,8 @@ func TestUnsupportedSchemaDoesNotMutate(t *testing.T) {
 	for _, schema := range []struct {
 		name, statement string
 	}{
-		{"meta", `INSERT INTO meta VALUES (5)`},
-		{"sqlite", `INSERT INTO meta VALUES (3); PRAGMA user_version = 5`},
+		{"meta", fmt.Sprintf(`INSERT INTO meta VALUES (%d)`, schemaVersion+1)},
+		{"sqlite", fmt.Sprintf(`INSERT INTO meta VALUES (3); PRAGMA user_version = %d`, schemaVersion+1)},
 	} {
 		t.Run(schema.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "jobs.sqlite3")
@@ -153,7 +154,7 @@ func TestUnsupportedSchemaDoesNotMutate(t *testing.T) {
 			}
 			if s, err := Open(path); err == nil {
 				s.Close()
-				t.Fatal("accepted unsupported schema 4")
+				t.Fatal("accepted unsupported future schema")
 			}
 			after, err := os.ReadFile(path)
 			if err != nil {

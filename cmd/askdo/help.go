@@ -19,10 +19,17 @@ func isHelpWord(arg string) bool {
 func writeTopHelp(w io.Writer) {
 	fmt.Fprint(w, `usage: askdo [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] -- COMMAND [ARG...]
        askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
-       askdo status|attach|cancel JOB_ID    askdo auto-approve status | set N | off
+       askdo status|attach JOB_ID
+       askdo cancel --handle-file PATH [--force]
+       askdo cancel JOB_ID                 legacy jobs, before dispatch only
+       askdo auto-approve status | set N | off
 
 Run COMMAND with privilege after approval. Put -- before COMMAND so its own
 flags are passed to it unchanged.
+
+Submission prints JOB_ID and a private CANCEL_HANDLE_FILE path. Keep that file
+to interrupt your own running command; --force requests SIGKILL explicitly.
+A stop acknowledgment is not proof of exit. Use status or attach to confirm.
 
 Operator commands (root):
   askdo auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]

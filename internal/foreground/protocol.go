@@ -22,13 +22,14 @@ const maxFrame = 32768
 var lowerHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type HelperClaim struct {
-	Type       string `json:"type"`
-	TokenHex   string `json:"token_hex"`
-	Digest     string `json:"digest"`
-	SudoUID    uint32 `json:"sudo_uid"`
-	TTYDev     uint64 `json:"tty_dev"`
-	TTYIno     uint64 `json:"tty_ino"`
-	TTYSession int    `json:"tty_session"`
+	Type          string `json:"type"`
+	TokenHex      string `json:"token_hex"`
+	Digest        string `json:"digest"`
+	SudoUID       uint32 `json:"sudo_uid"`
+	TTYDev        uint64 `json:"tty_dev"`
+	TTYIno        uint64 `json:"tty_ino"`
+	TTYSession    int    `json:"tty_session"`
+	CancelControl bool   `json:"cancel_control,omitempty"`
 }
 
 // ParseClaim reads only token and digest. The UID and terminal are measured by
@@ -100,12 +101,13 @@ func strictObject(raw []byte, dest *map[string]json.RawMessage) error {
 }
 
 type LaunchSpec struct {
-	Argv       []string `json:"argv"`
-	Env        []string `json:"env"`
-	CWD        string   `json:"cwd"`
-	TargetUID  uint32   `json:"target_uid"`
-	Foreground bool     `json:"foreground"`
-	JobID      string   `json:"job_id"`
+	Argv          []string `json:"argv"`
+	Env           []string `json:"env"`
+	CWD           string   `json:"cwd"`
+	TargetUID     uint32   `json:"target_uid"`
+	Foreground    bool     `json:"foreground"`
+	JobID         string   `json:"job_id"`
+	CancelControl bool     `json:"cancel_control,omitempty"`
 }
 
 // SendLaunch sends a single marker carrying exactly one CWD fd, then a
@@ -195,9 +197,15 @@ func ReceiveLaunch(c *net.UnixConn) (LaunchSpec, *os.File, error) {
 		fd.Close()
 		return LaunchSpec{}, nil, err
 	}
-	if len(fields) != 6 {
+	if len(fields) != 6 && (len(fields) != 7 || fields["cancel_control"] == nil) {
 		fd.Close()
 		return LaunchSpec{}, nil, errors.New("unexpected launch fields")
+	}
+	for _, name := range []string{"argv", "env", "cwd", "target_uid", "foreground", "job_id"} {
+		if fields[name] == nil {
+			fd.Close()
+			return LaunchSpec{}, nil, errors.New("missing launch field")
+		}
 	}
 	var spec LaunchSpec
 	dec := json.NewDecoder(bytes.NewReader(raw))

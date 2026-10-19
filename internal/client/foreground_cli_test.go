@@ -115,7 +115,7 @@ func TestHeadlessSubmitWaitsAndStreamsWithoutDetachFlag(t *testing.T) {
 				HasControllingTTY: func() bool { probes++; return false },
 				launchHelper:      func(string, string) error { helperCalls++; return nil },
 			})
-			if code != tc.exit || stdout.String() != "uid\n" || stderr.String() != "JOB_ID="+testCanonicalID+"\nwarning\n" || probes != 1 || helperCalls != 0 {
+			if code != tc.exit || stdout.String() != "uid\n" || withoutHandleLine(stderr.String()) != "JOB_ID="+testCanonicalID+"\nwarning\n" || probes != 1 || helperCalls != 0 {
 				t.Fatalf("exit=%d stdout=%q stderr=%q tty probes=%d helper calls=%d", code, &stdout, &stderr, probes, helperCalls)
 			}
 			if err := <-serverDone; err != nil {

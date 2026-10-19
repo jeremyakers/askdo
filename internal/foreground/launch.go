@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/jeremyakers/askdo/internal/ownedprocess"
 	"golang.org/x/sys/unix"
 )
 
@@ -29,6 +30,16 @@ type Completion struct {
 // The caller must remain a foreground job; a daemon or a private PTY is not a
 // substitute for the original SSH terminal.
 func Launch(spec LaunchSpec, cwdFD, terminal *os.File) (completion Completion, launchErr error) {
+	return launch(spec, cwdFD, terminal, nil, nil)
+}
+
+// LaunchControlled runs in the original terminal session but outside the
+// wrapper's process group, so its control receiver survives shell suspension.
+func LaunchControlled(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobControl *TerminalJobControl) (Completion, error) {
+	return launch(spec, cwdFD, terminal, control, jobControl)
+}
+
+func launch(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobControl *TerminalJobControl) (completion Completion, launchErr error) {
 	if err := ValidateLaunch(spec, cwdFD); err != nil {
 		return Completion{}, err
 	}
@@ -54,12 +65,12 @@ func Launch(spec LaunchSpec, cwdFD, terminal *os.File) (completion Completion, l
 	}
 	// Checking /dev/tty prevents an unrelated terminal in another session from
 	// being mistaken for the terminal belonging to this helper.
-	control, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	controlTTY, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return Completion{}, ErrTerminalRequired
 	}
-	defer control.Close()
-	csid, err := unix.IoctlGetInt(int(control.Fd()), unix.TIOCGSID)
+	defer controlTTY.Close()
+	csid, err := unix.IoctlGetInt(int(controlTTY.Fd()), unix.TIOCGSID)
 	if err != nil || csid != sid {
 		return Completion{}, ErrTerminalRequired
 	}
@@ -67,12 +78,16 @@ func Launch(spec LaunchSpec, cwdFD, terminal *os.File) (completion Completion, l
 	if err != nil {
 		return Completion{}, ErrTerminalRequired
 	}
-	controlDev, err := unix.IoctlGetInt(int(control.Fd()), unix.TIOCGDEV)
+	controlDev, err := unix.IoctlGetInt(int(controlTTY.Fd()), unix.TIOCGDEV)
 	if err != nil || dev != controlDev {
 		return Completion{}, ErrTerminalRequired
 	}
 	group, err := unix.IoctlGetInt(tty, unix.TIOCGPGRP)
-	if err != nil || group != unix.Getpgrp() {
+	expectedGroup := unix.Getpgrp()
+	if jobControl != nil {
+		expectedGroup = jobControl.WrapperGroup
+	}
+	if err != nil || group != expectedGroup {
 		return Completion{}, ErrTerminalRequired
 	}
 	// Save the submitter's modes, not a fixed set of defaults. A child may leave
@@ -99,67 +114,124 @@ func Launch(spec LaunchSpec, cwdFD, terminal *os.File) (completion Completion, l
 	}
 	defer cmd.Process.Release() // Wait4, not cmd.Wait, is the sole reaper.
 	pid := cmd.Process.Pid
+	child := ownedprocess.New(pid)
+	if control != nil {
+		control.attach(child)
+	}
 	// Wait4 is the sole reaper. cmd.Wait would lose stop/continue transitions.
 	// Once started, even restoration failures must not pretend the child did
 	// not run; preserve an error rather than inventing an exit status.
 	live := true
+	wrapperAlive := func() bool { return jobControl == nil || jobControl.WrapperAlive == nil || jobControl.WrapperAlive() }
+	defer func() {
+		if !wrapperAlive() {
+			// A lost wrapper is not permission to kill/retry. Reap normally, but
+			// do not claim a trustworthy restored-terminal completion.
+			completion = Completion{}
+			launchErr = errors.Join(launchErr, errors.New("original terminal wrapper lost"))
+		}
+	}()
 	defer func() {
 		if live { // no caller may abandon a stopped or running child
-			_ = unix.Kill(-pid, unix.SIGKILL)
+			_ = child.Cancel(true)
 			for {
-				_, reapErr := unix.Wait4(pid, nil, 0, nil)
-				if reapErr != unix.EINTR {
+				event, reapErr := child.WaitEvent()
+				if reapErr != nil || event.Terminal {
 					break
 				}
 			}
 		}
 	}()
+	// A remotely cancelled suspended job must not steal a terminal now owned by
+	// the shell or an unrelated foreground job. Modes were restored at suspend.
+	mayRestore := func() bool {
+		if !wrapperAlive() {
+			return false
+		}
+		if jobControl == nil {
+			return true
+		}
+		current, err := unix.IoctlGetInt(tty, unix.TIOCGPGRP)
+		return err == nil && (current == pid || current == group)
+	}
 	// Restoration failures must be reported even when the child exited.
 	defer func() {
-		if err := unix.IoctlSetTermios(tty, unix.TCSETS, termios); err != nil {
+		if !mayRestore() {
+			return
+		}
+		if err := setTerminalModes(tty, termios); err != nil {
 			completion = Completion{}
 			launchErr = errors.Join(launchErr, fmt.Errorf("restore original terminal modes: %w", err))
 		}
 	}()
 	defer func() {
+		if !mayRestore() {
+			return
+		}
 		if err := setForeground(tty, group); err != nil {
 			completion = Completion{}
 			launchErr = errors.Join(launchErr, fmt.Errorf("restore original foreground: %w", err))
 		}
 	}()
 	for {
-		var status unix.WaitStatus
-		_, err := unix.Wait4(pid, &status, unix.WUNTRACED|unix.WCONTINUED, nil)
-		if err == unix.EINTR {
-			continue
-		}
+		event, err := child.WaitEvent()
 		if err != nil {
 			return Completion{}, fmt.Errorf("wait for foreground child: %w", err)
 		}
-		if status.Exited() {
+		status := event.Status
+		if event.Terminal && status.Exited() {
 			live = false
 			return Completion{Type: "exit", JobID: spec.JobID, ExitCode: status.ExitStatus()}, nil
 		}
-		if status.Signaled() {
+		if event.Terminal && status.Signaled() {
 			live = false
 			return Completion{Type: "signal", JobID: spec.JobID, Signal: int(status.Signal())}, nil
 		}
-		if !status.Stopped() {
+		if !event.Stopped {
 			continue
 		}
-		if err := setForeground(tty, group); err != nil {
-			return Completion{}, fmt.Errorf("restore foreground after stop: %w", err)
+		levelAtStop := 0
+		if control != nil {
+			levelAtStop = control.Level()
+		}
+		if !child.Stopped() {
+			continue
+		} // cancel/continue raced with stop observation
+		if wrapperAlive() {
+			if err := setForeground(tty, group); err != nil {
+				return Completion{}, fmt.Errorf("restore foreground after stop: %w", err)
+			}
 		}
 		// SIGSTOP also works when the wrapper belongs to an orphaned group;
 		// SIGTSTP would be silently discarded in that situation. The shell's
 		// fg resumes this group and gives it the terminal again.
-		if err := unix.Kill(-group, unix.SIGSTOP); err != nil {
-			return Completion{}, fmt.Errorf("suspend wrapper: %w", err)
+		if jobControl == nil {
+			if err := unix.Kill(-group, unix.SIGSTOP); err != nil {
+				return Completion{}, fmt.Errorf("suspend wrapper: %w", err)
+			}
+		} else {
+			if wrapperAlive() {
+				if err := setTerminalModes(tty, termios); err != nil {
+					return Completion{}, fmt.Errorf("restore modes after stop: %w", err)
+				}
+				if err := jobControl.Suspend(); err != nil {
+					return Completion{}, fmt.Errorf("suspend wrapper: %w", err)
+				}
+			}
+			for control.Level() == levelAtStop {
+				select {
+				case <-jobControl.Resume:
+					goto resume
+				case <-control.Changed():
+				}
+			}
+			continue // cancel resumes only the child, not some other terminal job
 		}
+	resume:
 		if err := setForeground(tty, pid); err != nil {
 			return Completion{}, fmt.Errorf("resume child foreground: %w", err)
 		}
-		if err := unix.Kill(-pid, unix.SIGCONT); err != nil {
+		if err := child.Continue(); err != nil {
 			return Completion{}, fmt.Errorf("resume child: %w", err)
 		}
 	}
@@ -168,6 +240,14 @@ func Launch(spec LaunchSpec, cwdFD, terminal *os.File) (completion Completion, l
 // Blocking SIGTTOU on this locked OS thread allows tcsetpgrp while the
 // helper is in the background. Never change the process-wide signal handler.
 func setForeground(tty, group int) error {
+	return terminalControl(func() error { return unix.IoctlSetPointerInt(tty, unix.TIOCSPGRP, group) })
+}
+
+func setTerminalModes(tty int, modes *unix.Termios) error {
+	return terminalControl(func() error { return unix.IoctlSetTermios(tty, unix.TCSETS, modes) })
+}
+
+func terminalControl(change func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	var mask, previous unix.Sigset_t
@@ -176,5 +256,5 @@ func setForeground(tty, group int) error {
 		return err
 	}
 	defer unix.PthreadSigmask(unix.SIG_SETMASK, &previous, nil)
-	return unix.IoctlSetPointerInt(tty, unix.TIOCSPGRP, group)
+	return change()
 }

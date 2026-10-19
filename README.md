@@ -234,7 +234,11 @@ askdo --review=yes --reason 'Review the service restart' -- /usr/bin/systemctl r
 # Follow up on a job (IDs look like 2026-09-28_#1, printed at submit time)
 askdo status '2026-09-28_#1' --json
 askdo attach '2026-09-28_#1'
-askdo cancel '2026-09-28_#1'      # only works before dispatch
+
+# Use the private file path printed as CANCEL_HANDLE_FILE at submission
+askdo cancel --handle-file /path/printed/by/askdo/job-random.json
+askdo cancel --handle-file /path/printed/by/askdo/job-random.json --force
+# Public-ID cancellation is only for legacy jobs, before dispatch
 
 # In AI-review mode, exempt your own account while keeping review for agents
 sudo askdo review exempt add "$USER"
@@ -249,6 +253,16 @@ If the client disconnects before a command is launched, the pending request
 is cancelled. After a headless command launches, use `status` and `attach` to
 follow the existing job rather than submitting it again. See
 [job lifecycles and recovery](docs/protocol-client.md) for the details.
+
+Creator cancellation is implemented in source and requires matching upgraded
+client, broker and terminal helper; it does not retrofit handles onto old jobs.
+The default sends Ctrl-C (`SIGINT`) to the owned command group; `--force`
+explicitly requests `SIGKILL`. Acknowledgment means **stop requested**, not
+confirmed exit or undone side effects. There is no automatic escalation timer.
+The private 0600 handle survives disconnect/interrupt under a 0700 directory;
+keep its path, not its contents. Public job IDs do not authorize cancellation
+of new jobs. This protects against guessing another cooperative agent's handle,
+not malicious processes sharing your Unix UID and file/memory access.
 
 ## Review a script before you run it
 

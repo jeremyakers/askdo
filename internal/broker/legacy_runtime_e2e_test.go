@@ -384,7 +384,17 @@ func legacyStartClient(t *testing.T, socket, cwd string, uid uint32, input strin
 	}
 	p.cmd = exec.CommandContext(ctx, self, "-test.run=^TestLegacyRuntimeClientHelper$")
 	p.cmd.Dir = cwd
-	p.cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/var/tmp", legacyClientEnv + "=1", "LEGACY_CLIENT_SOCKET=" + socket, "LEGACY_CLIENT_ARGS=" + string(encoded)}
+	// Each real test UID gets its own private receipt location. /var/tmp is a
+	// shared fixture HOME, not a real per-user XDG state directory.
+	stateDir, err := os.MkdirTemp("/qa", "client-state-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(stateDir, int(uid), int(uid)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	p.cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/var/tmp", "XDG_STATE_HOME=" + stateDir, legacyClientEnv + "=1", "LEGACY_CLIENT_SOCKET=" + socket, "LEGACY_CLIENT_ARGS=" + string(encoded)}
 	p.cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{1000}}}
 	p.cmd.Stdin = strings.NewReader(input)
 	p.cmd.Stdout = &p.output
@@ -621,7 +631,16 @@ func TestRootLegacyRuntimeFullAppMatrix(t *testing.T) {
 				}
 				switch tc.action {
 				case "cancel":
-					legacyStartClient(t, f.fleet.broker.socket, cwd, tc.uid, "", "cancel", id).finish(t, 126)
+					var handle string
+					for _, line := range strings.Split(p.log.text(), "\n") {
+						if strings.HasPrefix(line, "CANCEL_HANDLE_FILE=") {
+							handle = strings.TrimPrefix(line, "CANCEL_HANDLE_FILE=")
+						}
+					}
+					if handle == "" {
+						t.Fatal("modern client did not preserve its private receipt")
+					}
+					legacyStartClient(t, f.fleet.broker.socket, cwd, tc.uid, "", "cancel", "--handle-file", handle).finish(t, 126)
 				case "bytes":
 					path, original := "stdin", input
 					if tc.mode == "bundle" {

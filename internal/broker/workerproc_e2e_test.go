@@ -40,8 +40,22 @@ func TestMain(m *testing.M) {
 	if os.Getenv(testReviewerHelperEnv) == "1" {
 		os.Exit(reviewer.Main(context.Background(), []string{"reviewer"}, os.Stdin, os.Stdout, os.Stderr, reviewerHelperModel()))
 	}
+	// Durable creator receipts from synthetic clients belong to the test run,
+	// not the developer's shared-UID state/cache. Preserve explicit fixture paths.
+	var clientState string
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		var err error
+		clientState, err = os.MkdirTemp("", "askdo-broker-client-state-")
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = os.Setenv("XDG_STATE_HOME", clientState)
+	}
 	code := m.Run()
 	cleanupSubmitTempRoot()
+	if clientState != "" {
+		_ = os.RemoveAll(clientState)
+	}
 	os.Exit(code)
 }
 

@@ -192,7 +192,7 @@ func TestSubmitRequestLifecycleValidation(t *testing.T) {
 
 func TestClientEventValidation(t *testing.T) {
 	id := "0123456789abcdef0123456789abcdef"
-	valid := []interface{ Validate() error }{StatusRequest{"status", id}, AttachRequest{"attach", id}, CancelRequest{"cancel", id}, AcceptedEvent{"accepted", id, "queued"}, ProgressEvent{"progress", "reviewing", "x"}, OutputEvent{"stdout", "stdout", base64.StdEncoding.EncodeToString([]byte("x")), false}, ResultEvent{Op: "result", State: "finished"}, WaitTimeoutEvent{"wait_timeout", id}, ErrorEvent{"error", "bad", "x"}}
+	valid := []interface{ Validate() error }{StatusRequest{"status", id}, AttachRequest{"attach", id}, CancelRequest{Op: "cancel", RequestID: id}, AcceptedEvent{"accepted", id, "queued"}, ProgressEvent{"progress", "reviewing", "x"}, OutputEvent{"stdout", "stdout", base64.StdEncoding.EncodeToString([]byte("x")), false}, ResultEvent{Op: "result", State: "finished"}, WaitTimeoutEvent{"wait_timeout", id}, ErrorEvent{"error", "bad", "x"}}
 	for _, message := range valid {
 		if err := message.Validate(); err != nil {
 			t.Fatalf("%T: %v", message, err)

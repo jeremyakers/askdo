@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 
+	"github.com/jeremyakers/askdo/internal/ownedprocess"
 	"github.com/jeremyakers/askdo/internal/store"
 	"golang.org/x/sys/unix"
 )
@@ -87,37 +89,83 @@ func (SystemExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, 
 		}
 		ownedStdin = true
 	}
+	if ownedStdin {
+		defer stdin.Close()
+	}
 	// Go chdirs before mapping ExtraFiles onto fd 3. Point cmd.Dir at
 	// the duplicate's original number; F_DUPFD_CLOEXEC atomically prevents
 	// that original number leaking through any concurrent exec or into the
 	// approved process after its chdir. ExtraFiles supplies fd 3 there.
 	dupDir, err := duplicateCWD(op.CWDFd)
 	if err != nil {
-		if ownedStdin {
-			_ = stdin.Close()
-		}
 		return nil, fmt.Errorf("duplicate working directory descriptor: %w", err)
 	}
 	heldDir := os.NewFile(uintptr(dupDir), op.CWD)
+	defer heldDir.Close()
+	// Concrete child-side files prevent exec.Cmd.Wait from hiding output joins
+	// after it reaps the leader. We own and join these copies before final reap.
+	var pipes []executionOutputPipe
+	started := false
+	defer func() {
+		for _, pipe := range pipes {
+			_ = pipe.writer.Close()
+			if !started {
+				_ = pipe.reader.Close()
+			}
+		}
+	}()
+	connect := func(destination io.Writer) (io.Writer, error) {
+		if destination == nil {
+			return nil, nil
+		}
+		if file, ok := destination.(*os.File); ok {
+			return file, nil
+		}
+		r, w, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		pipes = append(pipes, executionOutputPipe{reader: r, writer: w, destination: destination})
+		return w, nil
+	}
 	cmd := exec.Command(op.Argv[0], op.Argv[1:]...)
 	cmd.Dir = "/proc/self/fd/" + strconv.Itoa(int(heldDir.Fd()))
 	cmd.Env = append([]string(nil), op.Env...)
 	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.ExtraFiles = []*os.File{heldDir}
-	if err := cmd.Start(); err != nil {
-		if ownedStdin {
-			_ = stdin.Close()
+	cmd.Stdout, err = connect(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("create stdout pipe: %w", err)
+	}
+	// Like os/exec, equal comparable writers share one pipe/copy goroutine.
+	// In particular, an ordinary bytes.Buffer must not receive concurrent writes.
+	if stdout != nil && reflect.TypeOf(stdout).Comparable() && stdout == stderr {
+		cmd.Stderr = cmd.Stdout
+	} else {
+		cmd.Stderr, err = connect(stderr)
+		if err != nil {
+			return nil, fmt.Errorf("create stderr pipe: %w", err)
 		}
-		_ = heldDir.Close()
+	}
+	cmd.ExtraFiles = []*os.File{heldDir}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launch %q: %w", op.Argv[0], err)
 	}
-	if ownedStdin {
-		_ = stdin.Close()
-	} // the child holds its own stdin fd
-	_ = heldDir.Close()
-	return &systemExecution{cmd: cmd}, nil
+	started = true
+	copyErrors := make(chan error, len(pipes))
+	for _, pipe := range pipes {
+		go func() {
+			_, err := io.Copy(pipe.destination, pipe.reader)
+			_ = pipe.reader.Close()
+			copyErrors <- err
+		}()
+	}
+	return &systemExecution{cmd: cmd, child: ownedprocess.New(cmd.Process.Pid), copyErrors: copyErrors, copies: len(pipes)}, nil
+}
+
+type executionOutputPipe struct {
+	reader, writer *os.File
+	destination    io.Writer
 }
 
 func duplicateCWD(dir *os.File) (int, error) {
@@ -161,15 +209,28 @@ func validateOperation(op Operation) error {
 }
 
 type systemExecution struct {
-	cmd  *exec.Cmd
-	once sync.Once
+	cmd        *exec.Cmd
+	child      *ownedprocess.Child
+	once       sync.Once
+	copyErrors <-chan error
+	copies     int
 }
+
+func (e *systemExecution) Cancel(force bool) error { return e.child.Cancel(force) }
 
 // Wait reaps the child exactly once and maps its outcome to a durable result.
 func (e *systemExecution) Wait() store.Result {
 	var result store.Result
 	e.once.Do(func() {
-		result = waitResult(e.cmd.Wait())
+		result = waitResult(e.child.Wait(func() error {
+			var first error
+			for range e.copies {
+				if err := <-e.copyErrors; first == nil {
+					first = err
+				}
+			}
+			return first
+		}, e.cmd.Wait))
 	})
 	return result
 }

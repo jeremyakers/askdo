@@ -23,6 +23,16 @@ const (
 // ReserveJobID commits an owner-bound identity without storing an operation.
 // A lost response leaves a harmless orphan; gaps are intentionally permitted.
 func (store *Store) ReserveJobID(ctx context.Context, uid uint32, now time.Time) (string, error) {
+	return store.reserveJobID(ctx, uid, now, nil)
+}
+
+// ReserveCancelableJobID binds only a hash, in the allocation transaction. The
+// caller generates the bearer and discloses it once, on its private connection.
+func (store *Store) ReserveCancelableJobID(ctx context.Context, uid uint32, now time.Time, hash [32]byte) (string, error) {
+	return store.reserveJobID(ctx, uid, now, hash[:])
+}
+
+func (store *Store) reserveJobID(ctx context.Context, uid uint32, now time.Time, hash []byte) (string, error) {
 	if now.IsZero() {
 		return "", errors.New("reservation time is zero")
 	}
@@ -57,6 +67,11 @@ func (store *Store) ReserveJobID(ctx context.Context, uid uint32, now time.Time)
 		if occupied == 0 {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO reservations(request_id, uid, state, created_at) VALUES (?, ?, 'reserved', ?)`, id, uid, now.UTC().UnixNano()); err != nil {
 				return "", fmt.Errorf("persist reservation: %w", err)
+			}
+			if hash != nil {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO creator_cancellations(request_id, uid, token_hash) VALUES (?, ?, ?)`, id, uid, hash); err != nil {
+					return "", fmt.Errorf("persist cancellation grant: %w", err)
+				}
 			}
 			if err := tx.Commit(); err != nil {
 				return "", fmt.Errorf("commit reservation: %w", err)
