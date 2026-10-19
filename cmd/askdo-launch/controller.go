@@ -175,7 +175,6 @@ func runController() error {
 		return errors.New("original wrapper session unavailable")
 	}
 	resume := make(chan struct{}, 1)
-	var receivedLaunch atomic.Bool
 	var wrapperAlive atomic.Bool
 	wrapperAlive.Store(true)
 	go func() {
@@ -183,12 +182,9 @@ func runController() error {
 			message, err := readWrapper(parent)
 			if err != nil {
 				wrapperAlive.Store(false)
-				// A dead wrapper before handoff must not strand a controller
-				// waiting for an operation that was never sent. Once received,
-				// the owned command/broker connection outlives its wrapper.
-				if !receivedLaunch.Load() {
-					_ = broker.Close()
-				}
+				// The broker may already have committed the claim, even before
+				// ReceiveLaunch returns. Only the broker owns this connection's
+				// handoff/rejection lifetime; wrapper EOF is not cancellation.
 				return
 			}
 			if message.Type != "resume" || message.Group != 0 {
@@ -204,7 +200,6 @@ func runController() error {
 	if err != nil {
 		return err
 	}
-	receivedLaunch.Store(true)
 	defer cwd.Close()
 	var writes sync.Mutex
 	write := func(value any) error {

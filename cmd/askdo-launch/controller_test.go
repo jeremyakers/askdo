@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -115,11 +116,76 @@ func fixtureTerminalGroup(t *testing.T, pid int32) int {
 	return group
 }
 
+func fixtureWrapperProcesses(t *testing.T, wrapper int32) (int, int) {
+	t.Helper()
+	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(body[strings.LastIndex(string(body), ")")+1:]))
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Go may fork from any of this known wrapper's OS threads. Inspect only
+	// those threads' direct children, not other namespace/host processes.
+	tasks, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", wrapper))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[int]bool)
+	for _, task := range tasks {
+		children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%s/children", wrapper, task.Name()))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range strings.Fields(string(children)) {
+			pid, err := strconv.Atoi(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids[pid] = true
+		}
+	}
+	// This fixture wrapper spawned only the fixed controller, before any launch.
+	if len(ids) != 1 {
+		t.Fatalf("fixture controller children=%v", ids)
+	}
+	controller := 0
+	for pid := range ids {
+		controller = pid
+	}
+	return parent, controller
+}
+
+func awaitFixtureControllerExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields := strings.Fields(string(body[strings.LastIndex(string(body), ")")+1:]))
+		if fields[0] == "Z" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("rejected controller did not exit after broker EOF")
+}
+
 func TestControllerPTYRemoteCancellation(t *testing.T) {
 	if os.Getenv("ASKDO_CANCEL_ROOT_FIXTURE") != "1" {
 		t.Skip("isolated rootless fixture only")
 	}
-	for _, mode := range []string{"interrupt", "force", "suspended", "early", "wrapper-lost"} {
+	for _, mode := range []string{"interrupt", "force", "suspended", "early", "wrapper-lost", "handoff-wrapper-lost", "preclaim-reject"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "broker.sock")
 			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -146,6 +212,19 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 			var seen ptyOutput
 			copied := make(chan struct{})
 			go func() { _, _ = io.Copy(&seen, output); close(copied) }()
+			var resumeShell func()
+			waited := false
+			defer func() {
+				if resumeShell != nil {
+					resumeShell()
+				}
+				if !waited {
+					_, _ = io.WriteString(input, "exit 0\n")
+					_ = input.Close()
+					_ = shell.Wait()
+					<-copied
+				}
+			}()
 			awaitPTY(t, &seen, "CANCEL_PROMPT> ")
 			_, _ = fmt.Fprintf(input, "%q -test.run=^TestControllerPTYHelper$ -test.v\n", os.Args[0])
 			_ = listener.SetDeadline(time.Now().Add(6 * time.Second))
@@ -186,6 +265,55 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer dir.Close()
+			if mode == "handoff-wrapper-lost" || mode == "preclaim-reject" {
+				// The real broker commits a consumed claim before SendLaunch. Hold
+				// that exact window here, with the authenticated claim already read.
+				// Pause ONLY this fixture's interactive parent so SIGCHLD cannot
+				// reclaim its TTY before the controller performs launch validation.
+				parent, controller := fixtureWrapperProcesses(t, cred.Pid)
+				group := fixtureTerminalGroup(t, cred.Pid)
+				if err := unix.Kill(parent, unix.SIGSTOP); err != nil {
+					t.Fatal(err)
+				}
+				var resumed sync.Once
+				resumeShell = func() { resumed.Do(func() { _ = unix.Kill(parent, unix.SIGCONT) }) }
+				if err := unix.Kill(int(cred.Pid), unix.SIGKILL); err != nil {
+					t.Fatal(err)
+				}
+				// Old code closes the claimed channel on private-parent EOF. A
+				// timeout means it instead remains bound, ready to receive launch.
+				_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				_, probeErr := proto.ReadFrame(conn, 32768)
+				_ = conn.SetReadDeadline(time.Now().Add(6 * time.Second))
+				var timeout net.Error
+				if !errors.As(probeErr, &timeout) || !timeout.Timeout() {
+					t.Fatalf("claimed control channel lost before SendLaunch: %v", probeErr)
+				}
+				if mode == "handoff-wrapper-lost" {
+					if fixtureTerminalGroup(t, int32(parent)) != group {
+						t.Fatal("fixture shell reclaimed the original foreground group")
+					}
+				} else {
+					// Unclaimed/rejected connections are the broker's lifetime to
+					// close, not inferred from wrapper EOF by the controller.
+					_ = conn.Close()
+					awaitFixtureControllerExit(t, controller)
+					if strings.Contains(seen.text(), "FG_CHILD_READY") {
+						t.Fatal("rejected claim launched a command")
+					}
+					resumeShell()
+					awaitPTY(t, &seen, "Killed")
+					_, _ = io.WriteString(input, "exit 0\n")
+					_ = input.Close()
+					waitErr := shell.Wait()
+					waited = true
+					if waitErr != nil {
+						t.Fatalf("rejected-claim shell: %v; %s", waitErr, seen.text())
+					}
+					<-copied
+					return
+				}
+			}
 			script := `trap 'printf "FG_INT_FLUSHED\n"; exit 0' INT; stty -echo; printf 'FG_CHILD_READY\n'; `
 			if mode == "force" {
 				script = `trap '' INT; stty -echo; printf 'FG_CHILD_READY\n'; `
@@ -199,6 +327,12 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 			if err := foreground.SendLaunch(conn, spec, []int{int(dir.Fd())}); err != nil {
 				t.Fatal(err)
 			}
+			commandPending := true
+			defer func() {
+				if commandPending {
+					_ = foreground.WriteControl(conn, foreground.CancelControl{Type: "cancel", JobID: spec.JobID, Level: 2})
+				}
+			}()
 			otherGroup := 0
 			if mode != "early" {
 				awaitPTY(t, &seen, "FG_CHILD_READY\r\n")
@@ -242,15 +376,28 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 				}
 			}
 			body, err = proto.ReadFrame(conn, 32768)
-			if mode == "wrapper-lost" {
+			if mode == "wrapper-lost" || mode == "handoff-wrapper-lost" {
 				if err == nil {
 					t.Fatal("lost original wrapper fabricated a restored-terminal completion")
 				}
 				awaitPTY(t, &seen, "FG_INT_FLUSHED\r\n")
+				if mode == "handoff-wrapper-lost" {
+					if !errors.Is(err, io.EOF) {
+						t.Fatalf("lost-wrapper completion must be EOF, not a stalled controller: %v", err)
+					}
+					if strings.Count(seen.text(), "FG_INT_FLUSHED\r\n") != 1 {
+						t.Fatal("handoff-loss interrupt flush was not exactly once")
+					}
+					resumeShell()
+					awaitPTY(t, &seen, "Killed")
+				}
+				commandPending = false
 				_, _ = io.WriteString(input, "exit 0\n")
 				_ = input.Close()
-				if err := shell.Wait(); err != nil {
-					t.Fatalf("lost-wrapper shell: %v; %s", err, seen.text())
+				waitErr := shell.Wait()
+				waited = true
+				if waitErr != nil {
+					t.Fatalf("lost-wrapper shell: %v; %s", waitErr, seen.text())
 				}
 				<-copied
 				return
@@ -262,6 +409,7 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 			if proto.StrictUnmarshal(body, &completion) != nil || completion.JobID != spec.JobID {
 				t.Fatalf("completion=%s", body)
 			}
+			commandPending = false
 			if mode == "force" || mode == "early" {
 				if completion.Type != "signal" || completion.Signal != 9 {
 					t.Fatalf("force=%+v", completion)
@@ -281,8 +429,10 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 			awaitPTY(t, &seen, "HELPER_COMPLETE\r\n")
 			_, _ = io.WriteString(input, "exit\n")
 			_ = input.Close()
-			if err := shell.Wait(); err != nil {
-				t.Fatalf("PTY shell: %v; %s", err, seen.text())
+			waitErr := shell.Wait()
+			waited = true
+			if waitErr != nil {
+				t.Fatalf("PTY shell: %v; %s", waitErr, seen.text())
 			}
 			<-copied
 		})
