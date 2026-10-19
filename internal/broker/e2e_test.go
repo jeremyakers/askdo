@@ -225,7 +225,7 @@ func TestEffectiveFrameCeilingRejectsBeforeBodyAllocation(t *testing.T) {
 	}
 }
 
-func TestTimeoutWhileQueued(t *testing.T) {
+func TestTimeoutWhileIndependentReviewIsBlocked(t *testing.T) {
 	reviewStarted := make(chan struct{}, 1)
 	continueReview := make(chan struct{})
 	worker := &ScriptedWorker{Config: ScriptedWorkerConfig{ReviewStarted: reviewStarted, ContinueReview: continueReview}}
@@ -235,15 +235,16 @@ func TestTimeoutWhileQueued(t *testing.T) {
 	defer active.Close()
 	waitSignal(t, reviewStarted, "active review")
 	waitForState(t, h.daemon.store, testUID, activeID, store.StateReviewing)
-	request := submitRequest(reserveForTest(t, h.socket, testUID), "queued timeout")
+	request := submitRequest(reserveForTest(t, h.socket, testUID), "independent review timeout")
 	timeoutMS := int64(200)
 	request.WaitTimeoutMS = &timeoutMS
 	queued := openSubmit(t, h.socket, request)
 	defer queued.Close()
-	waitForState(t, h.daemon.store, testUID, request.RequestID, store.StateQueued)
+	waitSignal(t, reviewStarted, "independent review")
+	waitForState(t, h.daemon.store, testUID, request.RequestID, store.StateReviewing)
 	waitForState(t, h.daemon.store, testUID, request.RequestID, store.StateCancelled)
 	if len(h.executor.Snapshot()) != 0 {
-		t.Fatal("queued timeout executed an operation")
+		t.Fatal("review timeout executed an operation")
 	}
 }
 
@@ -281,20 +282,21 @@ func TestTimeoutWhileAwaitingHuman(t *testing.T) {
 	}
 }
 
-func TestDisconnectWhileQueued(t *testing.T) {
+func TestDisconnectWhileIndependentReviewIsBlocked(t *testing.T) {
 	reviewStarted := make(chan struct{}, 1)
 	continueReview := make(chan struct{})
 	h := newBrokerHarness(t, &ScriptedWorker{Config: ScriptedWorkerConfig{ReviewStarted: reviewStarted, ContinueReview: continueReview}}, nil)
 	active := openSubmit(t, h.socket, submitRequest(reserveForTest(t, h.socket, testUID), "active"))
 	defer active.Close()
 	waitSignal(t, reviewStarted, "active review")
-	request := newReservedRequest(t, h, "queued disconnect")
+	request := newReservedRequest(t, h, "independent review disconnect")
 	queued := openSubmit(t, h.socket, request)
-	waitForState(t, h.daemon.store, testUID, request.RequestID, store.StateQueued)
+	waitSignal(t, reviewStarted, "independent review")
+	waitForState(t, h.daemon.store, testUID, request.RequestID, store.StateReviewing)
 	_ = queued.Close()
 	waitForState(t, h.daemon.store, testUID, request.RequestID, store.StateCancelled)
 	if len(h.executor.Snapshot()) != 0 {
-		t.Fatal("disconnected queued job executed")
+		t.Fatal("disconnected review executed")
 	}
 }
 
@@ -468,45 +470,40 @@ func TestSingleAttachSubscriber(t *testing.T) {
 }
 
 func TestQueueFullCreatesNoJob(t *testing.T) {
-	release := make(chan struct{})
-	started := make(chan struct{}, 1)
-	h := newBrokerHarness(t, nil, &FakeExecutor{Started: started, Release: release})
-	var connections []net.Conn
-	ids := make([]string, queueDepth+2)
-	for i := range ids {
-		ids[i] = reserveForTest(t, h.socket, testUID)
+	// Given all pending admission reservations are held before serving. Active
+	// jobs are not pending reservations and must not be used to fill the queue.
+	root := t.TempDir()
+	d, listener, err := newDaemon("", daemonOptions{
+		cfg: testConfig(testUID), socketPath: filepath.Join(root, "run", "request.sock"),
+		storePath: filepath.Join(root, "jobs.sqlite3"), spoolRoot: filepath.Join(root, "jobs"),
+		worker: &ScriptedWorker{}, executor: &FakeExecutor{},
+		peerUID: func(*net.UnixConn) (uint32, error) { return testUID, nil }, skipSocketOwnership: true,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	defer func() {
-		close(release)
-		for _, conn := range connections {
-			_ = conn.Close()
+	for range queueDepth {
+		if !d.queue.reserve() {
+			t.Fatal("could not reserve pending capacity")
 		}
-	}()
-	first, _ := net.Dial("unix", h.socket)
-	connections = append(connections, first)
-	sendFrame(t, first, submitRequest(ids[0], "active"))
-	_ = readFrame(t, first)
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("active execution did not start")
+		defer d.queue.release()
 	}
-	for index := 2; index <= queueDepth+1; index++ {
-		conn, _ := net.Dial("unix", h.socket)
-		connections = append(connections, conn)
-		sendFrame(t, conn, submitRequest(ids[index-1], "queued"))
-		if body := readFrame(t, conn); !bytes.Contains(body, []byte(`"op":"accepted"`)) {
-			t.Fatalf("queued submit %d: %s", index, body)
-		}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.serve(ctx, listener) }()
+	defer func() { cancel(); <-done; d.close() }()
+	rejectedID := reserveForTest(t, d.socketPath, testUID)
+	rejected, err := net.Dial("unix", d.socketPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	rejectedID := ids[queueDepth+1]
-	rejected, _ := net.Dial("unix", h.socket)
 	defer rejected.Close()
+	// When another job is submitted, it is rejected without a durable job row.
 	sendFrame(t, rejected, submitRequest(rejectedID, "rejected"))
 	if body := readFrame(t, rejected); !bytes.Contains(body, []byte(`"code":"queue_full"`)) {
 		t.Fatalf("overflow submit: %s", body)
 	}
-	if _, err := h.daemon.store.GetJob(context.Background(), testUID, rejectedID); err == nil {
+	if _, err := d.store.GetJob(context.Background(), testUID, rejectedID); err == nil {
 		t.Fatal("queue-full request created a durable job")
 	}
 }

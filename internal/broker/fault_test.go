@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -61,8 +62,8 @@ func TestFaultRestartCancelsQueuedAndReviewing(t *testing.T) {
 	queuedRequest := submitRequest(reserveForTest(t, d1.socketPath, testUID), "queued at crash")
 	queuedID := queuedRequest.RequestID
 
-	// A blocker job occupies the single review slot; the second job waits
-	// queued behind it. Drain both connections so event delivery never blocks.
+	// Hold a live review. Independently create the canonical queued row below:
+	// another active review no longer prevents the queue from draining.
 	drain := func(conn net.Conn) {
 		go func() {
 			for {
@@ -80,20 +81,22 @@ func TestFaultRestartCancelsQueuedAndReviewing(t *testing.T) {
 	drain(blockerConn)
 	waitForState(t, d1.store, testUID, blockerRequest.RequestID, store.StateReviewing)
 
-	queuedConn, err := net.Dial("unix", d1.socketPath)
+	queuedBody, err := json.Marshal(queuedRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sendFrame(t, queuedConn, queuedRequest)
-	drain(queuedConn)
-	waitForState(t, d1.store, testUID, queuedID, store.StateQueued)
+	if _, err := d1.store.SubmitReservedJob(context.Background(), store.Job{
+		UID: testUID, RequestID: queuedID, SubmitBody: queuedBody, OperationJSON: queuedBody,
+		Reason: queuedRequest.Reason, Mode: queuedRequest.Mode, AttemptsJSON: []byte("[]"),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Simulate the crash: the store is gone before any shutdown transition
 	// can land, so both rows survive untouched into the next lifetime.
 	_ = d1.store.Close()
 	close(continueReview)
 	_ = blockerConn.Close()
-	_ = queuedConn.Close()
 	cancel1()
 	<-done1
 	d1.close()

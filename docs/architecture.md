@@ -53,10 +53,11 @@ At startup it:
    `MarkRestartAmbiguous` plus `SweepExpired`, so nothing from a previous
    daemon lifetime is ever revived (see *Restart semantics* below).
 5. Serves at most 64 concurrent client connections and a FIFO job queue of
-   depth 8. The queue worker serializes review and notification sessions, so
-   at most one reviewer process is active. A foreground job leaves the queue
-   when its approved handoff grant is ready; its subsequently launched terminal
-   child can overlap another job's review or detached execution.
+   depth 8 for pending admissions. Dequeued jobs run independent review,
+   notification and execution lifecycles, each with its own reviewer process.
+   A long-running command or pending human approval does not block another
+   job's review or notification. Shutdown cancels pre-dispatch jobs and joins
+   committed detached executions, including durable results, before teardown.
 
 Before submitting an operation the client reserves a globally unique
 `YYYY-MM-DD_#N` job ID over its own socket connection and prints that same
@@ -101,8 +102,10 @@ unverified.
 dedicated unprivileged `askdo-review` account (it refuses to run as root). It
 reads no configuration file; everything it may know arrives in the one
 immutable `bootstrap` message on its private pipe. It talks to the broker
-over that pipe (its stdin/stdout), to configured model endpoints over HTTP(S),
-and to the Telegram Bot API. The model receives no shell, process-execution,
+over that pipe (its stdin/stdout) and to configured model endpoints over HTTP(S).
+Standalone human approval runs in the broker after the reviewer exits cleanly;
+button-free auto-approval notices still use the worker's Telegram client.
+The model receives no shell, process-execution,
 file-write, browser, MCP or delegation tools. Six filesystem tools
 (`read_path`, `list_path`, `search_path`, `stat_path`, `find_path`, `mount_info`)
 request bounded filesystem work through the broker for model-chosen paths;
@@ -122,7 +125,7 @@ is treated as untrusted data: the reviewer's *code* validates the model's
 report against a fixed schema, and the *broker* re-validates the report and
 the model history before freezing. If AI review is skipped by policy or all
 typed provider availability failures are exhausted (without `--review=yes`),
-the same worker sends a **NO AI REVIEW** Telegram request without a model
+the broker sends a **NO AI REVIEW** Telegram request without a model
 report; it never substitutes invented risk, effects or reversibility.
 
 The host-evidence tools are **source-only, not in published rc.2 binaries**;
@@ -184,9 +187,8 @@ from trusting the worker or the network peer. See
                                                    │ private pipe (stdin/stdout)
                                                    ▼
   untrusted model output ◀──(HTTPS, bounded)── REVIEWER (askdo-review, unpriv.)
-                                                  │ Telegram Bot API (outbound only)
-                                                  ▼
-                                            OPERATOR (human unless eligible policy grant)
+
+   standalone human approval: BROKER ──Telegram Bot API (outbound only)──▶ OPERATOR
 
    approved original-TTY foreground: client ──sudo -n (narrow rule)──▶ askdo-launch
                            helper ──root-only launch.sock, one-use grant──▶ BROKER
@@ -198,13 +200,13 @@ from trusting the worker or the network peer. See
 - All model-generated content is untrusted advice, never authorization. By
   default authorization is the human's one-use Telegram decision; an explicit
   root grant can authorize only an eligible low-risk detached AI-reviewed request after
-  dispatch checks and durable audit. Trusted
-  reviewer code polls Telegram and validates the callback's operator ID, chat,
-  card, nonce, expiry and first use. The root broker does **not** independently
-   poll Telegram; it trusts that code's decision message, then verifies its
-   digest, operator ID, card ID, pending state, expiry and one-use status under
-   the dispatch lock. These broker checks do not independently authenticate a
-   Telegram callback. **In fleet mode this changes:** the worker holds no
+   dispatch checks and durable audit. For standalone human approval, the broker
+   owns one poll source per loaded bot token and uses the shared fixed Telegram
+   callback validator for operator ID, chat, card, nonce, expiry and first use.
+   It records each card binding durably before activating that job's queued
+   callbacks, then rechecks the digest and binding under the dispatch lock.
+   Model review and tools remain isolated in the unprivileged worker; no model
+   code moves into the broker. **In fleet mode:** the worker holds no
    Telegram secrets and sends no decision; the root broker accepts only the
    gateway's signed proof, verified against the frozen manifest digest, host
    identity, nonce, kind and expiry before the same one-use dispatch gates.
@@ -325,13 +327,15 @@ One pass through the pipeline per job (`internal/broker/job.go`):
    and fails the job. Approval-only jobs instead freeze
    broker-verified operation facts and a code-generated reason/history without
    a model report; cwd/staging failures still fail closed.
- 5. **Telegram.** The worker sends all reviewed summary parts (chunked ≤ 4096
-    runes), including factual credential-withholding notices. For manual
-    approval it then sends the nonce-bound Approve once / Deny / Details card,
-    reports `notification_sent`, and polls for the authenticated operator's
-    one-use `decision`. The broker records `reviewing` → `awaiting-human` and
-     binds the card ID, digest and expiry. Eligible detached auto-approved
-     reviews instead send a button-free informational notice and
+  5. **Telegram.** For standalone manual approval the reviewer exits cleanly
+     after the broker-selected frozen outcome. The broker sends all summary
+     parts (chunked ≤ 4096 runes), including factual withholding notices, and
+     the nonce-bound Approve once / Deny / Details card. It records
+     `reviewing` → `awaiting-human`, binding card IDs, digest and expiry before
+     activating callbacks queued during delivery. A per-token poll hub routes
+     callbacks to independent per-job validators without serializing pending
+     cards. Eligible detached auto-approved reviews instead use the worker to
+     send a button-free informational notice and
      `auto_notification_sent`; there
     is no callback, fabricated human operator or approval-card ID. A **NO AI
     REVIEW** job always takes the manual path and says the model did not assess

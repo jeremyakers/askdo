@@ -83,12 +83,13 @@ type PollTarget struct {
 	OperatorUserIDs []int64
 }
 
-// Poller is the single getUpdates long-poller for one pending approval
-// (design §9: "Only one poller runs"). The update offset advances in worker
-// memory only; a restarted worker must never revive an old pending
-// decision, so no durable cursor exists.
+// Poller validates one pending approval, using either a direct network client
+// or a hub subscription. Its local offset deduplicates delivered updates; the
+// hub alone owns the shared network cursor. Neither revives pending decisions
+// across a process restart.
 type Poller struct {
 	client   *Client
+	source   UpdateSource
 	cfg      PollerConfig
 	offset   int64
 	consumed bool
@@ -142,7 +143,22 @@ func NewPoller(client *Client, cfg PollerConfig) (*Poller, error) {
 	if cfg.PollTimeoutSec == 0 {
 		cfg.PollTimeoutSec = DefaultPollTimeoutSeconds
 	}
-	return &Poller{client: client, cfg: cfg, now: time.Now}, nil
+	return &Poller{client: client, source: client, cfg: cfg, now: time.Now}, nil
+}
+
+// UpdateSource supplies updates; callback validation and all outgoing API calls
+// remain owned by the per-approval Poller and its concrete Client.
+type UpdateSource interface {
+	GetUpdates(context.Context, int64, int) ([]Update, error)
+}
+
+func NewPollerWithSource(client *Client, cfg PollerConfig, source UpdateSource) (*Poller, error) {
+	p, err := NewPoller(client, cfg)
+	if err != nil {
+		return nil, err
+	}
+	p.source = source
+	return p, nil
 }
 
 // Wait polls until one validated approve/deny decision, expiry, a Telegram
@@ -156,7 +172,7 @@ func (p *Poller) Wait(ctx context.Context) (Decision, error) {
 		if !p.now().Before(p.cfg.Expiry) {
 			return Decision{}, ErrExpired
 		}
-		updates, err := p.client.GetUpdates(ctx, p.offset, p.cfg.PollTimeoutSec)
+		updates, err := p.source.GetUpdates(ctx, p.offset, p.cfg.PollTimeoutSec)
 		if err != nil {
 			return Decision{}, err
 		}

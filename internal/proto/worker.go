@@ -360,6 +360,7 @@ type ApprovalOnlyFrozen struct {
 	ManifestDigest string                `json:"manifest_digest"`
 	Reason         string                `json:"reason"`
 	History        []AvailabilityFailure `json:"history"`
+	BrokerApproval bool                  `json:"broker_approval,omitempty"`
 }
 
 func validateAvailabilityHistory(history []AvailabilityFailure) error {
@@ -384,6 +385,8 @@ type Frozen struct {
 	WithheldCount  int          `json:"withheld_count"`
 	// Only the broker may select this plan; nil retains human approval.
 	AutoApproval *AutoApprovalPlan `json:"auto_approval,omitempty"`
+	// The broker, not this process, owns the human notification/decision stage.
+	BrokerApproval bool `json:"broker_approval,omitempty"`
 }
 
 // AutoApprovalPlan is the broker's bounded, frozen policy decision, not a model instruction.
@@ -597,6 +600,9 @@ func ValidateWorkerMessage(message any, direction Direction) error {
 			return err
 		}
 		if p := m.AutoApproval; p != nil {
+			if m.BrokerApproval {
+				return errors.New("human broker approval cannot select an auto-approval plan")
+			}
 			if p.Score < 1 || p.Score > 4 || p.MaxRisk < 1 || p.MaxRisk > 4 || p.EffectiveThreshold < 2 || p.EffectiveThreshold > 5 || p.EffectiveThreshold > p.MaxRisk+1 || p.Score > p.MaxRisk || p.Score >= p.EffectiveThreshold || m.Report.Risk != fmt.Sprint(p.Score) {
 				return errors.New("invalid frozen auto-approval plan")
 			}

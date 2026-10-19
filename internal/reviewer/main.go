@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/proto"
@@ -87,6 +88,12 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 			if bootstrap.FleetMode {
 				return nil
 			}
+			if value.BrokerApproval {
+				if !slices.Equal(value.History, bootstrap.PreflightFailures) {
+					return errors.New("approval-only availability history differs from worker outcome")
+				}
+				return nil
+			}
 			return notifyAvailabilityApproval(reviewCtx, broker, *bootstrap, value, bootstrap.PreflightFailures)
 		case *proto.ReviewRejected:
 			return fmt.Errorf("review rejected (%s): %s", value.Code, value.Reason)
@@ -121,6 +128,12 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 			if bootstrap.FleetMode {
 				return nil
 			}
+			if value.BrokerApproval {
+				if !slices.Equal(value.History, failures) {
+					return errors.New("approval-only availability history differs from worker outcome")
+				}
+				return nil
+			}
 			return notifyAvailabilityApproval(reviewCtx, broker, *bootstrap, value, failures)
 		case *proto.ReviewRejected:
 			return fmt.Errorf("review rejected (%s): %s", value.Code, value.Reason)
@@ -143,6 +156,9 @@ func RunReviewerWithFallback(ctx context.Context, in io.Reader, out io.Writer, e
 		// notify/decide stage before this worker exits.
 		if value.AutoApproval != nil {
 			return notifyAutoApproval(reviewCtx, broker, *bootstrap, history, value)
+		}
+		if value.BrokerApproval {
+			return nil
 		}
 		return notifyApproval(reviewCtx, broker, *bootstrap, review, history, value)
 	case *proto.ReviewRejected:

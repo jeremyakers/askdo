@@ -18,8 +18,7 @@ const (
 )
 
 // processWorker starts the installed reviewer with an intentionally minimal
-// process boundary. The job queue normally provides the one-at-a-time
-// guarantee; active additionally protects direct and future callers.
+// process boundary. Each Start owns independent pipes and a child process.
 type processWorker struct {
 	binary string
 	home   string
@@ -32,10 +31,11 @@ type processWorker struct {
 	// markers so the test binary can re-execute itself as the helper.
 	sameUser bool
 	extraEnv []string
-
-	mu     sync.Mutex
-	active bool
 }
+
+// Only this production factory selects broker-owned standalone human approval.
+// Injected legacy/scripted workers retain their existing private-pipe exchange.
+func (*processWorker) brokerApproval() {}
 
 func (w *processWorker) Start(ctx context.Context) (WorkerSession, error) {
 	return w.start(ctx, os.DevNull)
@@ -49,19 +49,6 @@ func (w *processWorker) start(ctx context.Context, stderrPath string) (WorkerSes
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	w.mu.Lock()
-	if w.active {
-		w.mu.Unlock()
-		return nil, errors.New("reviewer process is already active")
-	}
-	w.active = true
-	w.mu.Unlock()
-	release := func() {
-		w.mu.Lock()
-		w.active = false
-		w.mu.Unlock()
-	}
-
 	binary := w.binary
 	if binary == "" {
 		binary = defaultWorkerBinary
@@ -71,12 +58,10 @@ func (w *processWorker) start(ctx context.Context, stderrPath string) (WorkerSes
 		home = defaultWorkerHome
 	}
 	if !filepath.IsAbs(binary) {
-		release()
 		return nil, errors.New("reviewer binary path is not absolute")
 	}
 	stderr, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
-		release()
 		return nil, fmt.Errorf("open reviewer stderr: %w", err)
 	}
 
@@ -92,34 +77,30 @@ func (w *processWorker) start(ctx context.Context, stderrPath string) (WorkerSes
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		_ = stderr.Close()
-		release()
 		return nil, fmt.Errorf("create reviewer stdin: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stderr.Close()
-		release()
 		return nil, fmt.Errorf("create reviewer stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
-		release()
 		return nil, fmt.Errorf("start reviewer: %w", err)
 	}
 	return &processWorkerSession{
-		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr, release: release,
+		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
 	}, nil
 }
 
 type processWorkerSession struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  *os.File
-	release func()
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr *os.File
 
 	writeMu   sync.Mutex
 	closeOnce sync.Once
@@ -157,7 +138,6 @@ func (s *processWorkerSession) Wait() error {
 		}
 		s.waitErr = s.cmd.Wait()
 		_ = s.stderr.Close()
-		s.release()
 		close(s.waitDone)
 	})
 	if s.waitDone != nil {

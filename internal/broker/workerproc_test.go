@@ -33,7 +33,7 @@ func TestAskdoBrokerDefaults(t *testing.T) {
 	}
 }
 
-func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
+func TestProcessWorkerBoundaryAndConcurrentSessions(t *testing.T) {
 	binary := buildWorkerHelper(t)
 	openWorkerFDCanary(t) // Keep a private broker descriptor open through both launches.
 	home := filepath.Join(t.TempDir(), "review-home")
@@ -66,9 +66,12 @@ func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	if _, err := worker.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "already active") {
-		t.Fatalf("second start error=%v", err)
+	defer func() { _ = session.Close(); _ = session.Wait() }()
+	second, err := worker.Start(context.Background())
+	if err != nil {
+		t.Fatalf("concurrent start: %v", err)
 	}
+	defer func() { _ = second.Close(); _ = second.Wait() }()
 	data, err := io.ReadAll(session)
 	if err != nil {
 		t.Fatal(err)
@@ -96,10 +99,6 @@ func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
 	if err := unexpectedWorkerFD(state); err != nil {
 		t.Fatal(err)
 	}
-	second, err := worker.Start(context.Background())
-	if err != nil {
-		t.Fatalf("start after reap: %v", err)
-	}
 	data, err = io.ReadAll(second)
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +109,12 @@ func TestProcessWorkerBoundaryAndSingleActive(t *testing.T) {
 	state = helperProcessState{}
 	if err := json.Unmarshal(data, &state); err != nil {
 		t.Fatalf("second helper output=%q: %v", data, err)
+	}
+	if strings.Join(state.Env, "\x00") != strings.Join(wantEnv, "\x00") || state.UID != int(targetUID) || state.GID != int(targetGID) || len(state.Groups) != 0 {
+		t.Fatalf("second helper boundary=%+v", state)
+	}
+	if targetUID != 0 && state.CapEff != "0000000000000000" {
+		t.Fatalf("second non-root reviewer retains capabilities: %+v", state)
 	}
 	if err := unexpectedWorkerFD(state); err != nil {
 		t.Fatal(err)
