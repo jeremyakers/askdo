@@ -241,9 +241,9 @@ type codexOutputItem struct {
 }
 
 // assembleStream consumes the bounded SSE stream and returns the final
-// assembled output items. Unknown event types are skipped; a stream that
-// ends without a terminal event, or with invalid JSON in a required event,
-// is malformed. The final items come from the terminal response.completed /
+// assembled output items. Unknown event types are skipped. EOF before a terminal
+// event is incomplete transport; malformed complete events remain terminal errors.
+// The final items come from the terminal response.completed /
 // response.incomplete payload when it carries output, falling back to the
 // accumulated response.output_item.done items.
 func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) {
@@ -253,7 +253,7 @@ func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) 
 	total := 0
 	terminal := false
 
-	dispatch := func() error {
+	dispatch := func(atEOF bool) error {
 		if string(data) == "[DONE]" {
 			terminal = true
 			return nil
@@ -262,7 +262,13 @@ func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) 
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(data, &envelope); err != nil {
-			return fmt.Errorf("%w: openai_codex stream event: %v; event: %s", ErrMalformedResponse, err, providerDiagnostic(data, a.accessToken))
+			// Unmarshal preserves the one-document contract (including trailing
+			// JSON rejection). Only its failure at an unterminated final frame
+			// needs the decoder's structured unexpected-EOF classification.
+			if atEOF && !terminal && errors.Is(json.NewDecoder(bytes.NewReader(data)).Decode(&envelope), io.ErrUnexpectedEOF) {
+				return &modelwire.TransientError{Cause: &responseError{subtype: "truncated_event", cause: fmt.Errorf("%w: openai_codex stream event: %v; event: %s", ErrTransport, err, providerDiagnostic(data, a.accessToken))}}
+			}
+			return &responseError{subtype: "event_json", cause: fmt.Errorf("%w: openai_codex stream event: %v; event: %s", ErrMalformedResponse, err, providerDiagnostic(data, a.accessToken))}
 		}
 		switch envelope.Type {
 		case "response.output_item.done":
@@ -270,7 +276,7 @@ func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) 
 				Item json.RawMessage `json:"item"`
 			}
 			if err := json.Unmarshal(data, &event); err != nil || len(event.Item) == 0 {
-				return fmt.Errorf("%w: openai_codex output item event is invalid: %s", ErrMalformedResponse, providerDiagnostic(data, a.accessToken))
+				return &responseError{subtype: "output_item_event", cause: fmt.Errorf("%w: openai_codex output item event is invalid: %s", ErrMalformedResponse, providerDiagnostic(data, a.accessToken))}
 			}
 			items = append(items, event.Item)
 		case "response.completed", "response.incomplete":
@@ -280,7 +286,7 @@ func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) 
 				} `json:"response"`
 			}
 			if err := json.Unmarshal(data, &event); err != nil {
-				return fmt.Errorf("%w: openai_codex terminal event: %v; event: %s", ErrMalformedResponse, err, providerDiagnostic(data, a.accessToken))
+				return &responseError{subtype: "terminal_event", cause: fmt.Errorf("%w: openai_codex terminal event: %v; event: %s", ErrMalformedResponse, err, providerDiagnostic(data, a.accessToken))}
 			}
 			if len(event.Response.Output) > 0 {
 				items = event.Response.Output
@@ -331,7 +337,7 @@ func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) 
 		switch {
 		case blank:
 			if len(data) > 0 {
-				if derr := dispatch(); derr != nil {
+				if derr := dispatch(false); derr != nil {
 					return nil, derr
 				}
 				data = nil
@@ -351,12 +357,12 @@ func (a *openAICodex) assembleStream(body io.Reader) ([]json.RawMessage, error) 
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if len(data) > 0 {
-					if derr := dispatch(); derr != nil {
+					if derr := dispatch(true); derr != nil {
 						return nil, derr
 					}
 				}
 				if !terminal {
-					return nil, fmt.Errorf("%w: openai_codex stream ended without a terminal event", ErrMalformedResponse)
+					return nil, &modelwire.TransientError{Cause: &responseError{subtype: "missing_terminal", cause: fmt.Errorf("%w: openai_codex stream ended without a terminal event", ErrTransport)}}
 				}
 				return items, nil
 			}
@@ -376,7 +382,7 @@ func (a *openAICodex) codexStreamFailure(kind string, data []byte) error {
 		} `json:"response"`
 	}
 	if err := json.Unmarshal(data, &event); err != nil {
-		return fmt.Errorf("%w: openai_codex %s: %v; event: %s", ErrMalformedResponse, kind, err, providerDiagnostic(data, a.accessToken))
+		return &responseError{subtype: "failure_event", cause: fmt.Errorf("%w: openai_codex %s: %v; event: %s", ErrMalformedResponse, kind, err, providerDiagnostic(data, a.accessToken))}
 	}
 	codeIn := func(raw json.RawMessage) (string, error) {
 		if len(raw) == 0 || raw[0] != '{' {
@@ -392,11 +398,11 @@ func (a *openAICodex) codexStreamFailure(kind string, data []byte) error {
 	}
 	nested, err := codeIn(event.Error)
 	if err != nil {
-		return fmt.Errorf("%w: openai_codex %s: %v; event: %s", ErrMalformedResponse, kind, err, providerDiagnostic(data, a.accessToken))
+		return &responseError{subtype: "failure_event", cause: fmt.Errorf("%w: openai_codex %s: %v; event: %s", ErrMalformedResponse, kind, err, providerDiagnostic(data, a.accessToken))}
 	}
 	response, err := codeIn(event.Response.Error)
 	if err != nil {
-		return fmt.Errorf("%w: openai_codex %s: %v; event: %s", ErrMalformedResponse, kind, err, providerDiagnostic(data, a.accessToken))
+		return &responseError{subtype: "failure_event", cause: fmt.Errorf("%w: openai_codex %s: %v; event: %s", ErrMalformedResponse, kind, err, providerDiagnostic(data, a.accessToken))}
 	}
 	wantQuota := func(code string) bool {
 		switch code {
@@ -409,7 +415,7 @@ func (a *openAICodex) codexStreamFailure(kind string, data []byte) error {
 	if wantQuota(event.Code) || wantQuota(nested) || wantQuota(response) {
 		classification = ErrQuotaRate
 	}
-	failure := fmt.Errorf("%w: openai_codex %s: %s", classification, kind, providerDiagnostic(data, a.accessToken))
+	failure := &responseError{subtype: "failure_event", cause: fmt.Errorf("%w: openai_codex %s: %s", classification, kind, providerDiagnostic(data, a.accessToken))}
 	if classification == ErrTransport || (classification == ErrQuotaRate && !hardQuotaCode(event.Code) && !hardQuotaCode(nested) && !hardQuotaCode(response)) {
 		return &modelwire.TransientError{Cause: failure}
 	}
@@ -427,7 +433,7 @@ func (a *openAICodex) toResponse(items []json.RawMessage) (reviewer.ModelRespons
 	for _, raw := range items {
 		var item codexOutputItem
 		if err := json.Unmarshal(raw, &item); err != nil {
-			return reviewer.ModelResponse{}, fmt.Errorf("%w: openai_codex output item: %v; item: %s", ErrMalformedResponse, err, providerDiagnostic(raw, a.accessToken))
+			return reviewer.ModelResponse{}, &responseError{subtype: "output_item", cause: fmt.Errorf("%w: openai_codex output item: %v; item: %s", ErrMalformedResponse, err, providerDiagnostic(raw, a.accessToken))}
 		}
 		switch item.Type {
 		case "reasoning":
@@ -446,7 +452,7 @@ func (a *openAICodex) toResponse(items []json.RawMessage) (reviewer.ModelRespons
 		case "function_call":
 			arguments := json.RawMessage(item.Arguments)
 			if !json.Valid(arguments) {
-				return reviewer.ModelResponse{}, fmt.Errorf("%w: openai_codex function call %q has invalid argument JSON", ErrMalformedResponse, item.CallID)
+				return reviewer.ModelResponse{}, &responseError{subtype: "function_arguments", cause: fmt.Errorf("%w: openai_codex function call %q has invalid argument JSON", ErrMalformedResponse, item.CallID)}
 			}
 			response.ToolCalls = append(response.ToolCalls, reviewer.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments})
 		default:

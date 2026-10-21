@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 )
@@ -382,7 +383,6 @@ func TestOpenAICodexTransportRedactsAccessToken(t *testing.T) {
 func TestOpenAICodexMalformedStream(t *testing.T) {
 	cases := map[string]string{
 		"mid-stream garbage":   "data: {not json\n\ndata: [DONE]\n\n",
-		"missing terminal":     "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[]}}\n\n",
 		"invalid item payload": "data: {\"type\":\"response.output_item.done\",\"item\":\n\n",
 	}
 	for name, stream := range cases {
@@ -394,6 +394,61 @@ func TestOpenAICodexMalformedStream(t *testing.T) {
 			_, err := model.ChatTurn(context.Background(), baseRequest())
 			if !errors.Is(err, ErrMalformedResponse) {
 				t.Fatalf("error = %v, want ErrMalformedResponse", err)
+			}
+		})
+	}
+}
+
+func TestCodexIncompleteStreamRetryEligibility(t *testing.T) {
+	// Given complete and EOF-cut SSE records, when one turn is assembled, then
+	// only incomplete transport before a recognized terminal permits retry.
+	const created = "data: {\"type\":\"response.created\"}\n\n"
+	const done = "data: [DONE]\n\n"
+	for _, tc := range []struct {
+		name, stream string
+		category     error
+		retry        bool
+		subtype      string
+	}{
+		{"missing terminal", created, ErrTransport, true, "missing_terminal"},
+		{"complete item without terminal", "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"content\":[]}}\n\n", ErrTransport, true, "missing_terminal"},
+		{"cut final line", created + `data: {"type":"response.completed","response":`, ErrTransport, true, "truncated_event"},
+		{"cut pending frame", created + "data: {\"type\":\"response.completed\",\n", ErrTransport, true, "truncated_event"},
+		{"cut multiline frame", "data: {\"type\":\"response.completed\",\ndata: \"response\":{", ErrTransport, true, "truncated_event"},
+		{"complete bad JSON", "data: {\"type\":\"response.completed\",\n\n", ErrMalformedResponse, false, "event_json"},
+		{"syntax error at EOF", "data: {not json", ErrMalformedResponse, false, "event_json"},
+		{"trailing JSON document", "data: {\"type\":\"response.completed\"} {}", ErrMalformedResponse, false, "event_json"},
+		{"trailing cut JSON document", "data: {\"type\":\"response.completed\"} {", ErrMalformedResponse, false, "event_json"},
+		{"invalid envelope shape", "data: {\"type\":17}", ErrMalformedResponse, false, "event_json"},
+		{"invalid item event", "data: {\"type\":\"response.output_item.done\"}", ErrMalformedResponse, false, "output_item_event"},
+		{"invalid terminal shape", "data: {\"type\":\"response.completed\",\"response\":17}", ErrMalformedResponse, false, "terminal_event"},
+		{"invalid failure shape", "data: {\"type\":\"error\",\"code\":17}", ErrMalformedResponse, false, "failure_event"},
+		{"invalid output item", "data: {\"type\":\"response.completed\",\"response\":{\"output\":[17]}}", ErrMalformedResponse, false, "output_item"},
+		{"invalid function arguments", "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"arguments\":\"{\"}]}}", ErrMalformedResponse, false, "function_arguments"},
+		{"cut data after terminal", done + `data: {"type":`, ErrMalformedResponse, false, "event_json"},
+		{"complete terminal at EOF", `data: {"type":"response.completed","response":{"output":[]}}`, nil, false, "unknown"},
+		{"multiline terminal at EOF", "data: {\"type\":\"response.completed\",\ndata: \"response\":{\"output\":[]}}", nil, false, "unknown"},
+		{"provider incomplete is terminal", `data: {"type":"response.incomplete","response":{"output":[]}}`, nil, false, "unknown"},
+		{"done at EOF", "data: [DONE]", nil, false, "unknown"},
+		{"future event", "data: {\"type\":\"response.future\"}\n\n" + done, nil, false, "unknown"},
+		{"complete quota at EOF", `data: {"type":"error","error":{"code":"quota_exceeded"}}`, ErrQuotaRate, false, "failure_event"},
+		{"complete transient error at EOF", `data: {"type":"error","error":{"code":"server_error"}}`, ErrTransport, true, "failure_event"},
+		{"refusal", `data: {"type":"response.completed","response":{"output":[{"type":"refusal","refusal":"declined"}]}}`, ErrSafetyRefusal, false, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, recorder := newCaptureServer(t, func(_ int, w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tc.stream)
+			})
+			_, err := newTestCodex(t, server.URL, time.Second).ChatTurn(context.Background(), baseRequest())
+			_, retry := modelwire.RetryDelay(err, 0)
+			if !errors.Is(err, tc.category) || retry != tc.retry || recorder.count() != 1 {
+				t.Fatalf("category=%v retry=%v calls=%d; want category=%v retry=%v", err, retry, recorder.count(), tc.category, tc.retry)
+			}
+			if tc.retry && tc.category == ErrTransport && errors.Is(err, ErrMalformedResponse) {
+				t.Fatal("retryable transport also classified as malformed wire")
+			}
+			if subtype := ResponseErrorSubtype(err); subtype != tc.subtype {
+				t.Fatalf("subtype=%q want=%q", subtype, tc.subtype)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,58 @@ import (
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/modelwire"
 )
+
+func TestNewHostAcceptsFrozenGatewayTerminalMalformedResult(t *testing.T) {
+	// Given the old gateway's terminal malformed-wire shape, when an opted-in
+	// new host verifies it, then it accepts availability without inventing retry.
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		request, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// Reuse the unchanged v1 request parser/validator from before this fix.
+		turn, err := fleetproto.Parse[fleetproto.ModelTurn](request)
+		if err != nil || !turn.RetryTransient {
+			t.Errorf("new host request rejected by existing gateway schema: %v", err)
+			w.WriteHeader(400)
+			return
+		}
+		binding, err := json.Marshal(turn.Binding)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		payload := []byte(`{"version":1,"kind":"model_result","binding":` + string(binding) + `,"failure":{"code":"upstream_malformed_wire"}}`)
+		envelope := fleetproto.Envelope{Payload: base64.StdEncoding.EncodeToString(payload), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(key, append([]byte(fleetproto.SigningDomain), payload...)))}
+		if err := json.NewEncoder(w).Encode(envelope); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	client, err := New(fixtureConfig(t, server, pub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	catalog := fixtureCatalog(t)
+	selection, err := client.Select(catalog, []string{"local"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := fleetproto.ModelTurn{Version: 1, Kind: fleetproto.KindModelTurn, Binding: fleetproto.TurnBinding{HostID: "host-a", JobID: "2026-09-30_#1", Attempt: 1, Turn: 1, ProfileID: "local", ProfileRevision: catalog.Profiles[0].Revision, Deadline: time.Now().Add(time.Minute).Unix()}, Request: modelwire.ModelRequest{Model: "fixture", Messages: []modelwire.Message{{Role: "user", Content: "evidence"}}, Tools: []modelwire.ToolDefinition{{Name: "inspect", Description: "Inspect", Schema: json.RawMessage(`{}`)}}, MaxOutputTokens: 100}, RetryTransient: true}
+	result, err := client.ModelTurn(context.Background(), selection, turn)
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != fleetproto.ErrCodeUpstreamWire || !failure.IsUpstreamAvailability() || result.Response != nil || result.Retry != nil || calls.Load() != 1 {
+		t.Fatalf("old terminal failure rejected or upgraded: result=%+v err=%v calls=%d", result, err, calls.Load())
+	}
+}
 
 func TestTLSModelRetryPermissionBoundToOptIn(t *testing.T) {
 	// Given signed upstream failure metadata, when the real fleet client

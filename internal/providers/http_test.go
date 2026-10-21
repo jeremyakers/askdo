@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,52 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jeremyakers/askdo/internal/modelwire"
 )
+
+type cyclicResponseDiagnostic struct{ inspected int }
+
+func (e *cyclicResponseDiagnostic) Error() string { e.inspected++; return "private-response-canary" }
+func (e *cyclicResponseDiagnostic) Unwrap() error { e.inspected++; return e }
+
+func TestResponseErrorSubtypeReadsOnlyOwnedAnnotations(t *testing.T) {
+	// Given opaque/cyclic external errors and our direct annotation, when a log
+	// asks for a subtype, then neither private prose nor arbitrary trees are read.
+	opaque := &cyclicResponseDiagnostic{}
+	annotation := &responseError{subtype: "event_json", cause: opaque}
+	wrapped := fmt.Errorf("outer: %w", annotation)
+	opaque.inspected = 0
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"owned", annotation, "event_json"},
+		{"transient owned", &modelwire.TransientError{Cause: annotation}, "event_json"},
+		{"external", opaque, "unknown"},
+		{"transient external", &modelwire.TransientError{Cause: opaque}, "unknown"},
+		{"arbitrary wrapper", wrapped, "unknown"},
+		{"nested transient", &modelwire.TransientError{Cause: &modelwire.TransientError{Cause: annotation}}, "unknown"},
+		{"unlisted subtype", &responseError{subtype: "private-response-canary", cause: opaque}, "unknown"},
+		{"nil", nil, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResponseErrorSubtype(tc.err); got != tc.want {
+				t.Fatalf("subtype=%q want=%q", got, tc.want)
+			}
+		})
+	}
+	if opaque.inspected != 0 {
+		t.Fatal("diagnostic accessor inspected private error")
+	}
+	for _, subtype := range []string{"missing_terminal", "truncated_event", "event_json", "output_item_event", "terminal_event", "failure_event", "output_item", "function_arguments"} {
+		err := &responseError{subtype: subtype, cause: ErrMalformedResponse}
+		if ResponseErrorSubtype(err) != subtype || !errors.Is(err, ErrMalformedResponse) || err.Error() != ErrMalformedResponse.Error() {
+			t.Fatalf("annotation changed private cause/category for %q", subtype)
+		}
+	}
+}
 
 // TestStatusTaxonomy pins the status-to-error mapping shared by all adapters
 // (exercised here through openai_chat; the mapping lives in the shared HTTP

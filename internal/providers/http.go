@@ -31,6 +31,32 @@ var errCrossOriginRedirect = errors.New("refused cross-origin redirect")
 
 var errRedirectLimit = errors.New("redirect limit exceeded")
 
+// responseError annotates a private provider failure without making its prose
+// part of the diagnostic contract or changing sentinel matching.
+type responseError struct {
+	subtype string
+	cause   error
+}
+
+func (e *responseError) Error() string        { return e.cause.Error() }
+func (e *responseError) Is(target error) bool { return errors.Is(e.cause, target) }
+
+// ResponseErrorSubtype returns only fixed annotations we own, optionally under
+// the adapter's direct transient wrapper. Never inspect prose or walk arbitrary
+// provider error trees: they may contain secrets or cycles.
+func ResponseErrorSubtype(err error) string {
+	if transient, ok := err.(*modelwire.TransientError); ok && transient != nil {
+		err = transient.Cause
+	}
+	if response, ok := err.(*responseError); ok && response != nil {
+		switch response.subtype {
+		case "missing_terminal", "truncated_event", "event_json", "output_item_event", "terminal_event", "failure_event", "output_item", "function_arguments":
+			return response.subtype
+		}
+	}
+	return "unknown"
+}
+
 // boundedClient performs exactly one non-streaming HTTP exchange per call.
 // It uses the standard library default transport: normal TLS verification is
 // in effect and no retry, failover, backoff, or circuit-breaking logic exists

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,135 @@ import (
 	"github.com/jeremyakers/askdo/internal/providers"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 )
+
+func TestCodexIncompleteRetryPreservesConversation(t *testing.T) {
+	for _, ending := range []string{"", `data: {"type":"response.completed","response":`} {
+		for _, middle := range []bool{false, true} {
+			t.Run(map[bool]string{false: "first", true: "after_tool"}[middle]+map[bool]string{false: "/missing_terminal", true: "/truncated_event"}[ending != ""], func(t *testing.T) {
+				// Given a local SSE provider failing before/after a completed tool,
+				// when its incomplete turn recovers, then request and state are kept.
+				var mu sync.Mutex
+				var requests [][]byte
+				var sessions []string
+				var contacts []time.Time
+				failed := false
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					requests = append(requests, body)
+					sessions = append(sessions, r.Header.Get("session_id"))
+					contacts = append(contacts, time.Now())
+					w.Header().Set("Content-Type", "text/event-stream")
+					seenTool := bytes.Contains(body, []byte(`"type":"function_call_output"`))
+					if !failed && (!middle || seenTool) {
+						failed = true
+						_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n\n"+ending)
+						return
+					}
+					name, args := "submit_review", reviewerTestReport("2")
+					if middle && !seenTool {
+						name, args = "read_path", `{"base":"host","path":"/fixture","offset":0,"max_bytes":128}`
+					}
+					output, err := json.Marshal(struct {
+						Type      string `json:"type"`
+						CallID    string `json:"call_id"`
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{"function_call", "one", name, args})
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":["+string(output)+"]}}\n\n")
+				}))
+				defer server.Close()
+				boot := fallbackBootstrap(time.Now().Add(10*time.Second), "only")
+				boot.ConfigProjection.Models[0].API = "openai_codex"
+				boot.ConfigProjection.Models[0].AccessToken = "fixture-token"
+				boot.ConfigProjection.Models[0].AccountID = "fixture-account"
+				boot.ConfigProjection.Limits.MaxModelCallsPerAttempt = 3
+				constructed := 0
+				factory := func(choice proto.ProjectedModel) (reviewer.ModelTurn, error) {
+					constructed++
+					return providers.NewOpenAICodex(providers.OpenAICodexConfig{Name: choice.Name, BaseURL: server.URL, AccessToken: choice.AccessToken, AccountID: choice.AccountID, SessionID: "fixture-session", Timeout: time.Second})
+				}
+				pipe := &fallbackPipe{}
+				review, history, err := reviewer.RunWithFallback(context.Background(), boot, pipe, factory)
+				if err != nil || review.Report.Risk != "2" || outcomes(history) != "only=ok" || pipe.reviewCount() != 1 || constructed != 1 {
+					t.Fatalf("review=%+v history=%+v err=%v", review, history, err)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				want, retryAt := 2, 0
+				if middle {
+					want, retryAt = 3, 1
+				}
+				if len(requests) != want || !bytes.Equal(requests[retryAt], requests[retryAt+1]) || contacts[retryAt+1].Sub(contacts[retryAt]) < 250*time.Millisecond {
+					t.Fatalf("failed request changed, backoff shortened or call count wrong: %d", len(requests))
+				}
+				for _, id := range sessions {
+					if id != "fixture-session" {
+						t.Fatal("adapter session changed")
+					}
+				}
+				if pipe.opCount("read_path") != map[bool]int{false: 0, true: 1}[middle] || (middle && !strings.Contains(string(requests[retryAt]), "echo hi")) {
+					t.Fatal("completed tool replayed or its result lost")
+				}
+			})
+		}
+	}
+}
+
+func TestCodexIncompleteStreamUsesExistingBudgets(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "physical_calls", true: "review_deadline"}[deadline], func(t *testing.T) {
+			// Given persistent incomplete SSE, when the existing call/deadline
+			// budget ends, then physical requests stop with typed transport failure.
+			var mu sync.Mutex
+			var contacts []time.Time
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				mu.Lock()
+				contacts = append(contacts, time.Now())
+				mu.Unlock()
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n\n")
+			}))
+			defer server.Close()
+			boot := fallbackBootstrap(time.Now().Add(5*time.Second), "only")
+			boot.ConfigProjection.Limits.MaxModelCallsPerAttempt = 3
+			if deadline {
+				boot.ReviewDeadlineUnixMS = time.Now().Add(200 * time.Millisecond).UnixMilli()
+			}
+			factory := func(choice proto.ProjectedModel) (reviewer.ModelTurn, error) {
+				return providers.NewOpenAICodex(providers.OpenAICodexConfig{Name: choice.Name, BaseURL: server.URL, AccessToken: "fixture-token", AccountID: "fixture-account", SessionID: "fixture-session", Timeout: time.Second})
+			}
+			pipe := &fallbackPipe{}
+			_, _, err := reviewer.RunWithFallback(context.Background(), boot, pipe, factory)
+			var unavailable *reviewer.UnavailableError
+			if !errors.As(err, &unavailable) || len(unavailable.History) != 1 || unavailable.History[0].Code != proto.AvailabilityTransport || pipe.reviewCount() != 0 {
+				t.Fatalf("incomplete stream lost transport category: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			want := 3
+			if deadline {
+				want = 1
+			}
+			if len(contacts) != want {
+				t.Fatalf("physical calls=%d want=%d", len(contacts), want)
+			}
+			for i := 1; i < len(contacts); i++ {
+				if contacts[i].Sub(contacts[i-1]) < time.Duration(i)*250*time.Millisecond {
+					t.Fatal("persistent failure shortened existing backoff")
+				}
+			}
+		})
+	}
+}
 
 func TestProviderTransientRetryPreservesConversation(t *testing.T) {
 	for _, status := range []int{503, 408, 429, 0} {

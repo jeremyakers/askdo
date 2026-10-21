@@ -6,8 +6,10 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,303 @@ import (
 	"github.com/jeremyakers/askdo/internal/providers"
 	"github.com/jeremyakers/askdo/internal/reviewer/fakemodel"
 )
+
+type modelResponseLog struct {
+	Time         string `json:"time"`
+	Level        string `json:"level"`
+	Message      string `json:"msg"`
+	HostID       string `json:"host_id"`
+	JobID        string `json:"job_id"`
+	Attempt      uint32 `json:"attempt"`
+	Turn         uint32 `json:"turn"`
+	Stage        string `json:"stage"`
+	Subtype      string `json:"subtype"`
+	FailureCode  string `json:"failure_code"`
+	RetryGranted bool   `json:"retry_granted"`
+}
+
+func captureModelResponseLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+func readModelResponseLogs(t *testing.T, logs *bytes.Buffer) []modelResponseLog {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+	var records []modelResponseLog
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err == io.EOF {
+			return records
+		} else if err != nil {
+			t.Fatalf("invalid log record: %v", err)
+		}
+		var header struct {
+			Message string `json:"msg"`
+		}
+		if err := json.Unmarshal(raw, &header); err != nil {
+			t.Fatalf("invalid log header: %v", err)
+		}
+		if header.Message != "model response rejected" {
+			continue
+		}
+		var record modelResponseLog
+		selected := json.NewDecoder(bytes.NewReader(raw))
+		selected.DisallowUnknownFields()
+		if err := selected.Decode(&record); err != nil {
+			t.Fatalf("log contained non-allowlisted fields: %v", err)
+		}
+		if record.Level != "WARN" || record.Message != "model response rejected" {
+			t.Fatalf("unstable event or wrong routing: %+v", record)
+		}
+		records = append(records, record)
+	}
+}
+
+func TestCodexIncompleteModelSignedRetry(t *testing.T) {
+	for _, tc := range []struct {
+		subtype, ending string
+		optIn, granted  bool
+		code            fleetproto.ErrorCode
+	}{
+		{"missing_terminal", "", true, true, fleetproto.ErrCodeUpstreamTransport},
+		{"truncated_event", `data: {"type":"response.completed","response":`, true, true, fleetproto.ErrCodeUpstreamTransport},
+		{"missing_terminal", "", false, false, fleetproto.ErrCodeUpstreamTransport},
+		{"event_json", "data: {\"type\":\n\n", true, false, fleetproto.ErrCodeUpstreamWire},
+	} {
+		t.Run(tc.subtype+map[bool]string{true: "/opted_in", false: "/terminal"}[tc.optIn], func(t *testing.T) {
+			// Given a real local Codex stream and authenticated signed HTTP surface,
+			// when EOF interrupts a continuation, then only that turn can retry.
+			logs := captureModelResponseLogs(t)
+			var calls atomic.Int32
+			service, host, turn, _, bearer := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				switch calls.Add(1) {
+				case 1:
+					_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"initial"}}]}`)
+				case 2:
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"private-provider-canary\"}}\n\n"+tc.ending)
+				default:
+					_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}]}}\n\n")
+				}
+			}), time.Second, 1)
+			turn.Binding.JobID = "2026-10-21_#27"
+			initial := service.modelTurn(context.Background(), host, turn, true)
+			if initial.Response == nil {
+				t.Fatal(initial)
+			}
+			adapter, err := providers.NewOpenAICodex(providers.OpenAICodexConfig{Name: "fixture", BaseURL: service.cfg.Profiles[0].BaseURL, AccessToken: "private-token-canary", AccountID: "private-account-canary", SessionID: "private-session-canary", Timeout: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service.mu.Lock()
+			service.sessions[sessionKey{turn.Binding.HostID, turn.Binding.JobID, turn.Binding.Attempt}].adapter = adapter
+			service.mu.Unlock()
+			turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", Content: initial.Response.Content})
+			turn.Binding.Turn++
+			turn.RetryTransient = tc.optIn
+			server := httptest.NewTLSServer(service.Handler())
+			defer server.Close()
+			send := func() fleetproto.ModelResult {
+				t.Helper()
+				wire, err := json.Marshal(turn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/model-turns", bytes.NewReader(wire))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("X-Askdo-Host", host.HostID)
+				req.Header.Set("Authorization", "Bearer "+bearer)
+				req.Header.Set("X-Askdo-Local-Only", "true")
+				resp, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				wire, err = io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, payload, err := fleetproto.Verify[fleetproto.ModelResult](service.key.Public().(ed25519.PublicKey), wire)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := fleetproto.CheckModelResult(got, turn, time.Now().Unix()); err != nil {
+					t.Fatal(err)
+				}
+				if bytes.Contains(payload, []byte("canary")) {
+					t.Fatal("private provider detail escaped signed model result")
+				}
+				if got.Retry != nil {
+					// This is the existing v1 transport-retry shape, not a new wire
+					// subtype or a malformed-wire retry old host validators reject.
+					binding, err := json.Marshal(turn.Binding)
+					if err != nil {
+						t.Fatal(err)
+					}
+					frozen := `{"version":1,"kind":"model_result","binding":` + string(binding) + `,"failure":{"code":"upstream_transport"},"retry":{"after_ms":250}}`
+					if !bytes.Equal(payload, []byte(frozen)) {
+						t.Fatal("new gateway broke frozen host response schema", string(payload))
+					}
+				}
+				return got
+			}
+			first := send()
+			if first.Response != nil || first.Failure == nil || first.Failure.Code != tc.code || (first.Retry != nil) != tc.granted || (first.Retry != nil && first.Retry.AfterMS != 250) {
+				t.Fatalf("incomplete transport not retryable: %+v", first)
+			}
+			turn.Binding.Turn++
+			second := send()
+			if tc.granted {
+				if second.Response == nil || second.Response.Content != "recovered" {
+					t.Fatalf("continuation not recovered: %+v", second)
+				}
+				turn.Binding.Turn++
+				turn.RecoverPrevious = true
+				if adopted := send(); adopted.Response == nil || adopted.Response.Content != "recovered" || calls.Load() != 3 {
+					t.Fatal("cached response recomputed", adopted, calls.Load())
+				}
+			} else if second.Failure == nil || second.Failure.Code != fleetproto.ErrCodeSession || calls.Load() != 2 {
+				t.Fatal("terminal failure called provider again", second, calls.Load())
+			}
+			records := readModelResponseLogs(t, logs)
+			if len(records) != 1 {
+				t.Fatalf("original failure logged %d times", len(records))
+			}
+			record := records[0]
+			if record.HostID != host.HostID || record.JobID != "2026-10-21_#27" || record.Attempt != 1 || record.Turn != 2 || record.Stage != "adapter" || record.Subtype != tc.subtype || record.FailureCode != string(tc.code) || record.RetryGranted != tc.granted || strings.Contains(logs.String(), "canary") {
+				t.Fatalf("unsafe or uncorrelated diagnostic: %+v", record)
+			}
+		})
+	}
+}
+
+func TestModelNormalizationAfterCodexMappingRemainsTerminal(t *testing.T) {
+	// Given completed Codex mapping (including reasoning), when fleet's payload
+	// normalization rejects the mapped call, then no retry/recovery is permitted.
+	logs := captureModelResponseLogs(t)
+	var calls atomic.Int32
+	service, host, turn, _, _ := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"initial"}}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"mapped-reasoning-canary\"},{\"type\":\"function_call\",\"name\":\"inspect\",\"arguments\":\"{}\"}]}}\n\n")
+	}), time.Second, 1)
+	initial := service.modelTurn(context.Background(), host, turn, true)
+	if initial.Response == nil {
+		t.Fatal(initial)
+	}
+	adapter, err := providers.NewOpenAICodex(providers.OpenAICodexConfig{Name: "fixture", BaseURL: service.cfg.Profiles[0].BaseURL, AccessToken: "token-canary", AccountID: "account-canary", SessionID: "session-canary", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	service.sessions[sessionKey{turn.Binding.HostID, turn.Binding.JobID, turn.Binding.Attempt}].adapter = adapter
+	service.mu.Unlock()
+	turn.Binding.Turn++
+	turn.RetryTransient = true
+	turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", Content: initial.Response.Content})
+	got := service.modelTurn(context.Background(), host, turn, true)
+	if got.Response != nil || got.Failure == nil || got.Failure.Code != fleetproto.ErrCodeUpstreamWire || got.Retry != nil {
+		t.Fatalf("normalization failure retried: %+v", got)
+	}
+	turn.Binding.Turn++
+	for _, recovery := range []bool{false, true} {
+		turn.RecoverPrevious = recovery
+		if replay := service.modelTurn(context.Background(), host, turn, true); replay.Failure == nil || replay.Failure.Code != fleetproto.ErrCodeSession || replay.Retry != nil {
+			t.Fatal("normalization failure regained authority", replay)
+		}
+	}
+	records := readModelResponseLogs(t, logs)
+	if len(records) != 1 || records[0].Stage != "normalization" || records[0].Subtype != "invalid_model_payload" || records[0].FailureCode != string(fleetproto.ErrCodeUpstreamWire) || records[0].RetryGranted || records[0].HostID != host.HostID || records[0].JobID != string(turn.Binding.JobID) || records[0].Turn != 2 || calls.Load() != 2 || strings.Contains(logs.String(), "canary") {
+		t.Fatal("normalization diagnostic missing, duplicated or unsafe", records, calls.Load())
+	}
+}
+
+type privateModelDiagnostic struct{ formatted atomic.Int32 }
+
+func (e *privateModelDiagnostic) Error() string { e.formatted.Add(1); return "raw-error-canary" }
+func (e *privateModelDiagnostic) Is(target error) bool {
+	return target == providers.ErrMalformedResponse
+}
+
+func TestModelResponseDiagnosticNeverFormatsPrivateError(t *testing.T) {
+	// Given an adapter's private error, when the gateway maps its failure, then
+	// the logger sees only a fixed unknown subtype and never calls Error().
+	logs := captureModelResponseLogs(t)
+	slog.Info("unrelated fixture event", slog.String("component", "compatible-extension"))
+	service, host, turn, _, _ := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"initial"}}]}`)
+	}), time.Second, 1)
+	initial := service.modelTurn(context.Background(), host, turn, true)
+	if initial.Response == nil {
+		t.Fatal(initial)
+	}
+	private := &privateModelDiagnostic{}
+	service.mu.Lock()
+	service.sessions[sessionKey{turn.Binding.HostID, turn.Binding.JobID, turn.Binding.Attempt}].adapter = &fakemodel.Model{Steps: []fakemodel.Step{{Error: private}}}
+	service.mu.Unlock()
+	turn.Binding.Turn++
+	turn.RetryTransient = true
+	turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", Content: initial.Response.Content})
+	got := service.modelTurn(context.Background(), host, turn, true)
+	if got.Failure == nil || got.Failure.Code != fleetproto.ErrCodeUpstreamWire || got.Retry != nil || private.formatted.Load() != 0 {
+		t.Fatalf("private error formatted or retry invented: %+v formats=%d", got, private.formatted.Load())
+	}
+	records := readModelResponseLogs(t, logs)
+	if len(records) != 1 || records[0].Stage != "adapter" || records[0].Subtype != "unknown" || records[0].RetryGranted || records[0].HostID != host.HostID || records[0].JobID != string(turn.Binding.JobID) || strings.Contains(logs.String(), "canary") {
+		t.Fatal("private diagnostic escaped", records)
+	}
+}
+
+func TestModelResponseDiagnosticUsesFinalRetryGrantAfterDrop(t *testing.T) {
+	// Given a physical transient rejection held before completion, when root
+	// drops the session, then its diagnostic keeps the cause but grants no retry.
+	logs := captureModelResponseLogs(t)
+	var calls atomic.Int32
+	service, host, turn, _, _ := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"initial"}}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}), time.Second, 1)
+	initial := service.modelTurn(context.Background(), host, turn, true)
+	if initial.Response == nil {
+		t.Fatal(initial)
+	}
+	reached, release := make(chan struct{}), make(chan struct{})
+	service.beforeModelCompletion = func() { close(reached); <-release }
+	turn.Binding.Turn++
+	turn.RetryTransient = true
+	turn.Request.Messages = append(turn.Request.Messages, modelwire.Message{Role: "assistant", Content: initial.Response.Content})
+	done := make(chan fleetproto.ModelResult, 1)
+	go func() { done <- service.modelTurn(context.Background(), host, turn, true) }()
+	<-reached
+	service.DropSession(turn.Binding.HostID, turn.Binding.JobID, turn.Binding.Attempt)
+	close(release)
+	got := <-done
+	if got.Response != nil || got.Failure == nil || got.Failure.Code != fleetproto.ErrCodeSession || got.Retry != nil || calls.Load() != 2 {
+		t.Fatalf("session drop did not revoke retry: %+v calls=%d", got, calls.Load())
+	}
+	records := readModelResponseLogs(t, logs)
+	if len(records) != 1 {
+		t.Fatalf("original physical rejection logged %d times", len(records))
+	}
+	record := records[0]
+	if record.RetryGranted != (got.Retry != nil) {
+		t.Fatalf("diagnostic retry_granted=%t but final result retry present=%t", record.RetryGranted, got.Retry != nil)
+	}
+	if record.Stage != "adapter" || record.Subtype != "unknown" || record.FailureCode != string(fleetproto.ErrCodeUpstreamTransport) || record.HostID != host.HostID || record.JobID != string(turn.Binding.JobID) || record.Attempt != turn.Binding.Attempt || record.Turn != turn.Binding.Turn {
+		t.Fatalf("original rejection cause or binding lost after drop: %+v", record)
+	}
+}
 
 func TestModelTransientRetrySignedSequence(t *testing.T) {
 	// Given a real adapter and signed TLS model boundary, when a call fails
@@ -193,6 +492,7 @@ func TestModelOrdinaryRetryCanceledWaitPreservesKnownOutcome(t *testing.T) {
 	// Given an ordinary early retry, when its wait expires without contacting
 	// the provider, then recovery retains the known failure/minimum/count rather
 	// than fabricating a new physical timeout or shortening the absolute delay.
+	logs := captureModelResponseLogs(t)
 	contacted := make(chan time.Time, 3)
 	var calls atomic.Int32
 	service, host, turn, _, _ := sessionFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -233,6 +533,9 @@ func TestModelOrdinaryRetryCanceledWaitPreservesKnownOutcome(t *testing.T) {
 	turn.RecoverPrevious = false
 	if got := service.modelTurn(context.Background(), host, turn, true); got.Response == nil || calls.Load() != 3 {
 		t.Fatalf("following bounded ordinary retry did not recover: %+v calls=%d", got, calls.Load())
+	}
+	if records := readModelResponseLogs(t, logs); len(records) != 2 || records[0].Turn != 1 || records[1].Turn != 3 {
+		t.Fatal("no-contact canceled wait duplicated original rejection", records)
 	}
 }
 

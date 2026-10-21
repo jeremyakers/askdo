@@ -203,39 +203,53 @@ func TestProviderRetryClassificationAndHeaders(t *testing.T) {
 }
 
 func TestCodexFailedStreamRetryRetainsOnlyCompletedReasoning(t *testing.T) {
-	// Given a failed stream that emitted reasoning before response.failed,
-	// when the same request succeeds, then failed reasoning never enters state
-	// and the successful reasoning item is retained exactly once.
-	server, recorder := newCaptureServer(t, func(hit int, w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		switch hit {
-		case 1:
-			_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"failed\",\"encrypted_content\":\"must-not-echo\"}}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\"}}}\n\n"))
-		case 2:
-			_, _ = w.Write([]byte(codexFixtureTurn1))
-		default:
-			_, _ = w.Write([]byte(codexFixtureTurn2))
-		}
-	})
-	model := newTestCodex(t, server.URL, time.Second).(*openAICodex)
-	request := baseRequest()
-	_, err := model.ChatTurn(context.Background(), request)
-	if _, retry := modelwire.RetryDelay(err, 0); !retry || len(model.reasoning) != 0 {
-		t.Fatalf("failed stream mutated continuation: %v", err)
-	}
-	response, err := model.ChatTurn(context.Background(), request)
-	if err != nil || len(model.reasoning) != 1 {
-		t.Fatalf("successful retry: %v", err)
-	}
-	if !bytes.Equal(recorder.get(0).body, recorder.get(1).body) {
-		t.Fatal("failed request changed on retry")
-	}
-	request.Messages = append(request.Messages, reviewer.Message{Role: "assistant", ToolCalls: response.ToolCalls}, reviewer.Message{Role: "tool", ToolCallID: response.ToolCalls[0].ID, Content: "observed"})
-	if _, err := model.ChatTurn(context.Background(), request); err != nil {
-		t.Fatal(err)
-	}
-	body := string(recorder.get(2).body)
-	if strings.Contains(body, "must-not-echo") || strings.Count(body, "opaque-fixture-blob") != 1 || recorder.count() != 3 {
-		t.Fatal("reasoning duplicated or failed reasoning escaped")
+	for name, ending := range map[string]string{
+		"provider failure": "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\"}}}\n\n",
+		"missing terminal": "",
+		"truncated event":  `data: {"type":"response.completed","response":`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Given prior completed reasoning and a failed stream with partial reasoning,
+			// when the identical request recovers, then only completed reasoning survives.
+			server, recorder := newCaptureServer(t, func(hit int, w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				switch hit {
+				case 1:
+					_, _ = w.Write([]byte(strings.ReplaceAll(codexFixtureTurn1, "opaque-fixture-blob", "prior-completed-blob")))
+				case 2:
+					_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"failed\",\"encrypted_content\":\"must-not-echo\"}}\n\n" + ending))
+				case 3:
+					_, _ = w.Write([]byte(codexFixtureTurn1))
+				default:
+					_, _ = w.Write([]byte(codexFixtureTurn2))
+				}
+			})
+			model := newTestCodex(t, server.URL, time.Second).(*openAICodex)
+			request := baseRequest()
+			prior, err := model.ChatTurn(context.Background(), request)
+			if err != nil || len(prior.ToolCalls) != 1 {
+				t.Fatalf("prior turn: %v", err)
+			}
+			request.Messages = append(request.Messages, reviewer.Message{Role: "assistant", ToolCalls: prior.ToolCalls}, reviewer.Message{Role: "tool", ToolCallID: prior.ToolCalls[0].ID, Content: "prior observed"})
+			_, err = model.ChatTurn(context.Background(), request)
+			if _, retry := modelwire.RetryDelay(err, 0); !retry || len(model.reasoning) != 1 || !bytes.Contains(model.reasoning[0], []byte("prior-completed-blob")) {
+				t.Fatalf("failed stream mutated continuation: %v", err)
+			}
+			response, err := model.ChatTurn(context.Background(), request)
+			if err != nil || len(model.reasoning) != 2 {
+				t.Fatalf("successful retry: %v", err)
+			}
+			if !bytes.Equal(recorder.get(1).body, recorder.get(2).body) {
+				t.Fatal("failed request changed on retry")
+			}
+			request.Messages = append(request.Messages, reviewer.Message{Role: "assistant", ToolCalls: response.ToolCalls}, reviewer.Message{Role: "tool", ToolCallID: response.ToolCalls[0].ID, Content: "observed"})
+			if _, err := model.ChatTurn(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			body := string(recorder.get(3).body)
+			if strings.Contains(body, "must-not-echo") || strings.Count(body, "opaque-fixture-blob") != 1 || strings.Count(body, "prior-completed-blob") != 1 || recorder.count() != 4 {
+				t.Fatal("reasoning duplicated or failed reasoning escaped")
+			}
+		})
 	}
 }
