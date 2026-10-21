@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"time"
 
@@ -218,6 +219,11 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 		}
 	}
 	var response modelwire.ModelResponse
+	// Preserve the original safe cause while final reconciliation can revoke retry.
+	var rejection struct {
+		stage, subtype string
+		code           fleetproto.ErrorCode
+	}
 	transient, callerCanceled := waitCanceled, false
 	if !resolved {
 		if err == nil && adapter == nil {
@@ -250,6 +256,11 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 				}
 				result.Retry = &modelwire.Retry{AfterMS: afterMS}
 			}
+			if !joinCanceled {
+				rejection.stage = "adapter"
+				rejection.subtype = providers.ResponseErrorSubtype(err)
+				rejection.code = result.Failure.Code
+			}
 		}
 	}
 	if result.Response != nil {
@@ -258,6 +269,9 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 		if err != nil {
 			result.Response = nil
 			result.Failure = &fleetproto.Failure{Code: fleetproto.ErrCodeUpstreamWire}
+			rejection.stage = "normalization"
+			rejection.subtype = "invalid_model_payload"
+			rejection.code = result.Failure.Code
 		} else {
 			result = delivered
 			response = *delivered.Response
@@ -298,6 +312,13 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 	}
 	close(operation.done)
 	s.mu.Unlock()
+	if rejection.stage != "" {
+		slog.WarnContext(ctx, "model response rejected",
+			slog.String("host_id", host.HostID), slog.String("job_id", string(b.JobID)),
+			slog.Uint64("attempt", uint64(b.Attempt)), slog.Uint64("turn", uint64(b.Turn)),
+			slog.String("stage", rejection.stage), slog.String("subtype", rejection.subtype),
+			slog.String("failure_code", string(rejection.code)), slog.Bool("retry_granted", result.Retry != nil))
+	}
 	return result
 }
 

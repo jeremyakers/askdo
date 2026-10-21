@@ -558,6 +558,16 @@ No pipe message can mint or substitute a fleet approval: these frames carry
 model turns only, never notification or decision authority. Direct (non-fleet)
 mode does not use them, and its frames remain unchanged.
 
+Incomplete Codex streams (EOF without a terminal event, or an EOF-truncated final
+JSON event before completion) may retry the identical failed model request under
+the existing call budget, backoff and review deadline. Complete malformed events,
+invalid function arguments and post-mapping payload rejections remain terminal;
+completed tools are never replayed. The gateway emits a structured WARN event,
+`model response rejected`, with safe stage/subtype, failure code and retry grant.
+Correlate its authenticated `host_id`, validated `job_id`, `attempt` and `turn` in
+the gateway service log. Worker relays carry only the closed failure code and
+cannot reconstruct original diagnostic detail already lost upstream.
+
 ### `notification_sent` (W→B)
 
 Binds the completed Telegram approval card to the frozen manifest. Sent
