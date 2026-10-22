@@ -44,6 +44,40 @@ func testCardInput() CardInput {
 	}
 }
 
+func TestHostHeaderPairsServerAndJobID(t *testing.T) {
+	for _, tc := range []struct{ name, host, header string }{
+		{"canonical", "Diskstation", "<b>Host:</b> <code>Diskstation / 2026-10-22_#2</code>"},
+		{"escaped", "Disk<&station>", "<b>Host:</b> <code>Disk&lt;&amp;station&gt; / 2026-10-22_#2</code>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given a trusted server name and its canonical broker-local job ID.
+			in := testCardInput()
+			in.Host, in.JobID = tc.host, "2026-10-22_#2"
+			renders := map[string]func() ([]string, error){
+				"reviewed": func() ([]string, error) { return RenderSummaryParts(in) },
+				"unreviewed": func() ([]string, error) {
+					return RenderApprovalOnlySummaryParts(ApprovalOnlyInput{
+						Host: in.Host, JobID: in.JobID, Operation: in.Operation, Expiry: in.Expiry,
+					})
+				},
+			}
+			for name, render := range renders {
+				t.Run(name, func(t *testing.T) {
+					// When either approval flow renders its summary.
+					parts, err := render()
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Then the escaped server/job pair is together in the host row.
+					if !strings.Contains(strings.Join(parts, ""), tc.header) {
+						t.Fatalf("missing adjacent server/job identity %q", tc.header)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestReviewedSecurityScoreOnAllCards(t *testing.T) {
 	for _, tc := range []struct{ risk, visible string }{{"1", "1/5"}, {"5", "5/5"}, {"unknown", "UNKNOWN"}} {
 		t.Run(tc.risk, func(t *testing.T) {
@@ -222,7 +256,7 @@ func TestRenderSummaryRequiredFields(t *testing.T) {
 	text := parts[0]
 	for _, want := range []string{
 		"<b>Privilege approval · Security risk: 4/5</b>",
-		"<b>Host:</b> <code>energy-host</code>",
+		"<b>Host:</b> <code>energy-host / abcdef0123456789abcdef0123456789</code>",
 		"<b>Environment:</b> Docker container",
 		"<b>Submitted by:</b> <code>sample-agent</code> (uid 4242) → root",
 		"<b>Working directory:</b>", "<code>/home/example/project</code>",
