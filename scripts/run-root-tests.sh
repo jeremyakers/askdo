@@ -13,7 +13,7 @@
 # Usage: scripts/run-root-tests.sh [extra go test args...]
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 exec docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
 	-v "$ROOT:/src:ro" -w /src \
@@ -27,5 +27,10 @@ exec docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
 		useradd -r -g askdo-review -s /usr/sbin/nologin askdo-review
 		# Disposable login for UID-bound auto-approval grants; no host accounts change.
 		useradd -u 1000 -g askdo -M -s /usr/sbin/nologin askdo-grantee
+		# Present administrator-rubric fixtures need root-controlled ancestry.
+		# Tests still use t.TempDir and honor this runner-provided temporary root.
+		TMPDIR=$(mktemp -d /t.XXXXXXXX)
+		chmod 0755 "$TMPDIR"
+		export TMPDIR
 		go test -race -tags askdo_fleet_fixture -shuffle=on -count=1 -timeout=300s -run "TestRoot|TestProcessWorkerBoundary" -v ./internal/broker ./internal/inspection "$@"
 	' -- "$@"

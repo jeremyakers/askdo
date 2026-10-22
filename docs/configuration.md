@@ -209,6 +209,7 @@ for the distinction between fixture checks and deployment evidence.
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
 | `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. A human Telegram decision remains mandatory for **NO AI REVIEW**; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
 | `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. |
+| `risk_policy_files` | no | `{}` | Administrator Markdown rubrics keyed by OS login name, with absolute file paths as values. Names resolve to submitting UIDs; the root broker selects the file, never the client or reviewer. See [per-user risk rubrics](#per-user-risk-rubrics). |
 | `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
 | `webfetch_enabled` | no | `false` | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. See [review tools](review-tools.md#optional-webfetch). |
 | `models` | yes | — | Ordered fallback list. May be empty only with explicit `approval_only` or `required` plus nonempty `approval_only_users`; non-exempt/forced-review submitters then fail closed. Adding a model does not itself change `approval_only` policy. |
@@ -216,6 +217,84 @@ for the distinction between fixture checks and deployment evidence.
 | `total_timeout` | no | `"20m"` | Whole-review budget across all fallback choices; > 0 and ≥ `request_timeout`. Becomes the worker's `review_deadline_unix_ms`. |
 | `max_model_calls_per_attempt` | no | `32` | 1–128; bound on physical model calls per choice, including failed calls and retries, not just successful conversation turns. |
 | `max_output_tokens` | no | `8192` | 1–200000; bound on tokens per model response. |
+
+#### Per-user risk rubrics
+
+Different accounts can have different expected work and risk calibration. Add
+`risk_policy_files` inside the existing `review` object, retaining its other
+settings. For example, after creating the actual OS accounts:
+
+```json
+"risk_policy_files": {
+  "db-agent": "/etc/askdo/policies/database-operator.md",
+  "web-agent": "/etc/askdo/policies/web-deployer.md"
+}
+```
+
+These names are examples, not accounts askdo creates. The broker resolves the
+administrator's login names to UIDs and selects by the **kernel-authenticated
+submitting UID**, not the requested target UID (usually root), submitted reason,
+display name or an agent-selected filename. Processes sharing a Unix UID share
+its rubric; use separate OS accounts when they need different policies.
+
+Selection is deliberately simple:
+
+1. A configured per-user rubric replaces the built-in risk-scoring guidance.
+2. Otherwise, `risk-policy.md` beside the selected daemon configuration supplies
+   an optional host-wide rubric (`/etc/askdo/risk-policy.md` by default).
+3. With neither, the existing embedded rubric is unchanged.
+
+A present empty file is an empty custom rubric, not an absent policy file.
+
+The per-user and host-default rubrics are alternatives, not concatenated sets of
+potentially contradictory scoring instructions. Fixed reviewer duties and the
+report schema remain in place. A rubric can describe expected commands, normal
+maintenance, out-of-scope work, and what each risk level means for that account.
+See the [database-operator](../examples/risk-policies/database-operator.md) and
+[web-deployer](../examples/risk-policies/web-deployer.md) examples. Review and
+adapt them to the machine; they are not installed automatically.
+
+Policy files must remain administrator-controlled: root-owned regular files,
+with nonsymlink paths and no untrusted write access to the file or its ancestors.
+Normal root-writable modes such as `0644` and `0600` are accepted. Keep them under a
+root-controlled directory, not a submitter's home or checkout. A deliberately
+configured user policy that is missing, unreadable or unsafe fails that AI review
+rather than silently selecting a more permissive fallback. An absent optional
+host-default file preserves the old behavior. Policy loading is per review, not
+a new daemon-startup dependency; approval-only jobs do not need a risk rubric.
+
+Each AI review takes one snapshot before contacting its models. Retries and
+fallback models use those same bytes. Editing a file affects later reviews
+without restarting the broker; it does not rewrite an in-progress review or a
+pending approval. The root-owned frozen manifest retains the selected policy,
+its submitting UID and the SHA-256 revision of its exact bytes for audit.
+The login-to-file mapping itself is resolved when the daemon loads its
+configuration; changing that mapping follows the existing configuration lifecycle.
+
+In fleet mode, selection still happens on the submitting host. Its rubric travels
+with that review to the gateway/model; a different host or account does not inherit
+it. Rubric text is visible to the configured reviewer providers, so do not place
+credentials in it.
+
+Files must be UTF-8 without NUL. In fleet mode the complete system message must
+also fit the existing 262144-byte content limit and permit only newline and tab
+among control characters; use LF line endings, not CRLF. These are existing
+transport rules, not a new policy grammar.
+Direct providers retain their own request and context limits; fitting the local
+worker frame does not guarantee that a provider can accept a large rubric.
+
+**Rubrics guide assessment; they are not sudoers execution grants.** Expected
+commands are not automatically allowed, unexpected commands are not automatically
+denied, and prose does not guarantee a particular model score. Existing tool
+permissions, report validation, human approval and execution checks still apply.
+Because a score can qualify for existing opt-in auto-approval, review rubric
+changes with the same care as those grants; the rubric does not create or raise
+the grants or the submitter's preference.
+
+This is a source feature, not an installed-runtime change. Older strict config
+parsers reject the new `risk_policy_files` key. Upgrade the host broker and
+reviewer together before configuring it; publication alone does not authorize
+installation, policy changes or service restarts.
 
 Auto-approval requires an administrator grant and a submitter preference. The
 submitter can inspect/set/disable their preference without root via

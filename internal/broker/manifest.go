@@ -34,6 +34,9 @@ type approvalManifest struct {
 	TelegramRoute    *manifestTelegramRoute      `json:"telegram_route,omitempty"`
 	Fleet            *fleetManifest              `json:"fleet,omitempty"`
 	Inspection       *manifestInspectionEvidence `json:"inspection,omitempty"`
+	// RiskPolicy records the administrator rubric this review was scored with.
+	// Absent for the embedded default, so historical manifests are unchanged.
+	RiskPolicy *manifestRiskPolicy `json:"risk_policy,omitempty"`
 }
 
 // operationOnlyManifest deliberately has no review/report/coverage fields.
@@ -213,6 +216,7 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		TelegramRoute: j.manifestTelegramRoute(),
 		Fleet:         fleet,
 		Inspection:    j.inspectionEvidence(),
+		RiskPolicy:    j.frozenRiskPolicy().audit(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {

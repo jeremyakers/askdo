@@ -106,7 +106,7 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 	if err != nil {
 		return proto.ReviewComplete{}, err
 	}
-	messages := []Message{{Role: "system", Content: EmbeddedInstructions}, {Role: "user", Content: "Review this proposed command; use the path tools as you see fit, then finish with submit_review:\n" + string(operation)}}
+	messages := []Message{{Role: "system", Content: SystemInstructions(l.Bootstrap.RiskPolicy)}, {Role: "user", Content: "Review this proposed command; use the path tools as you see fit, then finish with submit_review:\n" + string(operation)}}
 	choice := l.Choice
 	if choice.Name == "" {
 		choice = l.Bootstrap.ConfigProjection.Models[0]

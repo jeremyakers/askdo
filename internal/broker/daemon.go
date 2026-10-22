@@ -111,6 +111,12 @@ type daemon struct {
 	launchPath     string
 	handoffs       map[[32]byte]*jobRuntime
 
+	// riskPolicyDefault is the optional host-wide rubric beside the selected
+	// config ("" when no config file was selected); riskPolicyTrust is who may
+	// own rubric files. Neither is read at startup: files are read per review.
+	riskPolicyDefault string
+	riskPolicyTrust   riskPolicyTrust
+
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 	shutdownOnce   sync.Once
@@ -342,7 +348,8 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	admissionTail := make(chan struct{})
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail}
+	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
+		riskPolicyDefault: riskPolicyDefaultPath(configPath), riskPolicyTrust: rootRiskPolicyTrust()}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
 	d.telegramClient = options.telegramClient
 	if d.telegramClient == nil {
