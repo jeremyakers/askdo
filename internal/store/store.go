@@ -153,7 +153,8 @@ func (err *ErrInvalidState) Error() string {
 
 // Store owns the SQLite job database.
 type Store struct {
-	db *sql.DB
+	db            *sql.DB
+	reviewLogPath string
 }
 
 // Open opens path, configures SQLite durability, and performs the schema
@@ -515,6 +516,9 @@ func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, request
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	if state.IsTerminal() {
+		store.logOutcome(ctx, uid, requestID)
+	}
 	return true, nil
 }
 
@@ -857,6 +861,9 @@ func (store *Store) Transition(ctx context.Context, uid uint32, requestID string
 	if err != nil {
 		return false, fmt.Errorf("read transition result: %w", err)
 	}
+	if changed == 1 && to.IsTerminal() {
+		store.logOutcome(ctx, uid, requestID)
+	}
 	return changed == 1, nil
 }
 
@@ -943,6 +950,7 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit expiry sweep: %w", err)
 	}
+	store.logTerminalUpdates(ctx, updated)
 	return count, nil
 }
 
@@ -985,6 +993,7 @@ func (store *Store) MarkRestartAmbiguous(ctx context.Context) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit restart marking: %w", err)
 	}
+	store.logTerminalUpdates(ctx, updated)
 	return count, nil
 }
 

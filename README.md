@@ -311,6 +311,9 @@ askdo --reason 'Try the bundled example' \
 - [Documentation map](docs/README.md) — start here for everything else.
 - [Configuration](docs/configuration.md) — full schema, both review modes,
   credentials, exemptions, auto-approval.
+- [Review journal](docs/review-log.md) — `sudo askdo review log` shows local
+  reviews and outcomes from root-only `/var/lib/askdo/reviews.jsonl`, without
+  captured contents or environment values; append-only history grows until rotated.
 - [Clean installation and cutover](docs/clean-cutover.md) — installing
   alongside another service, Telegram token coordination, handoffs.
 - [Architecture](docs/architecture.md) and [review tools](docs/review-tools.md)

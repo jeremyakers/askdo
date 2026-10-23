@@ -26,6 +26,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewidentity"
+	"github.com/jeremyakers/askdo/internal/reviewlog"
 	"github.com/jeremyakers/askdo/internal/store"
 	"github.com/jeremyakers/askdo/internal/telegram"
 	"golang.org/x/sys/unix"
@@ -87,6 +88,7 @@ type daemonOptions struct {
 }
 
 type daemon struct {
+	reviewLogPath  string
 	cfg            *config.Config
 	store          *store.Store
 	socketPath     string
@@ -284,6 +286,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 		closePolicy()
 		return nil, nil, err
 	}
+	jobStore.SetReviewLogPath(reviewlog.Path(storePath))
 	if _, err := jobStore.MarkRestartAmbiguous(context.Background()); err != nil {
 		cleanupLaunch()
 		_ = jobStore.Close()
@@ -344,6 +347,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
+	d.reviewLogPath = reviewlog.Path(storePath)
 	d.telegramClient = options.telegramClient
 	if d.telegramClient == nil {
 		d.telegramClient = func(tokenFile string) (*telegram.Client, error) {
