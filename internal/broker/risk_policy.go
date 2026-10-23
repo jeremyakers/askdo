@@ -128,8 +128,11 @@ func riskPolicyAbsent(path string) bool {
 func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 	d := j.daemon
 	snapshot := &riskPolicySnapshot{}
+	// Every layer travels in one bootstrap frame, so the frame limit is shared:
+	// raw bytes only grow when encoded, so any total over it could never be sent.
+	remaining := int64(proto.MaxFrameLength)
 	appendLayer := func(scope string, note config.AccountNoteFile) error {
-		data, err := readRiskPolicy(d.riskPolicyTrust, note.Path)
+		data, err := readRiskPolicy(d.riskPolicyTrust, note.Path, remaining)
 		if err != nil {
 			// The optional host file may vanish after Lstat; required notes may not.
 			if scope == riskPolicyScopeHost && errors.Is(err, errRiskPolicyAbsent) {
@@ -138,6 +141,7 @@ func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 			slog.Warn("risk policy unusable for review", "request_id", j.req.RequestID, "submitter_uid", j.uid, "scope", scope, "path", note.Path, "error", err)
 			return err
 		}
+		remaining -= int64(len(data))
 		sum := sha256.Sum256(data)
 		snapshot.layers = append(snapshot.layers, manifestAdministratorLayer{SubjectUID: j.uid, Scope: scope, Name: note.Name, Source: note.Path, Text: string(data), SHA256: hex.EncodeToString(sum[:])})
 		return nil
@@ -220,7 +224,7 @@ func pinsTrustedSystemMessage(snapshot *riskPolicySnapshot, messages []modelwire
 // walk hostmeta uses for root-controlled system files, except that aliases are
 // refused rather than followed: the installer already refuses a symlinked
 // /etc/askdo. Normal 0644 and 0600 files are fine; only write access matters.
-func readRiskPolicy(trust riskPolicyTrust, path string) ([]byte, error) {
+func readRiskPolicy(trust riskPolicyTrust, path string, budget int64) ([]byte, error) {
 	file, err := openAdministratorFile(trust, path)
 	if err != nil {
 		return nil, err
@@ -230,18 +234,19 @@ func readRiskPolicy(trust riskPolicyTrust, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errRiskPolicyUnreadable, err)
 	}
-	// A rubric rides in the bootstrap frame; MaxFrameLength is the existing
-	// ceiling for any protocol frame. Check the size before reading so a huge
-	// file cannot exhaust the root daemon's memory.
-	if info.Size() > int64(proto.MaxFrameLength) {
-		return nil, fmt.Errorf("%w: exceeds the protocol frame limit", errRiskPolicyInvalid)
+	// Administrator text rides in the bootstrap frame; MaxFrameLength is the
+	// existing ceiling for any protocol frame. budget is what remains of it for
+	// this review after earlier layers. Check the size before reading so huge
+	// files, alone or together, cannot exhaust the root daemon's memory.
+	if info.Size() > budget {
+		return nil, fmt.Errorf("%w: administrator text exceeds the protocol frame limit", errRiskPolicyInvalid)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, int64(proto.MaxFrameLength)+1))
+	data, err := io.ReadAll(io.LimitReader(file, budget+1))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errRiskPolicyUnreadable, err)
 	}
-	if len(data) > int(proto.MaxFrameLength) {
-		return nil, fmt.Errorf("%w: exceeds the protocol frame limit", errRiskPolicyInvalid)
+	if int64(len(data)) > budget {
+		return nil, fmt.Errorf("%w: administrator text exceeds the protocol frame limit", errRiskPolicyInvalid)
 	}
 	// The bootstrap decoder requires UTF-8 without NUL; encoding a string with
 	// invalid UTF-8 would silently substitute bytes, so refuse it here.

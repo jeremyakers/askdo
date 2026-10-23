@@ -312,7 +312,8 @@ account context. Administrator text is visible to reviewer providers: do not
 put credentials in it.
 
 Files must be UTF-8 without NUL. **Combined** host guidance and notes must fit the
-existing 64 MiB encoded bootstrap frame limit (checked before worker start) and
+existing 64 MiB encoded bootstrap frame limit (checked before worker start; the
+broker stops reading files once their combined size exceeds it) and
 the 1 MiB foreground manifest handoff limit (checked before approval). Detached
 manifests have no handoff-size limit. The complete fleet system message must
 also fit 262144 bytes, allowing only newline and tab among control characters;

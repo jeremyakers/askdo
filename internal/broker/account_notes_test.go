@@ -127,6 +127,29 @@ func TestFleetContentLimitCoversHostAndNotesTogether(t *testing.T) {
 	}
 }
 
+func TestCombinedNotesOverTheFrameLimitFailBeforeAllAreLoaded(t *testing.T) {
+	// Given: two group notes that each fit the protocol frame limit alone but
+	// together exceed it, so no bootstrap carrying both could ever be sent.
+	env := newRiskPolicyEnv(t)
+	groups := noteTestGroups(t, env)
+	half := strings.Repeat("g", int(proto.MaxFrameLength)/2+1)
+	cfg := testConfig()
+	cfg.Review.AccountNotes = &config.AccountNotesConfig{Groups: map[string]string{
+		groups[0].Name: env.write(t, "first-group.md", half),
+		groups[1].Name: env.write(t, "second-group.md", half),
+	}}
+	h := env.harness(t, cfg, nil, "", nil)
+	h.daemon.accountGroups = func(uint32) ([]uint32, error) { return []uint32{groups[0].gid, groups[1].gid}, nil }
+	job := &jobRuntime{daemon: h.daemon, uid: env.a.uid}
+	// When
+	snapshot, err := job.loadRiskPolicy()
+	// Then: loading stops with the existing classified failure, instead of
+	// retaining every file and leaving the frame check to reject it later.
+	if snapshot != nil || !errors.Is(err, errRiskPolicyInvalid) {
+		t.Fatalf("layers=%d err=%v", len(snapshot.audit()), err)
+	}
+}
+
 func TestNoGroupMappingDoesNotRequireMembershipLookup(t *testing.T) {
 	// Given: a pre-feature config with no notes, plus an absent optional host file.
 	env := newRiskPolicyEnv(t)
