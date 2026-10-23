@@ -8,7 +8,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const reviewUsage = "usage: askdo review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH]"
+const reviewUsage = "usage: askdo review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review log [--since DURATION] [--job ID] [--json]"
 
 func runReview(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -16,6 +16,8 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	switch args[0] {
+	case "log":
+		return runReviewLog(args[1:], stdout, stderr)
 	case "mode":
 		return reviewMode(args[1:], stdout, stderr)
 	case "exempt":

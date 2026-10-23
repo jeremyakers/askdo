@@ -133,6 +133,13 @@ func TestWorkerUnsuccessfulExitBlocksDispatch(t *testing.T) {
 	if len(h.executor.Snapshot()) != 0 {
 		t.Fatal("decision from a crashed worker executed")
 	}
+	// The consumed approval remains an approval even though pre-launch checks
+	// rejected the worker and prevented execution.
+	records := readReviewRecords(t, h)
+	outcome := records[len(records)-1]
+	if string(outcome["state"]) != `"failed"` || string(outcome["approval_kind"]) != `"human"` || string(outcome["decision"]) != `"approved"` {
+		t.Fatalf("consumed decision lost: %s", mustJSON(t, outcome))
+	}
 }
 
 // TestManifestCorruptionBlocksDispatch proves the frozen manifest digest is

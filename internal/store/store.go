@@ -12,9 +12,11 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/reviewlog"
 	_ "modernc.org/sqlite"
 )
 
@@ -153,7 +155,17 @@ func (err *ErrInvalidState) Error() string {
 
 // Store owns the SQLite job database.
 type Store struct {
-	db *sql.DB
+	db            *sql.DB
+	reviewLogPath string
+	// Audit-only operator decisions consumed but not yet journaled; see
+	// NoteConsumedDecision. consumedMu is a leaf lock: taken after the store's
+	// connection, never before it, and never held across I/O.
+	consumedMu sync.Mutex
+	consumed   map[journalKey]string
+	// Test-only interleaving seams: after terminal commit, before journaling;
+	// and inside NoteConsumedDecision, just before the note is stored.
+	beforeReviewLogAppend func()
+	beforeConsumedNote    func()
 }
 
 // Open opens path, configures SQLite durability, and performs the schema
@@ -178,6 +190,8 @@ func Open(path string) (*Store, error) {
 	}
 	// One process owns the broker lifecycle. A single connection also prevents
 	// self-contention while SQLite's busy timeout protects process handover.
+	// NoteConsumedDecision relies on it: holding the connection excludes every
+	// terminal mutation, whose transaction and journal snapshot need it too.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
@@ -504,17 +518,17 @@ func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, request
 	if decision.Action == "deny" {
 		state = StateDenied
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
+	n, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	if err != nil || n != 1 {
+	if n != 1 {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	store.appendOutcomes(outcomes)
 	return true, nil
 }
 
@@ -832,6 +846,23 @@ func (store *Store) getJob(ctx context.Context, uid uint32, requestID string) (J
 // Transition atomically moves a job from from to to. It returns false when the
 // stored state differs, the transition is a no-op, or the record is terminal.
 func (store *Store) Transition(ctx context.Context, uid uint32, requestID string, from, to State) (bool, error) {
+	return store.transition(ctx, uid, requestID, from, to, nil)
+}
+
+// TransitionWithResult persists the final result in the same guarded mutation
+// that sets the terminal state and captures its journal snapshot.
+func (store *Store) TransitionWithResult(ctx context.Context, uid uint32, requestID string, from, to State, result Result) (bool, error) {
+	if err := validateResult(result); err != nil {
+		return false, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return false, fmt.Errorf("encode result: %w", err)
+	}
+	return store.transition(ctx, uid, requestID, from, to, encoded)
+}
+
+func (store *Store) transition(ctx context.Context, uid uint32, requestID string, from, to State, resultJSON []byte) (bool, error) {
 	if !from.Valid() {
 		return false, &ErrInvalidState{State: from}
 	}
@@ -846,17 +877,22 @@ func (store *Store) Transition(ctx context.Context, uid uint32, requestID string
 		return false, nil
 	}
 
-	result, err := store.db.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	changed, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?, result_json = COALESCE(?, result_json)
 		WHERE uid = ? AND request_id = ? AND state = ?
 		AND state NOT IN ('finished', 'cancelled', 'expired', 'denied', 'failed', 'unknown')`,
-		string(to), time.Now().UTC().UnixNano(), uid, requestID, string(from))
+		string(to), time.Now().UTC().UnixNano(), resultJSON, uid, requestID, string(from))
 	if err != nil {
 		return false, fmt.Errorf("transition job: %w", err)
 	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("read transition result: %w", err)
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit transition: %w", err)
 	}
+	store.appendOutcomes(outcomes)
 	return changed == 1, nil
 }
 
@@ -907,6 +943,7 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 	cutoff := now.UTC().UnixNano()
 	updated := now.UTC().UnixNano()
 	var count int
+	var outcomes []reviewlog.Event
 	for _, transition := range []struct {
 		from State
 		to   State
@@ -915,19 +952,16 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 		{StateReviewing, StateCancelled},
 		{StateAwaitingHuman, StateExpired},
 	} {
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+		affected, events, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?
 			WHERE state = ? AND deadline_at IS NOT NULL AND deadline_at > 0 AND deadline_at < ?`,
 			string(transition.to), updated, string(transition.from), cutoff)
 		if err != nil {
 			return 0, fmt.Errorf("sweep %s jobs: %w", transition.from, err)
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("read expiry sweep result: %w", err)
-		}
-		count += int(affected)
+		count += affected
+		outcomes = append(outcomes, events...)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+	affected, events, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?
 		WHERE state = ? AND (EXISTS (SELECT 1 FROM foreground_grants g
 		WHERE g.uid = jobs.uid AND g.request_id = jobs.request_id AND g.expires_at <= ?)
 		OR (deadline_at IS NOT NULL AND deadline_at > 0 AND deadline_at <= ?))`,
@@ -935,14 +969,12 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 	if err != nil {
 		return 0, fmt.Errorf("sweep handoff jobs: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("read handoff sweep result: %w", err)
-	}
-	count += int(affected)
+	count += affected
+	outcomes = append(outcomes, events...)
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit expiry sweep: %w", err)
 	}
+	store.appendOutcomes(outcomes)
 	return count, nil
 }
 
@@ -960,6 +992,7 @@ func (store *Store) MarkRestartAmbiguous(ctx context.Context) (int, error) {
 
 	updated := time.Now().UTC().UnixNano()
 	var count int
+	var outcomes []reviewlog.Event
 	for _, transition := range []struct {
 		from State
 		to   State
@@ -971,20 +1004,18 @@ func (store *Store) MarkRestartAmbiguous(ctx context.Context) (int, error) {
 		{StateQueued, StateCancelled},
 		{StateReviewing, StateCancelled},
 	} {
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ? WHERE state = ?`,
+		affected, events, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ? WHERE state = ?`,
 			string(transition.to), updated, string(transition.from))
 		if err != nil {
 			return 0, fmt.Errorf("mark restart %s jobs: %w", transition.from, err)
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("read restart mark result: %w", err)
-		}
-		count += int(affected)
+		count += affected
+		outcomes = append(outcomes, events...)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit restart marking: %w", err)
 	}
+	store.appendOutcomes(outcomes)
 	return count, nil
 }
 
