@@ -74,6 +74,10 @@ and paths are already approval-card material and can still be sensitive; do not
 put secrets in arguments/reasons or share this root-only journal indiscriminately.
 This is a best-effort scrutiny log, not a transactional or tamper-proof audit
 ledger: a crash or write failure can leave missing records.
+Cooperating appenders use an inode lock and inspect the final byte while holding
+it. If a failed write left a partial record, the next append first delimits that
+fragment with a newline. The CLI skips the malformed fragment without losing
+the later complete record; existing history is not truncated or rewritten.
 
 ## Growth and rotation
 

@@ -73,6 +73,13 @@ type ObservationCount struct {
 	Count     int    `json:"count"`
 }
 
+// writeRecord is the single record write; tests replace it to inject faults.
+var writeRecord = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
+// beforeLock runs after the ownership check and before taking the lock; tests
+// use it to order appenders at the lock boundary.
+var beforeLock = func() {}
+
 // Append opens lazily and closes after each record so rename-based rotation
 // needs no daemon signal. A record is emitted by exactly one O_APPEND write.
 // The daemon runs as root; isolated non-root tests own their own journal.
@@ -81,7 +88,7 @@ func Append(path string, event Event) (err error) {
 	if err != nil {
 		return fmt.Errorf("encode review log: %w", err)
 	}
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_APPEND|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
 	if err != nil {
 		return fmt.Errorf("open review log: %w", err)
 	}
@@ -101,11 +108,39 @@ func Append(path string, event Event) (err error) {
 	if err := f.Chmod(0600); err != nil {
 		return err
 	}
-	n, err := f.Write(append(data, '\n'))
+	// Advisory lock serializes cooperating appenders so the tail check and
+	// write are atomic with respect to each other; it is released on close.
+	beforeLock()
+	for {
+		if err = unix.Flock(fd, unix.LOCK_EX); err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("lock review log: %w", err)
+	}
+	// A failed earlier append (or crash) may leave an unterminated fragment.
+	// Delimit it with a newline so readers can skip it and keep this record.
+	record := append(data, '\n')
+	// Size must be read under the lock: another appender may have written
+	// (or half-written) while this one waited.
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Size > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], stat.Size-1); err != nil {
+			return fmt.Errorf("read review log tail: %w", err)
+		}
+		if last[0] != '\n' {
+			record = append([]byte{'\n'}, record...)
+		}
+	}
+	n, err := writeRecord(f, record)
 	if err != nil {
 		return err
 	}
-	if n != len(data)+1 {
+	if n != len(record) {
 		return io.ErrShortWrite
 	}
 	return nil
