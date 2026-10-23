@@ -346,7 +346,10 @@ performed side effects or erases the dispatch commit.
 The legacy form `askdo cancel JOB_ID` / `{"op":"cancel","request_id":"..."}`
 retains pre-dispatch-only, owning-UID behavior **only for jobs without a grant**.
 After commit it still returns `starting`/`running`, not a false cancellation.
-It cannot cancel a protected job at any stage. Explicit cancel frames on
+It cannot cancel a protected job at any stage: the broker refuses it with
+`permission_denied` ("cancellation handle required"), and the CLI prints that
+reason with the `--handle-file` remedy. With a handle, the CLI reports a refusal
+without echoing broker text, so it cannot reveal the bearer. Explicit cancel frames on
 submit/attach require the same credential but retain **pre-dispatch-only**
 cleanup semantics (the client's view can lag dispatch). Running stop intent
 uses a separate one-shot cancel exchange; acknowledgments are not broadcast

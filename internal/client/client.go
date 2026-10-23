@@ -546,7 +546,28 @@ func runCancel(ctx context.Context, args []string, options Options) int {
 		}
 		return 0
 	}
-	fmt.Fprintln(options.Stderr, "cancellation rejected or unconfirmed; handle retained")
+	var refusal proto.ErrorEvent
+	if proto.StrictUnmarshal(body, &refusal) == nil && refusal.Validate() == nil {
+		switch {
+		case handleFile == "":
+			// No credential was sent, so the broker's reason cannot echo one.
+			fmt.Fprintf(options.Stderr, "%s: cancellation refused: %s\n", request.RequestID, refusal.Message)
+			if refusal.Code == "permission_denied" {
+				fmt.Fprintln(options.Stderr, "a job submitted with a cancel handle can only be cancelled with it: askdo cancel --handle-file PATH (the CANCEL_HANDLE_FILE printed at submission)")
+			}
+		case refusal.Code == "permission_denied":
+			// Broker text is never echoed here, so it cannot reveal the bearer.
+			fmt.Fprintf(options.Stderr, "%s: cancellation refused: the broker did not accept this handle; handle retained\n", request.RequestID)
+		default:
+			fmt.Fprintf(options.Stderr, "%s: cancellation refused by the broker; handle retained\n", request.RequestID)
+		}
+		return 125
+	}
+	if handleFile != "" {
+		fmt.Fprintln(options.Stderr, "cancellation rejected or unconfirmed; handle retained")
+	} else {
+		fmt.Fprintln(options.Stderr, "cancellation rejected or unconfirmed")
+	}
 	return 125
 }
 
