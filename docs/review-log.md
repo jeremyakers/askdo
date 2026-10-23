@@ -10,7 +10,7 @@ Read it locally as root:
 
 ```sh
 askdo review log                         # jobs active in the last 24 hours
-askdo review log --since 168h
+askdo review log --since 7d               # equivalently, --since 168h
 askdo review log --job '2026-10-22_#1' --since 0
 askdo review log --since 0 --json         # all original JSONL records
 ```
@@ -22,8 +22,9 @@ summary, warnings, and uncertainties. `--since` selects jobs with any recent
 activity, retaining older review context for their outcomes. With `--json`, it
 filters individual records instead and preserves their original bytes and file
 order. `--job` matches the ID exactly and shows each submitting UID separately;
-`--since 0` disables the time filter. Output write failures return nonzero. Malformed
-lines are reported by line number on stderr and skipped. A missing journal is
+`--since` accepts Go durations (such as `1h30m`) or a number of days (such as
+`7d` or `0.5d`); `--since 0` disables the time filter. Output write failures return
+nonzero. Malformed lines are reported by line number on stderr and skipped. A missing journal is
 empty history. A missing outcome means **not recorded**, not necessarily pending.
 For a recent compact view, two passes select active keys before retaining their
 records, so unrelated old jobs do not accumulate in memory. `--since 0` explicitly

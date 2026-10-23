@@ -36,6 +36,8 @@ func TestReviewLogCLI(t *testing.T) {
 		{"joined", []string{"--job", "one"}, []string{"host-a", "alice", "test summary", "approved", "7", "warning value", "uncertainty value"}, []string{"NO AI"}},
 		{"json", []string{"--json", "--since", "0", "--job", "one"}, []string{review + "\n" + outcome + "\n"}, []string{"broken", "\"two\""}},
 		{"since-json", []string{"--since", "1h", "--json", "--job", "one"}, []string{outcome + "\n"}, []string{review}},
+		{"since-days-json", []string{"--since", "7d", "--json", "--job", "one"}, []string{review + "\n" + outcome + "\n"}, nil},
+		{"since-fractional-days", []string{"--since", "0.5d", "--json", "--job", "one"}, []string{outcome + "\n"}, []string{review}},
 		{"since-joined", []string{"--since", "1h", "--job", "one"}, []string{"host-a", "test summary", "approved"}, nil},
 		{"no-ai", []string{"--job", "two"}, []string{"NO AI", "/bin/false"}, []string{"test summary"}},
 	} {
@@ -59,6 +61,25 @@ func TestReviewLogCLI(t *testing.T) {
 			}
 			if !strings.Contains(stderr.String(), "line 2") {
 				t.Fatalf("missing malformed-line diagnostic: %s", &stderr)
+			}
+		})
+	}
+}
+
+func TestReviewLogSinceRejectsInvalidDurations(t *testing.T) {
+	// Given a root caller with a missing journal, so no history can hide a bad flag.
+	oldPath, oldEUID := reviewLogPath, getEUID
+	t.Cleanup(func() { reviewLogPath, getEUID = oldPath, oldEUID })
+	getEUID = func() int { return 0 }
+	reviewLogPath = filepath.Join(t.TempDir(), "missing.jsonl")
+	for _, value := range []string{"-1h", "-1d", "999999999d", "300000d", "1dd", "1h2d"} {
+		t.Run(value, func(t *testing.T) {
+			// When the requested range is negative, overflowing, or malformed.
+			var out, stderr bytes.Buffer
+			code := runReview([]string{"log", "--since", value}, &out, &stderr)
+			// Then the existing usage-error contract applies before reading history.
+			if code != 125 || out.Len() != 0 || stderr.Len() == 0 {
+				t.Fatalf("code=%d out=%s err=%s", code, &out, &stderr)
 			}
 		})
 	}

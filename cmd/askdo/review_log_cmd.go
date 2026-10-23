@@ -28,11 +28,32 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	}
 	fs := flag.NewFlagSet("review log", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	since := fs.Duration("since", 24*time.Hour, "show activity within this duration (0 for all history)")
+	since := 24 * time.Hour
+	fs.Func("since", "show activity within this duration (default 24h; e.g. 7d or 168h; 0 for all history)", func(value string) error {
+		multiplier := time.Duration(1)
+		if strings.HasSuffix(value, "d") {
+			value = strings.TrimSuffix(value, "d")
+			if strings.Trim(value, "0123456789.+-") != "" {
+				return errors.New("day duration must be a number followed by d")
+			}
+			value += "h"
+			multiplier = 24
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return err
+		}
+		// Keep the existing nonnegative time.Duration range when expanding days.
+		if duration < 0 || duration > time.Duration(1<<63-1)/multiplier {
+			return errors.New("duration must be nonnegative and within the supported range")
+		}
+		since = duration * multiplier
+		return nil
+	})
 	job := fs.String("job", "", "filter by exact job ID")
 	raw := fs.Bool("json", false, "emit original JSONL records rather than joined summaries")
 	positional, err := parseInterleaved(fs, args)
-	if err != nil || len(positional) != 0 || *since < 0 {
+	if err != nil || len(positional) != 0 {
 		fmt.Fprintln(stderr, "usage: askdo review log [--since DURATION] [--job ID] [--json]")
 		return 125
 	}
@@ -46,8 +67,8 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	}
 	defer file.Close()
 	cutoff := time.Time{}
-	if *since > 0 {
-		cutoff = time.Now().Add(-*since)
+	if since > 0 {
+		cutoff = time.Now().Add(-since)
 	}
 	type joined struct {
 		review, outcome *reviewlog.Event
