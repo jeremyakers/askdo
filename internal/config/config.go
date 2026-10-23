@@ -493,7 +493,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	var cfg Config
-	if err := decodeConfig(data, &cfg); err != nil {
+	if err := decodeConfig(data, &cfg, path); err != nil {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
 	present, err := configFieldPresence(data)
@@ -629,7 +629,7 @@ func DecodeForFleetMutation(data []byte) (*Config, error) {
 
 func decodeMutation(data []byte, fleet bool) (*Config, error) {
 	var cfg Config
-	if err := decodeConfig(data, &cfg); err != nil {
+	if err := decodeConfig(data, &cfg, ""); err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
 	present, err := configFieldPresence(data)

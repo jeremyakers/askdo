@@ -326,9 +326,11 @@ the same care as those grants; prose does not create or raise a grant.
 **Migrating from v1.0.0-rc.15:** `review.risk_policy_files` was prerelease-only
 and is removed, not aliased. Move descriptions of normal work to
 `review.account_notes.users` (and/or `.groups`); move actual replacement scoring
-calibration to `/etc/askdo/risk-policy.md`. Do not copy an old replacement rubric
+calibration to `risk-policy.md` beside the daemon config
+(`/etc/askdo/risk-policy.md` by default). Do not copy an old replacement rubric
 unchanged into additive notes. Strict decoding explains this migration when the
-old key is encountered. Configs without either mapping continue to load unchanged.
+old key is encountered, naming the file beside the config being loaded. Configs
+without either mapping continue to load unchanged.
 
 Upgrade the host broker and reviewer **together**, then migrate/add the config
 key. The private bootstrap is unversioned; the new optional `account_notes` array

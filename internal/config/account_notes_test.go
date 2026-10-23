@@ -163,18 +163,27 @@ func TestOldRiskPolicyFilesErrorExplainsMigration(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, decode := range []func() error{
-		func() error { _, err := Load(path); return err },
-		func() error { _, err := DecodeForMutation(raw); return err },
-		func() error { _, err := DecodeForFleetMutation(raw); return err },
+	for _, tc := range []struct {
+		name         string
+		decode       func() error
+		hostGuidance string
+	}{
+		// A loaded file names the host guidance the broker reads beside it,
+		// here a non-default directory, never the hardcoded default.
+		{"load", func() error { _, err := Load(path); return err }, filepath.Join(filepath.Dir(path), "risk-policy.md")},
+		// Mutations decode bytes without a path, so the default is named.
+		{"mutation", func() error { _, err := DecodeForMutation(raw); return err }, "/etc/askdo/risk-policy.md"},
+		{"fleet mutation", func() error { _, err := DecodeForFleetMutation(raw); return err }, "/etc/askdo/risk-policy.md"},
 	} {
-		// When
-		err := decode()
-		// Then
-		for _, action := range []string{"review.risk_policy_files", "review.account_notes", "/etc/askdo/risk-policy.md"} {
-			if err == nil || !strings.Contains(err.Error(), action) {
-				t.Fatalf("error=%v, missing migration action %q", err, action)
+		t.Run(tc.name, func(t *testing.T) {
+			// When
+			err := tc.decode()
+			// Then
+			for _, action := range []string{"review.risk_policy_files", "review.account_notes", tc.hostGuidance} {
+				if err == nil || !strings.Contains(err.Error(), action) {
+					t.Fatalf("error=%v, missing migration action %q", err, action)
+				}
 			}
-		}
+		})
 	}
 }

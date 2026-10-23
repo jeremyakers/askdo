@@ -26,7 +26,10 @@ type AccountNoteFile struct {
 	Path string
 }
 
-func decodeConfig(data []byte, cfg *Config) error {
+// decodeConfig strictly decodes a config. configPath, when known, names the
+// file being decoded so a migration error can point at the host guidance file
+// the broker actually reads: risk-policy.md beside that config.
+func decodeConfig(data []byte, cfg *Config, configPath string) error {
 	err := proto.StrictUnmarshal(data, cfg)
 	if err != nil {
 		var fields struct {
@@ -34,7 +37,14 @@ func decodeConfig(data []byte, cfg *Config) error {
 		}
 		if json.Unmarshal(data, &fields) == nil {
 			if _, old := fields.Review["risk_policy_files"]; old {
-				return fmt.Errorf("%w; review.risk_policy_files was replaced by review.account_notes (additive users/groups context); replacement risk calibration belongs in /etc/askdo/risk-policy.md", err)
+				hostGuidance := "risk-policy.md beside the daemon config (/etc/askdo/risk-policy.md by default)"
+				if configPath != "" {
+					if abs, absErr := filepath.Abs(configPath); absErr == nil {
+						configPath = abs
+					}
+					hostGuidance = filepath.Join(filepath.Dir(configPath), "risk-policy.md")
+				}
+				return fmt.Errorf("%w; review.risk_policy_files was replaced by review.account_notes (additive users/groups context); replacement risk calibration belongs in %s", err, hostGuidance)
 			}
 		}
 	}
