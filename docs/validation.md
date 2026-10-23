@@ -39,6 +39,12 @@ scripts/test-foreground-sudo-container.sh
 scripts/test-fleet-binary.sh
 ```
 
+The root runner needs real bind/tmpfs mounts for its inspection fixtures. It
+grants `SYS_ADMIN` and disables seccomp and AppArmor confinement **only for the
+disposable test container**; it does not change a host security profile or
+service. The source bind is read-only. Run these privileged fixtures only with
+source you trust, not as a production isolation boundary.
+
 Normal installation downloads verified release binaries; none of the destination
 install paths compiles source or falls back to a source build. The release-transfer
 and packaging fixtures prepare artifacts before invoking the installer, then use

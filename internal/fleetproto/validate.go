@@ -47,6 +47,19 @@ func text(s string, max int, required bool) bool {
 	}
 	return true
 }
+
+// MaxMessageContentBytes bounds the content of one model request message and
+// of one model response on the fleet wire.
+const MaxMessageContentBytes = 262144
+
+// ValidMessageContent reports whether content satisfies the fleet model-message
+// contract: valid UTF-8, within MaxMessageContentBytes, and no control
+// character other than newline and tab. Root uses it to refuse a system prompt
+// the gateway would reject, before a review starts.
+func ValidMessageContent(content string) bool {
+	return text(content, MaxMessageContentBytes, false)
+}
+
 func header(version int, kind, want Kind) bool { return version == Version && kind == want }
 func profile(p ProfileMetadata, revision bool) error {
 	if !header(p.Version, p.Kind, KindProfile) || !validID(p.ProfileID) || len(p.Upstreams) < 1 || len(p.Upstreams) > MaxProfiles {
@@ -387,7 +400,7 @@ func request(r modelwire.ModelRequest) error {
 		return ErrProtocol
 	}
 	for _, m := range r.Messages {
-		if !text(m.Content, 262144, false) {
+		if !text(m.Content, MaxMessageContentBytes, false) {
 			return ErrProtocol
 		}
 		if err := calls(m.ToolCalls); err != nil {
@@ -424,7 +437,7 @@ func request(r modelwire.ModelRequest) error {
 	return nil
 }
 func response(r modelwire.ModelResponse) error {
-	if !text(r.Content, 262144, false) || r.Content == "" && len(r.ToolCalls) == 0 {
+	if !text(r.Content, MaxMessageContentBytes, false) || r.Content == "" && len(r.ToolCalls) == 0 {
 		return ErrProtocol
 	}
 	return calls(r.ToolCalls)

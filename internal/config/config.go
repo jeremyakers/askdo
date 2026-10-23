@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -313,11 +314,20 @@ type ReviewConfig struct {
 	// broker projects it to the worker and the model may fetch public
 	// http(s) pages as evidence. Private, loopback, link-local, and
 	// metadata destinations are refused by the fetcher regardless.
-	WebfetchEnabled  bool `json:"webfetch_enabled,omitempty"`
-	approvalOnlyUIDs map[uint32]struct{}
-	autoApproveRisk  map[uint32]int
-	usersResolved    bool
-	autoResolved     bool
+	WebfetchEnabled bool `json:"webfetch_enabled,omitempty"`
+	// RiskPolicyFiles maps OS login names to administrator-written Markdown
+	// risk rubrics (absolute paths). Each login resolves to a UID at Load and
+	// the broker selects a rubric by the kernel-authenticated submitting UID,
+	// never by a client-supplied name or path. Missing or empty means no
+	// per-user rubric. The rubric guides model assessment only; it grants no
+	// execution right. Files are read per review, not at startup.
+	RiskPolicyFiles    map[string]string `json:"risk_policy_files,omitempty"`
+	approvalOnlyUIDs   map[uint32]struct{}
+	autoApproveRisk    map[uint32]int
+	riskPolicyPaths    map[uint32]string
+	usersResolved      bool
+	autoResolved       bool
+	riskPolicyResolved bool
 }
 
 // AutoApproveGrant is one review.auto_approve_grants entry: the named login
@@ -507,6 +517,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := cfg.Review.ResolveAutoApproveGrants(); err != nil {
+		return nil, err
+	}
+	if err := cfg.Review.ResolveRiskPolicyFiles(); err != nil {
 		return nil, err
 	}
 	if err := cfg.Telegram.resolveRoutes(); err != nil {
@@ -854,7 +867,54 @@ func validateReviewPolicy(review ReviewConfig) error {
 		}
 		grants[grant.User] = struct{}{}
 	}
+	for login, path := range review.RiskPolicyFiles {
+		if login == "" || strings.TrimSpace(login) != login {
+			return errors.New("review.risk_policy_files contains an invalid login name")
+		}
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("review.risk_policy_files path for %q must be an absolute clean path", login)
+		}
+	}
 	return nil
+}
+
+// ResolveRiskPolicyFiles pins risk-rubric login names to numeric UIDs at
+// load/startup. Selection checks only the kernel-authenticated submitting UID,
+// never a caller-provided name. Only the name-to-UID mapping is validated here;
+// the rubric files are root-controlled inputs read when a review starts.
+func (review *ReviewConfig) ResolveRiskPolicyFiles() error {
+	if err := validateReviewPolicy(*review); err != nil {
+		return err
+	}
+	if review.riskPolicyResolved {
+		return nil
+	}
+	paths := make(map[uint32]string, len(review.RiskPolicyFiles))
+	for _, login := range slices.Sorted(maps.Keys(review.RiskPolicyFiles)) {
+		account, err := lookupUser(login)
+		if err != nil {
+			return fmt.Errorf("resolve review.risk_policy_files %q: %w", login, err)
+		}
+		uid, err := strconv.ParseUint(account.Uid, 10, 32)
+		if err != nil {
+			return fmt.Errorf("invalid UID for review.risk_policy_files %q: %w", login, err)
+		}
+		if _, exists := paths[uint32(uid)]; exists {
+			return fmt.Errorf("duplicate review.risk_policy_files UID %d", uid)
+		}
+		paths[uint32(uid)] = review.RiskPolicyFiles[login]
+	}
+	review.riskPolicyPaths = paths
+	review.riskPolicyResolved = true
+	return nil
+}
+
+// RiskPolicyFileForUID returns the administrator rubric configured for the
+// authenticated submitting UID. A programmatically built config that never
+// resolved its logins selects nothing, so there is no implicit activation.
+func (review *ReviewConfig) RiskPolicyFileForUID(uid uint32) (string, bool) {
+	path, ok := review.riskPolicyPaths[uid]
+	return path, ok
 }
 
 // ResolveApprovalOnlyUsers pins login names to numeric UIDs at load/startup.

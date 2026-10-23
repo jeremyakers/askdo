@@ -76,6 +76,10 @@ and [upgrade constraints](docs/configuration.md#optional-host-evidence-and-rollo
   to its output using the same job ID.
 - **Use different review policies for people and agents.** Keep AI review
   for agent accounts while using phone-only approval for your own account.
+- **Give each account its own risk rubric.** Administrator-owned Markdown can
+  describe the commands and maintenance each user is expected to perform,
+  without making those commands unconditional execution grants. See
+  [per-user risk rubrics](docs/configuration.md#per-user-risk-rubrics).
 - **Add more admins without sharing phones.** Each submitting account can
   reach its own bot, one request can reach several admins at once, and the
   first valid approve or deny decides it. Set up named channels in

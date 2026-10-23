@@ -93,6 +93,24 @@ The immutable job bootstrap; the first and only message of its kind.
 | `review_deadline_unix_ms` | int64 > 0 (client-now + `review.total_timeout`) |
 | `approval_only` | optional bool (policy bypass or all broker-preflight provider failures; never a forced review) |
 | `preflight_failures` | optional array of typed broker-classified provider availability failures; omitted otherwise |
+| `risk_policy` | optional object with required `text` string: the exact administrator rubric selected and snapshotted by the root broker for this submitting UID; absent retains the embedded rubric |
+
+The worker neither selects policy files nor reports an authoritative policy
+revision. The root broker resolves `review.risk_policy_files` login names to
+authenticated submitting UIDs, falling back to its optional host-default file,
+and owns the exact-byte snapshot and SHA-256 audit in the frozen manifest.
+Rubric text must be valid UTF-8 without NUL and fit existing framing limits.
+Fleet mode additionally requires the complete resulting system message to meet
+the existing fleet message-content limit and character rules. Policy files are
+not exposed through host-inspection tools to accomplish this projection.
+
+`risk_policy` is a private bootstrap extension: older strict workers reject it.
+Upgrade a host's broker and reviewer together before selecting a custom rubric.
+The gateway model wire and display schema do not gain new fields; the selected
+rubric travels inside the existing system message. For custom-rubric jobs, the
+root broker requires the worker's first system message to match its own frozen
+instructions and forbids additional system messages. Jobs without a custom
+rubric retain their existing request checks.
 
 **`operation`:**
 
