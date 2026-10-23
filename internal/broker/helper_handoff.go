@@ -23,6 +23,9 @@ import (
 // but a lost helper must not hold a broker connection indefinitely.
 const helperCompletionDeadline = 24 * time.Hour
 
+// helperManifestMaxBytes bounds the frozen manifest read during handoff.
+const helperManifestMaxBytes = 1 << 20
+
 func unixHelperPeer(conn *net.UnixConn) (uint32, int64, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
@@ -161,9 +164,9 @@ func (d *daemon) handleHelper(conn *net.UnixConn) {
 	if err != nil {
 		return
 	}
-	manifest, err := io.ReadAll(io.LimitReader(file, 1<<20+1))
+	manifest, err := io.ReadAll(io.LimitReader(file, helperManifestMaxBytes+1))
 	_ = file.Close()
-	if err != nil || len(manifest) > 1<<20 {
+	if err != nil || len(manifest) > helperManifestMaxBytes {
 		return
 	}
 	manifestHash := sha256.Sum256(manifest)

@@ -93,6 +93,24 @@ The immutable job bootstrap; the first and only message of its kind.
 | `review_deadline_unix_ms` | int64 > 0 (client-now + `review.total_timeout`) |
 | `approval_only` | optional bool (policy bypass or all broker-preflight provider failures; never a forced review) |
 | `preflight_failures` | optional array of typed broker-classified provider availability failures; omitted otherwise |
+| `risk_policy` | optional object with required `text` string: the exact administrator rubric selected and snapshotted by the root broker for this submitting UID; absent retains the embedded rubric |
+
+The worker neither selects policy files nor reports an authoritative policy
+revision. The root broker resolves `review.risk_policy_files` login names to
+authenticated submitting UIDs, falling back to its optional host-default file,
+and owns the exact-byte snapshot and SHA-256 audit in the frozen manifest.
+Rubric text must be valid UTF-8 without NUL and fit existing framing limits.
+Fleet mode additionally requires the complete resulting system message to meet
+the existing fleet message-content limit and character rules. Policy files are
+not exposed through host-inspection tools to accomplish this projection.
+
+`risk_policy` is a private bootstrap extension: older strict workers reject it.
+Upgrade a host's broker and reviewer together before selecting a custom rubric.
+The gateway model wire and display schema do not gain new fields; the selected
+rubric travels inside the existing system message. For custom-rubric jobs, the
+root broker requires the worker's first system message to match its own frozen
+instructions and forbids additional system messages. Jobs without a custom
+rubric retain their existing request checks.
 
 **`operation`:**
 
@@ -243,11 +261,11 @@ consumes each result exactly once).
 | `request_seq` | uint32 |
 | `status` | enum `"ok"` \| `"withheld"` \| `"binary"` \| `"inspection_denied"` \| `"not_found"` \| `"changed_during_capture"` \| `"limit_exceeded"` \| `"unresolved"` \| `"unknown"` |
 | `payload` | object matching the request's `op`; required iff `status` is `"ok"`, forbidden otherwise |
-| `reason_code` | optional closed code; forbidden on success and on legacy operations, allowed only on a non-`ok` result for the four new operations |
+| `reason_code` | optional closed code; forbidden on success. Metadata operations use the pairs below; direct path operations may classify only `inspection_denied` as described separately. |
 
-Every non-`ok` status is payload-free; the model receives status and, for new
-operations, an optional closed reason code, never raw command output or broker
-internals. Valid reason/status pairs are:
+Every non-`ok` status is payload-free; the model receives status and an optional
+closed reason code, never raw command output or broker internals. For the four
+metadata operations, valid reason/status pairs are:
 
 | Status | `reason_code` values |
 |---|---|
@@ -257,6 +275,29 @@ internals. Valid reason/status pairs are:
 | `changed_during_capture` | `observation_changed` |
 | `limit_exceeded` | `hash_file_limit`, `hash_review_limit` (hash only), `file_count_limit`, `output_limit`, `request_limit` |
 | `unresolved`, `unknown` | `timeout`, `unsupported_format`, `fragment_unresolved` (service only), `dependency_unavailable`, `inspection_failed` |
+
+For `read_path`, `list_path`, `search_path`, `stat_path`, `find_path` and
+`mount_info`, only an `inspection_denied` result may carry one of these codes:
+
+| `reason_code` | Root-authoritative meaning |
+|---|---|
+| `outside_scope` | Configured read roots, configured exclusions or default deny rejected a requested/resolved/mount-alias spelling. |
+| `protected_path` | A mandatory protected path, object identity or mount source was rejected; adding a read root cannot override it. |
+| `unverified_identity` | The required object or mount identity could not be established, for example an ambiguous alias or multiple hard links. |
+| `unsupported_object` | The object kind cannot be inspected by this operation, for example a content read of a directory or special file. |
+
+The classification comes from the same policy/open attempt as the denial, not a
+second filesystem check or parsing a private error string. An unclassified
+denial retains the bare status. All other direct-operation failure statuses,
+including `withheld` and `not_found`, retain their existing reason-free shapes.
+No denial establishes that a guessed path exists or exposes a private winning
+rule, canonical alias or syscall diagnostic. Denied selectors remain redacted in
+the root evidence journal.
+
+Existing reason-free frames remain valid. Older strict reviewer workers reject
+these new direct-operation reason semantics: upgrade a host's broker and
+reviewer together. This does not change fleet model/approval wire formats or
+require a database migration.
 
 Malformed/unavailable new-tool exchanges are rendered by the worker as the
 fixed `unresolved` / `inspection_failed` tool error, without raw diagnostics.

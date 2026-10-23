@@ -66,6 +66,17 @@ func failedInspect(seq uint32, status inspection.Status) proto.InspectResult {
 	return proto.InspectResult{Type: "inspect_result", RequestSeq: seq, Status: string(status)}
 }
 
+// failedInspectReason is failedInspect carrying the closed reason the policy
+// decided in the same open attempt. inspection.Reason classifies only a
+// denial; every other status keeps its bare legacy shape.
+func failedInspectReason(seq uint32, status inspection.Status, reason inspection.Reason) proto.InspectResult {
+	v := failedInspect(seq, status)
+	if status == inspection.StatusInspectionDenied {
+		v.ReasonCode = string(reason)
+	}
+	return v
+}
+
 func truncateUTF8(value string, max int) string {
 	if len(value) <= max {
 		return value

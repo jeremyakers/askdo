@@ -371,23 +371,27 @@ func (p *Policy) selectRoot(requested string) (rootAnchor, string, bool) {
 	return p.roots[0], requested, true
 }
 
+// decision is one rule-table verdict. rule is the operator diagnostic (it
+// names the winning spelling); reason is the closed classification of a
+// rejection and is empty for an allowed path.
 type decision struct {
 	allowed bool
 	rule    string
+	reason  Reason
 }
 
 func (p *Policy) rule(path string) decision {
 	for _, hard := range p.hard {
 		if containsPath(hard, path) {
-			return decision{rule: "protected exclusion " + hard}
+			return decision{rule: "protected exclusion " + hard, reason: ReasonProtectedPath}
 		}
 	}
-	best := decision{rule: "default deny"}
+	best := decision{rule: "default deny", reason: ReasonOutsideScope}
 	specificity := -1
 	for _, deny := range p.denies {
 		if containsPath(deny, path) && len(deny) >= specificity {
 			specificity = len(deny)
-			best = decision{rule: "deny_paths " + deny}
+			best = decision{rule: "deny_paths " + deny, reason: ReasonOutsideScope}
 		}
 	}
 	for _, allow := range p.allows {

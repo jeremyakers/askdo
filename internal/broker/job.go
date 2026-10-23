@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -95,6 +96,10 @@ type jobRuntime struct {
 	// drops it and MarkRestartAmbiguous expires the store row.
 	pendingApproval *approvalBinding
 	fleet           *fleetJob // owned by the root review/ticket lifecycle, never the worker
+	// riskPolicy is the administrator rubric snapshot of this AI review, read
+	// once before the worker starts and never replaced. Retries, fallback models
+	// and manifest rebuilds all use it; nil means the embedded default.
+	riskPolicy *riskPolicySnapshot
 }
 
 type foregroundPeer struct {
@@ -384,6 +389,27 @@ func (j *jobRuntime) run(ctx context.Context) {
 	j.preflightFailures = preflight
 	j.approvalOnly = approvalOnly
 	j.mu.Unlock()
+	// Only a review that will really call a model consults a rubric. It is read
+	// exactly once, before the worker starts or any model turn is requested, so
+	// a later edit cannot change this review and an unusable rubric fails this
+	// job accurately instead of silently scoring with a different one.
+	if !approvalOnly {
+		snapshot, policyErr := j.loadRiskPolicy()
+		if policyErr != nil {
+			j.fail(riskPolicyFailure(policyErr))
+			return
+		}
+		j.mu.Lock()
+		j.riskPolicy = snapshot
+		j.mu.Unlock()
+		// Raw rubric bytes can fit while JSON escaping and the rest of the
+		// bootstrap exceed the frame limit. Use the actual worker encoding path
+		// before starting a worker, preserving the classified policy failure.
+		if snapshot != nil && errors.Is(writeWorker(io.Discard, j.bootstrap(), proto.BrokerToWorker), proto.ErrFrameTooLarge) {
+			j.fail(riskPolicyFailure(errRiskPolicyInvalid))
+			return
+		}
+	}
 
 	var session WorkerSession
 	var err error
@@ -1379,7 +1405,12 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	reviewDeadline := j.reviewDeadline().UnixMilli()
 	j.mu.Lock()
 	models := j.models
+	snapshot := j.riskPolicy
 	j.mu.Unlock()
+	var riskPolicy *proto.RiskPolicy
+	if snapshot != nil {
+		riskPolicy = &proto.RiskPolicy{Text: snapshot.text}
+	}
 	if models == nil {
 		// Defensive: run() always installs the refresh-prepared projection
 		// before bootstrap(); a directly-constructed job (tests) falls back
@@ -1420,6 +1451,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
+		RiskPolicy: riskPolicy,
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
 			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled, InspectionCaps: j.inspectionCapabilities()},

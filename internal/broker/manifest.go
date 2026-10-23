@@ -35,6 +35,9 @@ type approvalManifest struct {
 	TelegramRoute    *manifestTelegramRoute      `json:"telegram_route,omitempty"`
 	Fleet            *fleetManifest              `json:"fleet,omitempty"`
 	Inspection       *manifestInspectionEvidence `json:"inspection,omitempty"`
+	// RiskPolicy records the administrator rubric this review was scored with.
+	// Absent for the embedded default, so historical manifests are unchanged.
+	RiskPolicy *manifestRiskPolicy `json:"risk_policy,omitempty"`
 }
 
 // operationOnlyManifest deliberately has no review/report/coverage fields.
@@ -220,10 +223,14 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		TelegramRoute: j.manifestTelegramRoute(),
 		Fleet:         fleet,
 		Inspection:    j.inspectionEvidence(),
+		RiskPolicy:    j.frozenRiskPolicy().audit(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {
 		return nil, "", &freezeError{code: "broker_error", reason: "serialize approval manifest: " + err.Error()}
+	}
+	if effectiveLifecycle(j.req) == proto.LifecycleForeground && len(encoded) > helperManifestMaxBytes {
+		return nil, "", &freezeError{code: "broker_error", reason: "approval manifest exceeds the 1 MiB foreground handoff limit"}
 	}
 	// Auto-start keeps approval_json NULL until its atomic audit/dispatch commit.
 	frozen, digest, err := j.storeFrozenManifest(ctx, encoded, plan != nil)

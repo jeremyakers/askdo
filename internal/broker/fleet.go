@@ -147,6 +147,9 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsForCapabilities(j.inspectionCapabilities(), j.daemon.cfg.Review.WebfetchEnabled)) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
+	if snapshot := j.frozenRiskPolicy(); snapshot != nil && !pinsTrustedSystemMessage(snapshot, r.Request.Messages) {
+		return bad(fleetproto.ErrCodeProtocol)
+	}
 	if !time.Now().Before(f.reviewDeadline) {
 		return bad(fleetproto.ErrCodeExpired)
 	}

@@ -134,6 +134,30 @@ root broker, config parser and reviewer must be upgraded together before
 using their fields. The default registry is eight tools, at most twelve with
 all four opt-ins. See [rollout constraints](configuration.md#optional-host-evidence-and-rollout).
 
+### Per-submitter risk calibration
+
+An administrator can map OS login names to Markdown rubrics through
+`review.risk_policy_files`. Root resolves those names to UIDs and selects by the
+kernel-authenticated **submitting** UID, independently of display names and the
+target execution UID. An unmapped account may use the optional `risk-policy.md`
+beside the daemon's selected config; absent both, the embedded default remains.
+
+For each AI review, the broker safely acquires the selected administrator-owned
+file and freezes one exact-byte snapshot. The worker gets only its text in the
+bootstrap, never a choice of paths. The selected rubric replaces default scoring
+guidance, not the fixed report/tool duties. Root records the policy source,
+subject UID, exact text and SHA-256 revision in the digest-bound manifest.
+Retries, fallback models and pending approvals keep that snapshot; later reviews
+can pick up edits without a restart. Approval-only jobs do not consult rubrics.
+
+Fleet reviews use the same host-local selection. The existing model-message
+transport carries that job's system instructions; the broker checks custom
+instructions against its own frozen snapshot before forwarding them. Nothing
+installs a shared gateway-wide rubric or reuses another host's/account's policy.
+These checks establish instruction provenance, not model obedience or accurate
+scoring. Prose cannot authorize execution; existing explicit risk auto-approval
+grants and human approval/dispatch controls remain the authorities.
+
 ### Fixed host-metadata adapters (root, observational only)
 
 `internal/inspection` hashes an allowed executable through a pinned descriptor,

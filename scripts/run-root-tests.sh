@@ -6,6 +6,8 @@
 # The reviewer process boundary test also runs under the provisioned reviewer
 # identity. Only the source tree is mounted from the host, read-only; the bind
 # mount inspection test requires CAP_SYS_ADMIN and an unrestricted mount syscall.
+# AppArmor's docker-default profile also denies those fixture mounts, so only
+# this disposable test container runs without that profile.
 # Nothing is installed on the host.
 # The test-only askdo_fleet_fixture tag enables loopback Telegram wire injection
 # and includes every RootFleet case by default; normal builds have no such hook.
@@ -13,9 +15,10 @@
 # Usage: scripts/run-root-tests.sh [extra go test args...]
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 exec docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+	--security-opt apparmor=unconfined \
 	-v "$ROOT:/src:ro" -w /src \
 	-e ASKDO_ROOT_TEST=1 \
 	golang:1.27 bash -c '
@@ -27,5 +30,10 @@ exec docker run --rm --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
 		useradd -r -g askdo-review -s /usr/sbin/nologin askdo-review
 		# Disposable login for UID-bound auto-approval grants; no host accounts change.
 		useradd -u 1000 -g askdo -M -s /usr/sbin/nologin askdo-grantee
+		# Present administrator-rubric fixtures need root-controlled ancestry.
+		# Tests still use t.TempDir and honor this runner-provided temporary root.
+		TMPDIR=$(mktemp -d /t.XXXXXXXX)
+		chmod 0755 "$TMPDIR"
+		export TMPDIR
 		go test -race -tags askdo_fleet_fixture -shuffle=on -count=1 -timeout=300s -run "TestRoot|TestProcessWorkerBoundary" -v ./internal/broker ./internal/inspection "$@"
 	' -- "$@"

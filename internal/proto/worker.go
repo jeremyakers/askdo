@@ -99,6 +99,9 @@ type Bootstrap struct {
 	// configured choices failed preflight.
 	PreflightFailures []AvailabilityFailure `json:"preflight_failures,omitempty"`
 	ApprovalOnly      bool                  `json:"approval_only,omitempty"`
+	// RiskPolicy is the administrator rubric snapshot the broker selected for
+	// this review. Absent means the embedded default rubric applies.
+	RiskPolicy *RiskPolicy `json:"risk_policy,omitempty"`
 }
 
 // WorkerOperation is the frozen operation supplied to the reviewer.
@@ -742,8 +745,9 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 	}
 	if discriminator.Type == "bootstrap" {
 		var flags struct {
-			FleetMode json.RawMessage `json:"fleet_mode"`
-			Operation struct {
+			FleetMode  json.RawMessage `json:"fleet_mode"`
+			RiskPolicy json.RawMessage `json:"risk_policy"`
+			Operation  struct {
 				CapturedStdin json.RawMessage `json:"captured_stdin"`
 			} `json:"operation"`
 		}
@@ -752,6 +756,9 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 		}
 		if string(flags.FleetMode) == "null" {
 			return nil, errors.New("null fleet mode")
+		}
+		if string(flags.RiskPolicy) == "null" {
+			return nil, errors.New("null risk policy")
 		}
 		if string(flags.Operation.CapturedStdin) == "null" {
 			return nil, errors.New("null captured input metadata")
@@ -1027,6 +1034,11 @@ func validateBootstrap(m Bootstrap) error {
 	}
 	if m.Type != "bootstrap" || !bounded(m.Host, 256) || !validKnownJobID(m.RequestID) || m.DeadlineUnixMS < 0 || m.ReviewDeadlineUnixMS <= 0 {
 		return errors.New("invalid bootstrap")
+	}
+	if m.RiskPolicy != nil {
+		if err := m.RiskPolicy.Validate(); err != nil {
+			return err
+		}
 	}
 	// The submitter identity is broker-authenticated (SO_PEERCRED uid and the
 	// host account lookup); the name is a bounded display string with the

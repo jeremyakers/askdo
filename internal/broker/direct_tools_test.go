@@ -19,8 +19,13 @@ import (
 
 func directJob(t *testing.T, root string, bundle []proto.BundleFile) *jobRuntime {
 	t.Helper()
+	return directJobWithInspection(t, config.InspectionConfig{ReadRoots: []string{root}, SensitiveMasks: []string{"*.privmask"}}, bundle)
+}
+
+func directJobWithInspection(t *testing.T, inspectionCfg config.InspectionConfig, bundle []proto.BundleFile) *jobRuntime {
+	t.Helper()
 	cfg := testConfig()
-	cfg.Inspection = config.InspectionConfig{ReadRoots: []string{root}, SensitiveMasks: []string{"*.privmask"}}
+	cfg.Inspection = inspectionCfg
 	p, err := inspection.NewPolicy(cfg.Inspection)
 	if err != nil {
 		t.Fatal(err)

@@ -67,7 +67,7 @@ func TestTopLevelHelpRoutesWithoutIO(t *testing.T) {
 		if code != 0 || calls != 0 {
 			t.Fatalf("%s: code=%d clientCalls=%d", arg, code, calls)
 		}
-		for _, want := range []string{"--reason", "--timeout", "--detach", "--", "auth login|status|logout", "config check", "gateway", "askdo auth --help"} {
+		for _, want := range []string{"--reason", "--timeout", "--detach", "--script PATH", "--", "auth login|status|logout", "config check", "gateway", "askdo auth --help"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%s: help missing %q", arg, want)
 			}
