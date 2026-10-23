@@ -604,7 +604,7 @@ func TestNotifyCardContentCompleteness(t *testing.T) {
 	}
 	joined := strings.Join([]string{sent[0].Text, sent[len(sent)-1].Text}, "\n")
 	for _, want := range []string{
-		"<b>Privilege approval · Security risk: 4/5</b>", "<b>Host:</b> <code>energy-host</code>",
+		"<b>Privilege approval · Security risk: 4/5</b>", "<b>Host:</b> <code>energy-host / 0123456789abcdef0123456789abcdef</code>",
 		"<b>Environment:</b> Docker &lt;sandbox&gt;",
 		"<b>Submitted by:</b> <code>operator&lt;&amp;&gt;</code> (uid 1234) → root",
 		"<b>Working directory:</b>\n<code>/tmp/work&lt;&amp;&gt;</code>",
