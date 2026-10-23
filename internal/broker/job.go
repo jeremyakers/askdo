@@ -96,7 +96,10 @@ type jobRuntime struct {
 	// drops it and MarkRestartAmbiguous expires the store row.
 	pendingApproval *approvalBinding
 	reviewFeedback  *proto.ReviewFeedback // immutable display-safe copy of the frozen report
-	fleet           *fleetJob             // owned by the root review/ticket lifecycle, never the worker
+	// Test-only interleaving seam: a validated decision, not yet registered
+	// with the store. Called under mu.
+	beforeDecisionNote func()
+	fleet              *fleetJob // owned by the root review/ticket lifecycle, never the worker
 	// riskPolicy is the administrator rubric snapshot of this AI review, read
 	// once before the worker starts and never replaced. Retries, fallback models
 	// and manifest rebuilds all use it; nil means the embedded default.
@@ -234,13 +237,19 @@ func sanitizeClientDetail(s string) string {
 	}, s)
 }
 
-func (j *jobRuntime) transition(ctx context.Context, from, to store.State) (bool, error) {
+func (j *jobRuntime) transition(ctx context.Context, from, to store.State, result ...store.Result) (bool, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.state != from {
 		return false, nil
 	}
-	changed, err := j.daemon.store.Transition(ctx, j.uid, j.req.RequestID, from, to)
+	var changed bool
+	var err error
+	if len(result) > 0 {
+		changed, err = j.daemon.store.TransitionWithResult(ctx, j.uid, j.req.RequestID, from, to, result[0])
+	} else {
+		changed, err = j.daemon.store.Transition(ctx, j.uid, j.req.RequestID, from, to)
+	}
 	if err != nil || !changed {
 		return changed, err
 	}
@@ -799,7 +808,17 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 		return
 	}
 	// Consume exactly once, before any commit: a losing cancel/expiry race or
-	// a replayed decision can never authorize again.
+	// a replayed decision can never authorize again. The store journals this
+	// decision with whichever terminal outcome commits next, including a
+	// deadline, cancellation or sweep that wins before dispatch. It is
+	// registered first, so nothing is consumed that the store had no chance to
+	// record: a sweep, which does not take mu, either commits before the
+	// registration (the job has then already ended and nothing is recorded) or
+	// snapshots the note.
+	if j.beforeDecisionNote != nil {
+		j.beforeDecisionNote()
+	}
+	j.daemon.store.NoteConsumedDecision(j.uid, j.req.RequestID, *decision)
 	pending.consumed = true
 	action := decision.Action
 	j.mu.Unlock()
@@ -1349,9 +1368,8 @@ func (j *jobRuntime) fail(detail string) {
 	if from.IsTerminal() || from == store.StateStarting || from == store.StateRunning {
 		return
 	}
-	if changed, _ := j.transition(context.Background(), from, store.StateFailed); changed {
-		result := store.Result{Kind: store.ResultWrapper}
-		_ = j.daemon.store.RecordResult(context.Background(), j.uid, j.req.RequestID, result)
+	result := store.Result{Kind: store.ResultWrapper}
+	if changed, _ := j.transition(context.Background(), from, store.StateFailed, result); changed {
 		j.publish(proto.ProgressEvent{Op: "progress", Stage: "failed", Detail: detail})
 		j.finishTerminal(store.StateFailed, result)
 	}

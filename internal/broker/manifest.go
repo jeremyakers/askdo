@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/reviewlog"
 	"github.com/jeremyakers/askdo/internal/sensitive"
 )
 
@@ -96,6 +97,12 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		return "", &freezeError{code: "broker_error", reason: "serialize approval manifest"}
 	}
 	_, digest, err := j.storeFrozenManifest(ctx, encoded)
+	if err == nil {
+		e := j.reviewLogEvent(manifest.Context, manifest.Operation, manifest.Captures, manifest.Inspection, digest)
+		e.Event, e.ApprovalReason, e.AvailabilityHistory = "unreviewed", reason, manifest.AvailabilityHistory
+		e.WithheldRefs, e.WithheldCount = j.withheldFacts(index)
+		j.appendReviewLog(e)
+	}
 	return digest, err
 }
 
@@ -225,12 +232,18 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 	if effectiveLifecycle(j.req) == proto.LifecycleForeground && len(encoded) > helperManifestMaxBytes {
 		return nil, "", &freezeError{code: "broker_error", reason: "approval manifest exceeds the 1 MiB foreground handoff limit"}
 	}
-	if plan != nil {
-		// Auto-start requires approval_json to remain NULL until its atomic
-		// audit-and-dispatch commit. The spool and manifest_hash bind the bytes.
-		return j.storeFrozenManifest(ctx, encoded, true)
+	// Auto-start keeps approval_json NULL until its atomic audit/dispatch commit.
+	frozen, digest, err := j.storeFrozenManifest(ctx, encoded, plan != nil)
+	if err == nil {
+		e := j.reviewLogEvent(manifest.Context, manifest.Operation, manifest.Captures, manifest.Inspection, digest)
+		e.Report, e.AutoApproval = &manifest.Report, manifest.AutoApproval
+		e.SuccessfulModel, e.WithheldRefs, e.WithheldCount = model, refs, count
+		for _, m := range manifest.ModelHistory {
+			e.ModelHistory = append(e.ModelHistory, reviewlog.Model{Name: m.Name, Outcome: m.Outcome})
+		}
+		j.appendReviewLog(e)
 	}
-	return j.storeFrozenManifest(ctx, encoded)
+	return frozen, digest, err
 }
 
 // storeFrozenManifest stores precisely the bytes whose digest the human approves.

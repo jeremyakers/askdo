@@ -93,6 +93,16 @@ func TestRequestChanges_whenLocalClientWaits(t *testing.T) {
 					t.Fatalf("legacy denial=%s want=%s", legacy, want)
 				}
 			}
+			stored, err := h.daemon.store.GetJob(ctx, testUID, id)
+			if err != nil || !reflect.DeepEqual(decodeStoredResult(stored).Feedback, event.Feedback) {
+				t.Fatalf("stored feedback differs: %s err=%v", stored.ResultJSON, err)
+			}
+			assertRequestChangesOutcome(t, h, id)
+			records := readReviewRecords(t, h)
+			var report proto.ReviewReport
+			if len(records) != 2 || json.Unmarshal(records[0]["report"], &report) != nil || !reflect.DeepEqual(report.Suggestions, event.Feedback.Suggestions) {
+				t.Fatalf("frozen suggestions missing: %v", records)
+			}
 		})
 	}
 }
@@ -156,6 +166,16 @@ func TestRequestChanges_whenSignedFleetDecisionArrives(t *testing.T) {
 	if changed, err := j.transition(ctx, store.StateQueued, store.StateReviewing); err != nil || !changed {
 		t.Fatalf("reviewing: %v %v", changed, err)
 	}
+	var report proto.ReviewReport
+	if err := json.Unmarshal([]byte(changesReport), &report); err != nil {
+		t.Fatal(err)
+	}
+	review := validWorkerReview(proto.WorkerOperation{})
+	review.Report = report
+	_, digest, err := j.freezeReview(ctx, review)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture, receiptEvent := rootFleetReceiptFixture()
 	j.fleet, j.namedTelegram = fixture.fleet, true
 	j.route.ChannelName, j.route.ApprovalTTL = "ops", config.Duration(time.Minute)
@@ -164,20 +184,13 @@ func TestRequestChanges_whenSignedFleetDecisionArrives(t *testing.T) {
 		j.route.Recipients = append(j.route.Recipients, config.TelegramRecipient{ChatID: recipient.ChatID, OperatorUserIDs: recipient.OperatorUserIDs})
 	}
 	j.fleet.ticket.Binding.JobID = fleetproto.ID(id)
-	var report proto.ReviewReport
-	if err := json.Unmarshal([]byte(changesReport), &report); err != nil {
-		t.Fatal(err)
-	}
+	j.fleet.ticket.Binding.ManifestDigest = fleetproto.Hash(digest)
 	j.fleet.ticket.Display.Report = &report
 	j.fleet.ticket.Binding.DisplayHash, err = fleetproto.HashDisplay(j.fleet.ticket.Display)
 	if err != nil {
 		t.Fatal(err)
 	}
 	j.reviewFeedback = feedbackFromReport(report)
-	digest := string(j.fleet.ticket.Binding.ManifestDigest)
-	if err := h.daemon.store.RecordManifest(ctx, j.uid, id, spool.approval, digest); err != nil {
-		t.Fatal(err)
-	}
 	receiptEvent.JobID, receiptEvent.Receipt.Binding = fleetproto.ID(id), j.fleet.ticket.Binding
 	if err := j.validateFleetEvent(receiptEvent); err != nil {
 		t.Fatal(err)
@@ -215,6 +228,29 @@ func TestRequestChanges_whenSignedFleetDecisionArrives(t *testing.T) {
 	result := decodeStoredResult(row)
 	if result.Decision != "request_changes" || !reflect.DeepEqual(result.Feedback, j.reviewFeedback) || j.validateFleetEvent(verified) == nil {
 		t.Fatalf("lost feedback or replay accepted: %+v", result)
+	}
+	assertRequestChangesOutcome(t, h, id)
+	var status proto.ResultEvent
+	if body := fencedReply(t, h.socket, proto.StatusRequest{Op: "status", RequestID: id, ProtocolVersion: proto.FeedbackProtocolVersion}); json.Unmarshal(body, &status) != nil || !reflect.DeepEqual(status.Feedback, result.Feedback) {
+		t.Fatalf("fleet status feedback differs: %s", body)
+	}
+}
+
+func assertRequestChangesOutcome(t *testing.T, h *brokerHarness, id string) {
+	t.Helper()
+	records := readReviewRecords(t, h)
+	for _, record := range records {
+		if string(record["job_id"]) != `"`+id+`"` || string(record["submitter_uid"]) != "1000" {
+			t.Fatalf("uncorrelated audit record: %s", mustJSON(t, record))
+		}
+	}
+	var report proto.ReviewReport
+	if len(records) != 2 || json.Unmarshal(records[0]["report"], &report) != nil || len(report.Suggestions) != 2 {
+		t.Fatalf("missing frozen report suggestions: %v", records)
+	}
+	r := records[len(records)-1]
+	if string(r["event"]) != `"outcome"` || string(r["job_id"]) != `"`+id+`"` || string(r["submitter_uid"]) != "1000" || string(r["state"]) != `"denied"` || string(r["approval_kind"]) != `"human"` || string(r["result_kind"]) != `"decision"` || string(r["decision"]) != `"request_changes"` {
+		t.Fatalf("lost request-changes outcome: %s", mustJSON(t, r))
 	}
 }
 
