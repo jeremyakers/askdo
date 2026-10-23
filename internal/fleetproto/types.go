@@ -203,8 +203,9 @@ type Receipt struct {
 type Action string
 
 const (
-	Approve Action = "approve"
-	Deny    Action = "deny"
+	Approve        Action = "approve"
+	Deny           Action = "deny"
+	RequestChanges Action = "request_changes"
 )
 
 type Decision struct {

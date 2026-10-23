@@ -42,6 +42,41 @@ func TestFixedHelperInvocation(t *testing.T) {
 	}
 }
 
+func TestRequestChanges_whenForegroundWaiterReceivesFeedback(t *testing.T) {
+	// Given an original foreground waiter and a denied result, not a handoff.
+	conn, broker := net.Pipe()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	event := proto.ResultEvent{Op: "result", RequestID: testCanonicalID, State: "denied", Decision: "request_changes", Feedback: &proto.ReviewFeedback{
+		Uncertainties: []string{"Restore unverified"}, Warnings: []proto.ReviewWarning{{Message: "Downtime", Evidence: "Dependencies unknown"}}, Suggestions: []proto.ReviewSuggestion{{Issue: "Restore unverified", Action: "Supply restore-test evidence", Actor: proto.SuggestionSubmitter}},
+	}}
+	sent := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer broker.Close()
+		sent <- send(broker, event)
+	}()
+	var stderr bytes.Buffer
+	helperCalled := false
+	options := withDefaults(Options{Stdout: io.Discard, Stderr: &stderr, Interrupt: make(chan os.Signal), launchHelper: func(string, string) error { helperCalled = true; return nil }})
+	// When the foreground event loop receives reviewer feedback.
+	code := eventLoop(ctx, conn, testCanonicalID, time.Time{}, true, options)
+	<-done
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+	// Then it prints actionable feedback and denies without invoking any helper.
+	if code != 126 || helperCalled {
+		t.Fatalf("code=%d helper=%v stderr=%s", code, helperCalled, stderr.String())
+	}
+	for _, want := range []string{"Request changes", "Restore unverified", "Downtime", "Dependencies unknown", "submitter", "Supply restore-test evidence"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("feedback missing %q: %s", want, stderr.String())
+		}
+	}
+}
+
 func TestOriginalHandoffAndRecovery(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

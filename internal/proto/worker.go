@@ -312,17 +312,39 @@ type ReviewComplete struct {
 	ModelHistory []ModelHistoryEntry `json:"model_history"`
 }
 type ReviewReport struct {
-	Risk           string          `json:"risk"`
-	Summary        string          `json:"summary"`
-	Effects        []string        `json:"effects"`
-	Warnings       []ReviewWarning `json:"warnings"`
-	MissingContext []string        `json:"missing_context"`
-	Reversibility  string          `json:"reversibility"`
-	IntentMatch    string          `json:"intent_match"`
+	Risk           string             `json:"risk"`
+	Summary        string             `json:"summary"`
+	Effects        []string           `json:"effects"`
+	Warnings       []ReviewWarning    `json:"warnings"`
+	MissingContext []string           `json:"missing_context"`
+	Suggestions    []ReviewSuggestion `json:"suggestions,omitempty"`
+	Reversibility  string             `json:"reversibility"`
+	IntentMatch    string             `json:"intent_match"`
 }
 type ReviewWarning struct {
 	Message  string `json:"message"`
 	Evidence string `json:"evidence"`
+}
+
+type SuggestionActor string
+
+const (
+	SuggestionSubmitter     SuggestionActor = "submitter"
+	SuggestionAdministrator SuggestionActor = "administrator"
+)
+
+// ReviewSuggestion is untrusted model advice, never authorization to act.
+type ReviewSuggestion struct {
+	Issue  string          `json:"issue"`
+	Action string          `json:"action"`
+	Actor  SuggestionActor `json:"actor"`
+}
+
+// ReviewFeedback returns the frozen review's actionable context on denial.
+type ReviewFeedback struct {
+	Uncertainties []string           `json:"uncertainties"`
+	Warnings      []ReviewWarning    `json:"warnings"`
+	Suggestions   []ReviewSuggestion `json:"suggestions"`
 }
 type ModelHistoryEntry struct {
 	Name    string `json:"name"`
@@ -652,7 +674,7 @@ func ValidateWorkerMessage(message any, direction Direction) error {
 		return ValidateWorkerMessage(*m, direction)
 	case Decision:
 		expected = WorkerToBroker
-		if m.Type != "decision" || !digestPattern.MatchString(m.Digest) || !oneOf(m.Action, "approve", "deny") || ((m.ChannelName != "" || m.ChatID != 0) && (!bounded(m.ChannelName, 128) || m.ChannelName == "" || m.ChatID == 0 || m.OperatorUserID <= 0 || m.MessageID <= 0 || m.TimeUnixMS <= 0)) {
+		if m.Type != "decision" || !digestPattern.MatchString(m.Digest) || !oneOf(m.Action, "approve", "deny", "request_changes") || ((m.ChannelName != "" || m.ChatID != 0) && (!bounded(m.ChannelName, 128) || m.ChannelName == "" || m.ChatID == 0 || m.OperatorUserID <= 0 || m.MessageID <= 0 || m.TimeUnixMS <= 0)) {
 			return errors.New("invalid decision")
 		}
 	case *Decision:
@@ -1385,14 +1407,33 @@ func validateReport(r ReviewReport) error {
 			return errors.New("invalid effect")
 		}
 	}
-	for _, v := range r.Warnings {
+	return (ReviewFeedback{Uncertainties: r.MissingContext, Warnings: r.Warnings, Suggestions: r.Suggestions}).Validate()
+}
+
+// Validate reuses the report's per-field caps, including the uncertainty count
+// for suggestions about resolving those uncertainties. Empty advice is valid.
+func (f ReviewFeedback) Validate() error {
+	if len(f.Uncertainties) > 16 || len(f.Warnings) > 32 || len(f.Suggestions) > 16 {
+		return errors.New("invalid review feedback")
+	}
+	for _, v := range f.Warnings {
 		if !boundedContent(v.Message, 512) || !boundedContent(v.Evidence, 512) {
 			return errors.New("invalid warning")
 		}
 	}
-	for _, v := range r.MissingContext {
+	for _, v := range f.Uncertainties {
 		if !boundedContent(v, 512) {
 			return errors.New("invalid missing context")
+		}
+	}
+	for _, v := range f.Suggestions {
+		if !boundedContent(v.Issue, 512) || !boundedContent(v.Action, 512) {
+			return errors.New("invalid suggestion")
+		}
+		switch v.Actor {
+		case SuggestionSubmitter, SuggestionAdministrator:
+		default:
+			return errors.New("invalid suggestion actor")
 		}
 	}
 	return nil

@@ -338,7 +338,7 @@ func assertNamedDeliveries(t *testing.T, fake *faketelegram.Server, recipients .
 			if len(m.Buttons) == 0 {
 				summaries = append(summaries, m.ID)
 			} else {
-				if len(summaries) == 0 || len(m.Buttons) != 3 || cards[chat].ID != 0 {
+				if len(summaries) == 0 || m.ButtonData("a:") == "" || m.ButtonData("d:") == "" || m.ButtonData("v:") == "" || cards[chat].ID != 0 {
 					t.Fatalf("summary must precede one card for chat %d: %+v", chat, sent)
 				}
 				cards[chat] = m

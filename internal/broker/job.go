@@ -95,6 +95,7 @@ type jobRuntime struct {
 	// consumeDecision/expireApproval, and never revived: a daemon restart
 	// drops it and MarkRestartAmbiguous expires the store row.
 	pendingApproval *approvalBinding
+	reviewFeedback  *proto.ReviewFeedback // immutable display-safe copy of the frozen report
 	// Test-only interleaving seam: a validated decision, not yet registered
 	// with the store. Called under mu.
 	beforeDecisionNote func()
@@ -514,6 +515,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 			report.Warnings = proto.NonNilSlice(report.Warnings)
 			report.MissingContext = proto.NonNilSlice(report.MissingContext)
 			frozen = proto.Frozen{Type: "frozen", ManifestDigest: digest, Report: report, WithheldRefs: proto.NonNilSlice(manifest.WithheldRefs), WithheldCount: manifest.WithheldCount, AutoApproval: autoPlan}
+			j.reviewFeedback = feedbackFromReport(report)
 		}
 	}
 	if err != nil {
@@ -790,7 +792,7 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	valid := j.state == store.StateAwaitingHuman && pending != nil && !pending.consumed &&
 		decision.Digest == pending.digest &&
 		j.matchesDecision(pending, decision) &&
-		(decision.Action == "approve" || decision.Action == "deny") &&
+		(decision.Action == "approve" || decision.Action == "deny" || decision.Action == "request_changes") &&
 		decision.TimeUnixMS > 0 && decision.TimeUnixMS <= pending.expiry.UnixMilli() &&
 		!lapsed
 	if !valid {
@@ -821,21 +823,32 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	action := decision.Action
 	j.mu.Unlock()
 
-	if action == "deny" {
-		if j.namedRoute() {
-			changed, err := j.daemon.store.CommitNamedDecision(ctx, j.uid, j.req.RequestID, *decision, time.Now().UTC())
-			if changed && err == nil {
-				j.mu.Lock()
-				j.state = store.StateDenied
-				j.mu.Unlock()
-				j.finishTerminal(store.StateDenied, store.Result{})
-			} else {
-				j.fail("commit denial")
+	if action == "deny" || action == "request_changes" {
+		var result store.Result
+		var changed bool
+		var err error
+		switch {
+		case action == "request_changes":
+			feedback := j.reviewFeedback
+			if feedback == nil {
+				// No AI card offers this button, but an authenticated denial must
+				// never invent model advice if a callback is submitted directly.
+				feedback = &proto.ReviewFeedback{Uncertainties: []string{"No independent AI assessment took place."}, Warnings: []proto.ReviewWarning{}, Suggestions: []proto.ReviewSuggestion{}}
 			}
-			return
+			result = store.Result{Kind: store.ResultDecision, Decision: action, Feedback: feedback}
+			changed, err = j.daemon.store.CommitRequestChanges(ctx, j.uid, j.req.RequestID, *decision, feedback, time.Now().UTC())
+		case j.namedRoute():
+			changed, err = j.daemon.store.CommitNamedDecision(ctx, j.uid, j.req.RequestID, *decision, time.Now().UTC())
+		default:
+			changed, err = j.transition(ctx, store.StateAwaitingHuman, store.StateDenied)
 		}
-		if changed, _ := j.transition(ctx, store.StateAwaitingHuman, store.StateDenied); changed {
-			j.finishTerminal(store.StateDenied, store.Result{})
+		if changed && err == nil {
+			j.mu.Lock()
+			j.state = store.StateDenied
+			j.mu.Unlock()
+			j.finishTerminal(store.StateDenied, result)
+		} else if j.namedRoute() || (action == "request_changes" && err != nil) {
+			j.fail("commit denial")
 		}
 		return
 	}
@@ -1404,8 +1417,26 @@ func resultEvent(requestID string, state store.State, result store.Result) proto
 		event.Message = "operation launch failed"
 	case store.ResultWrapper:
 		event.Message = "review or infrastructure failure"
+	case store.ResultDecision:
+		event.Decision, event.Feedback = result.Decision, result.Feedback
 	}
 	return event
+}
+
+// Keep model content as advice, stripping terminal controls just as progress
+// details do. Copy all fields so later model or card rendering cannot mutate it.
+func feedbackFromReport(report proto.ReviewReport) *proto.ReviewFeedback {
+	f := &proto.ReviewFeedback{Uncertainties: make([]string, 0, len(report.MissingContext)), Warnings: make([]proto.ReviewWarning, 0, len(report.Warnings)), Suggestions: make([]proto.ReviewSuggestion, 0, len(report.Suggestions))}
+	for _, s := range report.MissingContext {
+		f.Uncertainties = append(f.Uncertainties, sanitizeClientDetail(s))
+	}
+	for _, w := range report.Warnings {
+		f.Warnings = append(f.Warnings, proto.ReviewWarning{Message: sanitizeClientDetail(w.Message), Evidence: sanitizeClientDetail(w.Evidence)})
+	}
+	for _, s := range report.Suggestions {
+		f.Suggestions = append(f.Suggestions, proto.ReviewSuggestion{Issue: sanitizeClientDetail(s.Issue), Action: sanitizeClientDetail(s.Action), Actor: s.Actor})
+	}
+	return f
 }
 
 func (j *jobRuntime) bootstrap() proto.Bootstrap {

@@ -500,31 +500,36 @@ func TestReviewLogDecisionAfterTerminalWinnerStrandsNothing(t *testing.T) {
 }
 
 func TestReviewLogSweepBeforeDecisionRegistrationStrandsNothing(t *testing.T) {
-	// Given a validated approve callback that is not yet registered with the store, and a lapsed client deadline.
-	h := newBrokerHarness(t, nil, nil)
-	lapsed := time.Now().Add(-time.Hour)
-	job, ctx, decision := awaitingApprovalJob(t, h, &lapsed)
-	job.worker = exitedWorkerSession(t, ctx)
-	job.beforeDecisionNote = func() {
-		// When an expiry sweep, which never takes the job lock, commits in that window.
-		if job.pendingApproval.consumed {
-			t.Error("decision was consumed before the store could register it")
-		}
-		if n, err := h.daemon.store.SweepExpired(ctx, time.Now()); err != nil || n != 1 {
-			t.Errorf("sweep %d %v", n, err)
-		}
-	}
-	job.consumeDecision(ctx, decision)
-	// Then the row stays expired, nothing runs, no earlier approval is claimed, and no note is stranded.
-	stored, err := h.daemon.store.GetJob(ctx, job.uid, job.req.RequestID)
-	if err != nil || stored.State != store.StateExpired || len(h.executor.Snapshot()) != 0 {
-		t.Fatalf("state=%s executions=%d err=%v", stored.State, len(h.executor.Snapshot()), err)
-	}
-	outcome := lastOutcome(t, h)
-	if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"expired"` {
-		t.Fatalf("fabricated an earlier approval: %s", mustJSON(t, outcome))
-	}
-	if n := consumedNotes(h.daemon.store); n != 0 {
-		t.Fatalf("%d stranded notes", n)
+	for _, action := range []string{"approve", "request_changes"} {
+		t.Run(action, func(t *testing.T) {
+			// Given a validated approve callback that is not yet registered with the store, and a lapsed client deadline.
+			h := newBrokerHarness(t, nil, nil)
+			lapsed := time.Now().Add(-time.Hour)
+			job, ctx, decision := awaitingApprovalJob(t, h, &lapsed)
+			decision.Action = action
+			job.worker = exitedWorkerSession(t, ctx)
+			job.beforeDecisionNote = func() {
+				// When an expiry sweep, which never takes the job lock, commits in that window.
+				if job.pendingApproval.consumed {
+					t.Error("decision was consumed before the store could register it")
+				}
+				if n, err := h.daemon.store.SweepExpired(ctx, time.Now()); err != nil || n != 1 {
+					t.Errorf("sweep %d %v", n, err)
+				}
+			}
+			job.consumeDecision(ctx, decision)
+			// Then the row stays expired, nothing runs, no earlier approval is claimed, and no note is stranded.
+			stored, err := h.daemon.store.GetJob(ctx, job.uid, job.req.RequestID)
+			if err != nil || stored.State != store.StateExpired || len(h.executor.Snapshot()) != 0 {
+				t.Fatalf("state=%s executions=%d err=%v", stored.State, len(h.executor.Snapshot()), err)
+			}
+			outcome := lastOutcome(t, h)
+			if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"expired"` {
+				t.Fatalf("fabricated an earlier approval: %s", mustJSON(t, outcome))
+			}
+			if n := consumedNotes(h.daemon.store); n != 0 {
+				t.Fatalf("%d stranded notes", n)
+			}
+		})
 	}
 }

@@ -94,7 +94,7 @@ func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	return out, err
 }
 
-// ParseCallbackData exposes the existing exact a/d/v + lowercase nonce parser.
+// ParseCallbackData exposes the exact a/d/v/r + lowercase nonce parser.
 func ParseCallbackData(data string) (action, nonce string, ok bool) { return parseCallbackData(data) }
 
 // TokenIdentity returns only the fingerprint and numeric identity of the exact

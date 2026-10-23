@@ -427,7 +427,7 @@ func TestTelegramApproveEndToEnd(t *testing.T) {
 	}()
 
 	card := awaitTelegramCard(t, fake)
-	if card.ChatID != telegramChat || len(card.Buttons) != 3 {
+	if card.ChatID != telegramChat || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
 		t.Fatalf("card=%+v", card)
 	}
 	// The rendered summary reached the operator before the card.

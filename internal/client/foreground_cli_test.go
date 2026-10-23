@@ -318,7 +318,7 @@ func TestAskdoSubmitLifecycleOnFakeSocket(t *testing.T) {
 				if err := req.Validate(); err != nil {
 					t.Fatal(err)
 				}
-				if req.ProtocolVersion != proto.CanonicalProtocolVersion || req.RequestID != testCanonicalID || req.Lifecycle != tc.lifecycle || req.Mode != tc.mode || req.ForceReview != tc.forceReview {
+				if req.ProtocolVersion != proto.FeedbackProtocolVersion || req.RequestID != testCanonicalID || req.Lifecycle != tc.lifecycle || req.Mode != tc.mode || req.ForceReview != tc.forceReview {
 					t.Fatalf("unexpected request: %+v", req)
 				}
 				if tc.lifecycle == proto.LifecycleForeground && req.TerminalType != tc.term || tc.lifecycle == proto.LifecycleDetached && req.TerminalType != "" {

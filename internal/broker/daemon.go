@@ -684,8 +684,8 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid submit request"})
 			return
 		}
-		if request.ProtocolVersion != proto.CanonicalProtocolVersion && request.ProtocolVersion != proto.CapturedStdinProtocolVersion {
-			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "upgrade_required", Message: "submit requires protocol version 4 or 5 and a reserved job ID"})
+		if request.ProtocolVersion != proto.CanonicalProtocolVersion && request.ProtocolVersion != proto.CapturedStdinProtocolVersion && request.ProtocolVersion != proto.FeedbackProtocolVersion {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "upgrade_required", Message: "submit requires protocol version 4, 5, or 6 and a reserved job ID"})
 			return
 		}
 		d.handleSubmit(conn, uid, body, request, admission.release)
@@ -695,21 +695,25 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid status request"})
 			return
 		}
-		d.handleStatus(conn, uid, request.RequestID)
+		d.handleStatus(conn, uid, request.RequestID, request.ProtocolVersion)
 	case "attach":
 		var request proto.AttachRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid attach request"})
 			return
 		}
-		d.handleAttach(conn, uid, request.RequestID, admission.release)
+		d.handleAttach(conn, uid, request, admission.release)
 	case "cancel":
 		var request proto.CancelRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid cancel request"})
 			return
 		}
-		_ = writeClient(conn, d.cancelResponse(uid, request))
+		reply := d.cancelResponse(uid, request)
+		if event, ok := reply.(proto.ResultEvent); ok {
+			reply = event.ForProtocol(0)
+		}
+		_ = writeClient(conn, reply)
 	case "auto_approval":
 		var request proto.AutoApprovalRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
@@ -778,7 +782,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		}
 		_ = writeClient(conn, proto.AcceptedEvent{Op: "accepted", RequestID: request.RequestID, State: string(existing.State)})
 		release()
-		d.followOriginal(conn, uid, request.RequestID)
+		d.followOriginal(conn, uid, request.RequestID, request.ProtocolVersion)
 		return
 	}
 	if reservation != store.ReservationReserved {
@@ -849,7 +853,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		if errors.As(err, &duplicate) {
 			_ = writeClient(conn, proto.AcceptedEvent{Op: "accepted", RequestID: request.RequestID, State: string(created.State)})
 			release()
-			d.followOriginal(conn, uid, request.RequestID)
+			d.followOriginal(conn, uid, request.RequestID, request.ProtocolVersion)
 			return
 		}
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "conflict", Message: err.Error()})
@@ -881,18 +885,18 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	}
 	_ = writeClient(conn, proto.AcceptedEvent{Op: "accepted", RequestID: request.RequestID, State: string(store.StateQueued)})
 	release()
-	d.followRuntime(conn, job, true)
+	d.followRuntime(conn, job, true, request.ProtocolVersion)
 }
 
-func (d *daemon) followOriginal(conn *net.UnixConn, uid uint32, requestID string) {
+func (d *daemon) followOriginal(conn *net.UnixConn, uid uint32, requestID string, version int) {
 	if job := d.runtime(uid, requestID); job != nil {
-		d.followRuntime(conn, job, false)
+		d.followRuntime(conn, job, false, version)
 		return
 	}
-	d.handleStatus(conn, uid, requestID)
+	d.handleStatus(conn, uid, requestID, version)
 }
 
-func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisconnect bool) {
+func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisconnect bool, version int) {
 	events, unsubscribe := job.subscribe()
 	defer unsubscribe()
 	var private <-chan proto.ForegroundReadyEvent
@@ -959,6 +963,12 @@ func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisc
 			if !ok {
 				return
 			}
+			if version < proto.FeedbackProtocolVersion {
+				var event proto.ResultEvent
+				if json.Unmarshal(body, &event) == nil && event.Op == "result" {
+					body, _ = json.Marshal(event.ForProtocol(version))
+				}
+			}
 			// A slow or broken subscriber loses its slot after a bounded
 			// write deadline; it can never stall event publication or the
 			// command's pipe draining.
@@ -980,7 +990,7 @@ func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisc
 	}
 }
 
-func (d *daemon) handleStatus(conn *net.UnixConn, uid uint32, requestID string) {
+func (d *daemon) handleStatus(conn *net.UnixConn, uid uint32, requestID string, version int) {
 	job, err := d.store.GetJob(context.Background(), uid, requestID)
 	if err != nil {
 		if state, reservationErr := d.store.GetReservation(context.Background(), uid, requestID); reservationErr == nil {
@@ -997,13 +1007,14 @@ func (d *daemon) handleStatus(conn *net.UnixConn, uid uint32, requestID string) 
 		return
 	}
 	if job.State.IsTerminal() {
-		_ = writeClient(conn, resultEvent(requestID, job.State, decodeStoredResult(job)))
+		_ = writeClient(conn, resultEvent(requestID, job.State, decodeStoredResult(job)).ForProtocol(version))
 		return
 	}
 	_ = writeClient(conn, proto.AcceptedEvent{Op: "accepted", RequestID: requestID, State: string(job.State)})
 }
 
-func (d *daemon) handleAttach(conn *net.UnixConn, uid uint32, requestID string, release func()) {
+func (d *daemon) handleAttach(conn *net.UnixConn, uid uint32, request proto.AttachRequest, release func()) {
+	requestID := request.RequestID
 	stored, err := d.store.GetJob(context.Background(), uid, requestID)
 	if err != nil {
 		if state, reservationErr := d.store.GetReservation(context.Background(), uid, requestID); reservationErr == nil {
@@ -1034,12 +1045,12 @@ func (d *daemon) handleAttach(conn *net.UnixConn, uid uint32, requestID string, 
 		}
 	}
 	if stored.State.IsTerminal() {
-		_ = writeClient(conn, resultEvent(requestID, stored.State, decodeStoredResult(stored)))
+		_ = writeClient(conn, resultEvent(requestID, stored.State, decodeStoredResult(stored)).ForProtocol(request.ProtocolVersion))
 		return
 	}
 	if job != nil {
 		release()
-		d.followRuntime(conn, job, false)
+		d.followRuntime(conn, job, false, request.ProtocolVersion)
 	}
 }
 

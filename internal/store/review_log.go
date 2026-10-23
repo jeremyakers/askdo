@@ -43,6 +43,8 @@ func (store *Store) NoteConsumedDecision(uid uint32, requestID string, decision 
 		outcome = "approved"
 	case "deny":
 		outcome = "denied"
+	case "request_changes":
+		outcome = "request_changes"
 	}
 	if store.reviewLogPath == "" || outcome == "" {
 		return
@@ -111,7 +113,7 @@ func (store *Store) updateReturningOutcomes(ctx context.Context, tx *sql.Tx, que
 }
 
 // outcomeForJob derives the journaled outcome from the committed row. consumed
-// is the noted operator decision ("approved", "denied" or empty); it only fills
+// is the noted operator decision ("approved", "denied", "request_changes" or empty); it only fills
 // in a decision the durable approval record does not hold.
 func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	var approval struct {
@@ -126,17 +128,28 @@ func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	if approval.Kind != "human" && approval.Kind != "auto" {
 		approval.Kind = "none"
 	}
+	var result Result
+	if len(job.ResultJSON) > 0 {
+		if err := json.Unmarshal(job.ResultJSON, &result); err != nil {
+			slog.Warn("review log result decode failed", "request_id", job.RequestID, "error", err)
+		}
+	}
 	decision := approval.Decision
+	if result.Kind == ResultDecision && result.Decision == "request_changes" {
+		approval.Kind, decision = "human", "request_changes"
+	}
 	if approval.Kind == "auto" {
 		decision = "approved"
 	}
-	hasDecision := (approval.Kind == "human" || approval.Kind == "auto") && (decision == "approved" || decision == "denied")
+	hasDecision := (approval.Kind == "human" || approval.Kind == "auto") && (decision == "approved" || decision == "denied" || decision == "request_changes")
 	if !hasDecision && consumed != "" {
 		approval.Kind, decision, hasDecision = "human", consumed, true
 	}
 	switch job.State {
 	case StateDenied:
-		decision = "denied"
+		if decision != "request_changes" {
+			decision = "denied"
+		}
 		if approval.Kind == "none" {
 			approval.Kind = "human"
 		}
@@ -151,12 +164,6 @@ func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	}
 	if decision == "" {
 		decision = "none"
-	}
-	var result Result
-	if len(job.ResultJSON) > 0 {
-		if err := json.Unmarshal(job.ResultJSON, &result); err != nil {
-			slog.Warn("review log result decode failed", "request_id", job.RequestID, "error", err)
-		}
 	}
 	// Legacy single-recipient human approvals retain the notification binding,
 	// not a kind/decision envelope. Finished/unknown and confirmed launch failure

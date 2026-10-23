@@ -64,7 +64,7 @@ func TestTelegramWithheldHostCredentialReview(t *testing.T) {
 			}()
 			card := awaitTelegramCard(t, fake)
 			sent := fake.Sent()
-			if len(sent) < 2 || len(sent[0].Buttons) != 0 || !strings.Contains(sent[0].Text, "Credential contents were not inspected") || !strings.Contains(sent[0].Text, secret) || !strings.Contains(sent[0].Text, "Reviewer <code>") || strings.Contains(sent[0].Text, "NO AI REVIEW") || !strings.Contains(card.Text, "details above") || len(card.Buttons) != 3 {
+			if len(sent) < 2 || len(sent[0].Buttons) != 0 || !strings.Contains(sent[0].Text, "Credential contents were not inspected") || !strings.Contains(sent[0].Text, secret) || !strings.Contains(sent[0].Text, "Reviewer <code>") || strings.Contains(sent[0].Text, "NO AI REVIEW") || !strings.Contains(card.Text, "details above") || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
 				t.Fatalf("missing reviewed warning and path in summary/card: %+v", sent)
 			}
 			if len(executor.Snapshot()) != 0 {

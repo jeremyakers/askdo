@@ -8,14 +8,15 @@ to connect at all. The same group also qualifies a TTY client for the narrow
 fixed no-argv sudo helper *only* after an approved one-use handoff; it is not
 general sudo access.
 
-Current source uses protocol version `4` (`proto.CanonicalProtocolVersion`)
-with an explicit `lifecycle` and a separate reservation before submission,
-plus version `5` (`proto.CapturedStdinProtocolVersion`) for the one v4-shaped
-case that carries captured stdin (below). Versions `2` and `3` **cannot
-create new jobs** on a v4/v5 daemon. Historical jobs can still be queried by
+Current source submits protocol version `6` (`proto.FeedbackProtocolVersion`)
+to opt into structured Request changes feedback. It retains explicit
+`lifecycle` and a separate **v4 reservation** before submission, with optional
+captured stdin under the v5 rules below. The daemon still accepts v4/v5
+submissions and preserves their plain-denial result wire. Versions `2` and `3`
+**cannot create new jobs** on this daemon. Historical jobs can still be queried by
 their owning UID; v2's original lifecycle was implicitly detached, while v3
 introduced explicit foreground/detached fields. **An older installed binary
-is not changed by editing this source:** v4/v5 and automatic no-TTY selection
+is not changed by editing this source:** v6 feedback and automatic no-TTY selection
 require a separately approved installation and service start/handoff.
 
 ## Framing
@@ -114,7 +115,7 @@ open the newer schema. No optional cancellation feature gates daemon startup.
 | Field | Type | Rule |
 |---|---|---|
 | `op` | string | must be `"submit"` |
-| `protocol_version` | int | `4` for new submissions (`5` when the request carries captured stdin); v2/v3 new submits receive `upgrade_required` |
+| `protocol_version` | int | current CLI: `6`; also accepts `4` (no captured stdin) and `5` (captured stdin required); v2/v3 new submits receive `upgrade_required` |
 | `request_id` | string | previously reserved canonical ID owned by peer UID |
 | `wait_timeout_ms` | int64 or null | optional; if present must be positive. See below |
 | `reason` | string | required, non-blank after trimming |
@@ -126,19 +127,19 @@ open the newer schema. No optional cancellation feature gates daemon startup.
 | `args` | string array | bundle mode only |
 | `files` | object array | bundle mode only |
 | `sensitive_inclusions` | string array | optional; see below |
-| `lifecycle` | string | required in v4: `"foreground"` or `"detached"` |
+| `lifecycle` | string | required in v4–v6: `"foreground"` or `"detached"` |
 | `terminal_type` | string | required only for foreground; validated TERM token (1–128 ASCII-safe bytes), forbidden for detached. Hint only, not authenticated identity |
 
-The CLI chooses v4 foreground when the caller has a controlling `/dev/tty`,
-and v4 detached automatically when it does not (for example a sandboxed
+The CLI chooses foreground when the caller has a controlling `/dev/tty`,
+and detached automatically when it does not (for example a sandboxed
 agent's Bash-tool invocation). `--detach` is an optional override for a TTY
 caller. When the caller's stdin is a pipe or a regular redirected file with
-content, the CLI instead submits a v5 detached argv request that carries the
+content, the CLI submits a v6 detached argv request that carries the
 captured bytes (`captured_stdin_base64`, below); capturing forces detached
 lifecycle even for a TTY caller. The client waits synchronously for either
 result; detached stdout/stderr are captured in the spool and streamed to the
 caller. Detached execution uses the daemon-owned `SystemExecutor`, with no
-TTY: root stdin is the sealed captured input for a v5 request, or `/dev/null`
+TTY: root stdin is the sealed captured input for a v5/v6 request, or `/dev/null`
 when nothing was captured (older v4 detached jobs are always `/dev/null`) —
 no stdin passthrough either way, and this is not full regular-sudo parity.
 Foreground uses the original TTY, not a daemon PTY, and the fixed helper
@@ -153,7 +154,7 @@ shebang line) at this stage; host code is read only when the reviewer model
 chooses to read it through its path tools during review.
 
 ```json
-{"op":"submit","protocol_version":4,"lifecycle":"detached","request_id":"2026-09-27_#1",
+{"op":"submit","protocol_version":6,"lifecycle":"detached","request_id":"2026-09-27_#1",
   "reason":"Install jq for this task","mode":"argv",
    "cwd":"/work/project",
   "argv":["/usr/bin/apt-get","install","-y","jq"]}
@@ -176,7 +177,7 @@ auto-approved. See [configuration](configuration.md). Safety refusal,
 invalid final review, broker/capture/changed evidence and elapsed deadlines
 never trigger that fallback.
 
-### Captured stdin (protocol version 5)
+### Captured stdin (protocol versions 5 and 6)
 
 Before reserving, the CLI captures its own stdin **only** when it is a real
 pipe or a regular redirected file (a TTY and any other descriptor type are
@@ -193,8 +194,9 @@ client, before job submission:
 
 A captured request bundles the bytes into the submit itself as
 `captured_stdin_base64` (canonical standard base64 of the non-empty, UTF-8,
-NUL-free payload). `ProtocolVersion` becomes `5` and the only valid shape is
-a **detached argv submit**; captured stdin cannot be combined with `--bundle`.
+NUL-free payload). The current CLI uses `protocol_version: 6`; the legacy v5
+shape below remains accepted. Whenever captured input is present the only
+valid shape is a **detached argv submit**; it cannot be combined with `--bundle`.
 
 ```json
 {"op":"submit","protocol_version":5,"lifecycle":"detached","request_id":"2026-09-27_#3",
@@ -224,7 +226,7 @@ without NUL bytes — both the client capture and the broker's staging
 validation reject anything else.
 
 ```json
-{"op":"submit","protocol_version":4,"lifecycle":"detached","request_id":"2026-09-27_#2",
+{"op":"submit","protocol_version":6,"lifecycle":"detached","request_id":"2026-09-27_#2",
   "reason":"Run the prepared script","mode":"bundle",
    "cwd":"/work/project",
   "entry":"run.sh","args":["--apply"],
@@ -281,7 +283,7 @@ lifetime: the Telegram approval expiry is
 The deadline never resets between stages and never terminates a dispatched
 command.
 
-For a foreground request, include `"protocol_version":4`,
+For a foreground request, include `"protocol_version":6`,
 `"lifecycle":"foreground"` and a valid `"terminal_type"` (for example,
 `"xterm-256color"`), with the remaining operation fields as above. The broker
 also checks authenticated peer PID/UID and controlling terminal evidence;
@@ -293,6 +295,9 @@ The daemon replies with exactly one frame: an `accepted` event carrying the
 current state if the job is live (including an unsubmitted `reserved` ID), a
 `result` event if terminal, or `{"op":"error","code":"not_found",...}`.
 Historical 32-hex IDs remain eligible for owner-scoped status lookup.
+The current CLI adds `"protocol_version":6` to status and attach requests to
+receive structured feedback. Omit it for the byte-compatible legacy result;
+support is negotiated per connection, not inferred from the job's submit version.
 Status, attach and cancel validate IDs strictly: only canonical syntax or
 historical lowercase 32-hex syntax is accepted; a syntactically valid ID does
 not bypass peer-UID ownership. A reserved ID cannot be attached before submit.
@@ -387,7 +392,7 @@ Telegram card or execution.
 `awaiting-handoff` (foreground), `starting`, `running`, or a terminal state for
 a deduplicated resubmission).
 
-**`handoff_ready`** — only on the original v4 foreground submit connection
+**`handoff_ready`** — only on the original foreground submit connection (v4 or later)
 after approval, never on `status`, `attach` or the general progress stream:
 
 ```json
@@ -472,6 +477,34 @@ command actually exited or died by a signal. `message` carries a human
 explanation for wrapper outcomes (e.g. `"operation launch failed"`,
 `"review or infrastructure failure"`, or the broker's failure detail).
 
+**Request changes** uses terminal `state: "denied"`, never dispatches or
+issues a foreground handoff, and has no command exit/signal. On v6 submit,
+status and attach connections the result additionally carries:
+
+```json
+{"op":"result","request_id":"2026-09-27_#1","state":"denied",
+ "decision":"request_changes",
+ "feedback":{"uncertainties":["Backup not verified"],
+   "warnings":[{"message":"Downtime possible","evidence":"Dependencies unverified"}],
+   "suggestions":[{"issue":"Backup not verified","action":"Supply restore-test evidence","actor":"submitter"}]}}
+```
+
+The arrays come from the frozen report (`missing_context` becomes
+`uncertainties`), with unsafe display controls stripped. Suggestion actors
+are exactly `submitter` or `administrator`; all advice remains untrusted and
+cannot change authorization. Missing suggestions are valid. The waiting CLI
+and attach print this feedback to stderr; human status prints it to stdout,
+and `status --json` exposes the structured result. The denial exit code stays
+126. No automatic resubmission occurs: a correction needs a new reserved ID
+and a full new review. Feedback is persisted atomically with denial in the
+existing `result_json`, subject to normal retention; no DB schema migration.
+
+Older strict clients cannot decode new result fields. The broker therefore
+omits **both** `decision` and `feedback` for v4/v5 submits and status/attach
+without v6, as well as legacy cancel exchanges: they see the unchanged plain
+denial. Older brokers reject v6 requests; upgrade the matching binaries rather
+than silently downgrading. Reservation and all other event shapes are unchanged.
+
 **`wait_timeout`** — the client's waiting budget elapsed:
 
 ```json
@@ -494,8 +527,8 @@ fence is active; it is not a required stage of a new installation.
 
 New IDs are globally unique and reserved by peer UID before submission;
 historical rows remain keyed by `(peer UID, request_id)` and can have
-cross-UID collisions. A v4/v5 submit must use a reservation owned by its peer
-UID. A v5 submit body includes the captured stdin bytes, so any byte
+cross-UID collisions. A v4/v5/v6 submit must use a reservation owned by its peer
+UID. A captured-input submit body includes the captured stdin bytes, so any byte
 difference is a conflict, not a dedup.
 
 - Resubmitting with a **byte-identical** submit body is a no-op dedup: the
@@ -525,7 +558,7 @@ direct rather than streamed over this protocol:
 
 A dispatched command may itself exit with 124/125/126/130; `status`/`attach`
 output and the stored result (result kind `exit`/`signal` vs
-`launch_failure`/`wrapper`) distinguish the command's own codes from wrapper
+`launch_failure`/`wrapper`/`decision`) distinguish the command's own codes from wrapper
 codes.
 
 `cancel --handle-file` exits 0 for a durable request with pending/successful

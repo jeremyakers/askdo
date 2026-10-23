@@ -447,10 +447,23 @@ job by the `submit_review` tool path.
 **`report`:** `risk` enum `"1"` | `"2"` | `"3"` | `"4"` | `"5"` | `"unknown"` (1 minimal through 5 critical);
 `summary` ≤ 2048; `effects` array ≤ 32 of strings ≤ 512; `warnings` array ≤
 32 of {`message` ≤ 512; `evidence` ≤ 512}; `missing_context` array ≤ 16 of
-strings ≤ 512; `reversibility` ≤ 1024; `intent_match` enum `"consistent"` |
+strings ≤ 512; optional `suggestions` array ≤ 16 of {`issue` ≤ 512;
+`action` ≤ 512; `actor` enum `"submitter"` | `"administrator"`};
+`reversibility` ≤ 1024; `intent_match` enum `"consistent"` |
 `"inconsistent"` | `"unverified"`. No additional fields are permitted —
 notably no `approved`, no callback data, no provider identity, and no
 coverage object.
+
+Suggestions reuse the uncertainty count and existing report-string caps.
+Absent/empty suggestions remain valid and are omitted when serialized, so
+existing reports and fleet display hashes are unchanged when advice is absent.
+The reviewer prioritizes important uncertainties and recommends concrete ways
+to resolve them; administrator advice identifies changes the submitting agent
+cannot authorize, such as inspection scope/configuration. Advice is untrusted
+model content, not instructions that alter authorization. It is escaped in
+the card summary and returned with uncertainties and warnings only after an
+authenticated Request changes decision. Old strict broker/reviewer and fleet
+gateway decoders reject reports containing the new field; upgrade together.
 
 **model history entry:** `name` ≤ 128; `outcome` enum `"ok"` | `"api_error"`
 | `"refused"` | `"invalid"`; `error` ≤ 256 optional (a fixed label, never raw
@@ -682,7 +695,7 @@ typed decision internally and applies the same dispatch gates, without this fram
 | `digest` | 64 hex (the bound manifest digest) |
 | `operator_user_id` | int64 |
 | `message_id` | int64 (the approval-card message the decision was made on) |
-| `action` | enum `"approve"` \| `"deny"` |
+| `action` | enum `"approve"` \| `"deny"` \| `"request_changes"` |
 | `time_unix_ms` | int64 |
 | `channel_name` | optional string ≤ 128; non-empty exactly for the named projection (with non-empty `chat_id`; `channel_name`/`chat_id` must be set or empty together), and it must equal the projected channel |
 | `chat_id` | optional int64 ≠ 0; the recipient chat the deciding card was made in |
@@ -700,6 +713,16 @@ pending state,
 `time_unix_ms` ≤ expiry and the client deadline under its dispatch lock, and
 consumes the decision exactly once. Its checks do not independently prove the
 Telegram callback was authentic.
+
+Reviewed cards offer Request changes with callback `r:<nonce>` alongside
+`a:`/`d:`/`v:`. It has the same operator, expiry and one-use checks as Deny,
+commits terminal `denied`, and never dispatches. The broker atomically retains
+`decision: "request_changes"` and structured feedback in the existing result
+JSON; v6 clients receive it (see [client protocol](protocol-client.md)).
+Approval-only cards keep Approve/Deny/Details; no advice is fabricated when AI
+review is absent. Automatic approval and informational notices are unchanged.
+Fixing and resubmitting is an explicit new job with a new full review, never an
+automatic retry of the denied job.
 
 ### `cancel` (B→W)
 
@@ -724,7 +747,7 @@ W→B  review_complete ── or ── review_unavailable ── or ── work
 B→W  frozen ── or ── approval_only_frozen ── or ── review_rejected
      broker_approval=true: EOF + clean worker exit; broker sends/records/polls independently
 W→B  notification_sent             (Telegram card delivered; approval binding recorded)
-W→B  decision                      (one-use approve/deny) ── job dispatches or is denied
+W→B  decision                      (one-use approve/deny/request_changes) ── job dispatches or is denied
 B→W  cancel                        (any pre-dispatch point; terminates the worker)
 ```
 

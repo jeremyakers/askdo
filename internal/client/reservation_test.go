@@ -215,7 +215,7 @@ func TestReservationAcknowledgedButSubmitUnconfirmed(t *testing.T) {
 		if err == nil {
 			err = proto.StrictUnmarshal(body, &req)
 		}
-		if err == nil && (req.Validate() != nil || req.ProtocolVersion != proto.CanonicalProtocolVersion || req.RequestID != testCanonicalID) {
+		if err == nil && (req.Validate() != nil || req.ProtocolVersion != proto.FeedbackProtocolVersion || req.RequestID != testCanonicalID) {
 			err = fmt.Errorf("wrong submit: %+v: %v", req, req.Validate())
 		}
 		done <- err // close without ACK

@@ -95,12 +95,30 @@ merely the gateway's address.
    can wait concurrently; a long-lived card must not block the whole fleet.
    Each host's existing local queue behavior is otherwise unchanged.
 5. The gateway validates the Telegram user/chat/message/nonce and returns an
-   authenticated result. For multiple recipients, the first valid Approve or
-   Deny wins and other cards are closed best-effort.
+   authenticated result. For multiple recipients, the first valid Approve,
+   Deny, or Request changes wins and other cards are closed best-effort.
 6. The originating broker verifies the result's authority and binding,
    revalidates its frozen operation, and atomically consumes the decision.
    Denial executes nothing. Approval uses the existing local broker executor
    or original-terminal helper; no command is executed by the gateway.
+
+### Request changes wire compatibility
+
+Reviewed cards add `r:<32-hex nonce>` beside existing `a:`/`d:`/`v:` callbacks.
+The existing v1 signed decision/event shape gains only the action enum value
+`request_changes`: binding, receipt hash, operator/chat/card, expiry, signature
+domain and sequencing are unchanged. The gateway authenticates and consumes it
+like Deny. The host verifies the same signed proof and denies without dispatch,
+persisting feedback from its frozen report, not from callback text. Automatic
+notice/approval behavior is unchanged.
+
+Reports optionally include `suggestions` (see [worker protocol](protocol-worker.md)).
+Empty/absent suggestions are omitted on the wire, preserving old display hashes
+and signed fixtures. Older gateways use strict typed report decoding and reject
+tickets **containing** the new field; tickets without it remain compatible.
+Older hosts reject the new decision action rather than executing it. Upgrade
+gateway and host/reviewer binaries before using Request changes. Client feedback
+is separately negotiated with client protocol v6; older clients see plain denial.
 
 Automatic approval remains a **local** policy decision after review. The
 gateway must provide a verified Telegram delivery receipt for the required

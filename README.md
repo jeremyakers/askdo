@@ -24,7 +24,19 @@ askdo --reason 'restart nginx after config change' -- /usr/bin/systemctl restart
 Your phone buzzes. You see the server, the command, and who's asking. With AI
 review enabled, you also get a summary of the proposed changes and a risk
 rating. Tap **Approve once** to run it, **Deny** to stop it, or **Details** to
-take a closer look. The output comes back to the terminal that asked.
+take a closer look. AI-reviewed cards also offer **Request changes**: run
+nothing and return the review's uncertainties, warnings, and suggestions to
+the submitting agent. The output comes back to the terminal that asked.
+
+Suggestions identify what the **submitter** can address and what needs an
+**administrator** (such as inspection scope or configuration). They are
+untrusted advice, not permission to change policy. Request changes ends the
+job as `denied` (exit 126); the waiting client and `askdo status JOB_ID`
+(including `--json`) show the feedback. Nothing automatically resubmits:
+address the feedback, then submit a new job for a full review. Approval-only
+cards and automatic approval retain their existing behavior. Upgrade matching
+host/reviewer and fleet gateway binaries to use this feature; older clients
+still receive a plain denial.
 
 ## Why askdo?
 

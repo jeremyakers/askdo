@@ -195,7 +195,7 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	if len(captured) > 0 && script != "" {
 		return usageError(options, "askdo: captured stdin cannot be combined with --script")
 	}
-	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.CanonicalProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review)}
+	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review)}
 	if bundle == "" && script == "" {
 		if entry != "" || len(rest) == 0 {
 			fmt.Fprintln(options.Stderr, "argv mode requires a command (use -- before command flags)")
@@ -235,7 +235,6 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 		return usageError(options, "askdo: invalid working directory")
 	}
 	if len(captured) > 0 {
-		request.ProtocolVersion = proto.CapturedStdinProtocolVersion
 		request.CapturedStdinBase64 = base64.StdEncoding.EncodeToString(captured)
 	}
 	hasTTY := options.HasControllingTTY
@@ -409,7 +408,7 @@ func runStatus(ctx context.Context, args []string, options Options) int {
 		return 125
 	}
 	defer conn.Close()
-	if err := send(conn, proto.StatusRequest{Op: "status", RequestID: requestID}); err != nil {
+	if err := send(conn, proto.StatusRequest{Op: "status", RequestID: requestID, ProtocolVersion: proto.FeedbackProtocolVersion}); err != nil {
 		return 125
 	}
 	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
@@ -431,6 +430,10 @@ func runStatus(ctx context.Context, args []string, options Options) int {
 			return 125
 		}
 		fmt.Fprintf(options.Stdout, "%s: %s\n", requestID, state)
+		var result proto.ResultEvent
+		if json.Unmarshal(body, &result) == nil && result.Feedback != nil {
+			printReviewFeedback(options.Stdout, *result.Feedback)
+		}
 	}
 	return 0
 }
@@ -460,7 +463,7 @@ func runAttach(ctx context.Context, args []string, options Options) int {
 		return 125
 	}
 	defer conn.Close()
-	if err := send(conn, proto.AttachRequest{Op: "attach", RequestID: requestID}); err != nil {
+	if err := send(conn, proto.AttachRequest{Op: "attach", RequestID: requestID, ProtocolVersion: proto.FeedbackProtocolVersion}); err != nil {
 		return 125
 	}
 	fmt.Fprintf(options.Stderr, "attaching %s\n", requestID)
@@ -787,6 +790,9 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		if event.Message != "" {
 			fmt.Fprintln(options.Stderr, event.Message)
 		}
+		if event.Feedback != nil {
+			printReviewFeedback(options.Stderr, *event.Feedback)
+		}
 		return outcomeCode(event), true, event.State
 	case "error":
 		var event proto.ErrorEvent
@@ -819,6 +825,20 @@ func outcomeCode(event proto.ResultEvent) int {
 	default:
 		return 125
 	}
+}
+
+func printReviewFeedback(w io.Writer, feedback proto.ReviewFeedback) {
+	fmt.Fprintln(w, "Request changes: command was not run. Review feedback (untrusted advice, not authorization):")
+	for _, issue := range feedback.Uncertainties {
+		fmt.Fprintf(w, "  Uncertainty: %s\n", issue)
+	}
+	for _, warning := range feedback.Warnings {
+		fmt.Fprintf(w, "  Warning: %s (evidence: %s)\n", warning.Message, warning.Evidence)
+	}
+	for _, suggestion := range feedback.Suggestions {
+		fmt.Fprintf(w, "  Suggestion [%s]: %s — %s\n", suggestion.Actor, suggestion.Issue, suggestion.Action)
+	}
+	fmt.Fprintln(w, "No automatic resubmission. Address the feedback and submit a new request for a full review.")
 }
 
 func preDispatch(state string) bool {

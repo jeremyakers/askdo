@@ -48,7 +48,7 @@ func TestReviewLogSignalOutcome(t *testing.T) {
 }
 
 func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
-	for _, pathway := range []string{"transition", "named-decision", "expiry", "restart"} {
+	for _, pathway := range []string{"transition", "named-decision", "expiry", "restart", "request-changes", "named-request-changes"} {
 		t.Run(pathway, func(t *testing.T) {
 			// Given retained approval/result metadata and compaction precisely
 			// between terminal commit and journal generation.
@@ -58,7 +58,7 @@ func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "reviews.jsonl")
 			s.SetReviewLogPath(path)
 			deadline := now.Add(-time.Hour)
-			if pathway == "named-decision" {
+			if pathway == "named-decision" || strings.Contains(pathway, "request-changes") {
 				deadline = now.Add(time.Hour)
 			}
 			createTestJob(t, s, "retained", &deadline)
@@ -71,7 +71,7 @@ func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
 				t.Fatal(err)
 			}
 			digest := strings.Repeat("a", 64)
-			if pathway == "named-decision" {
+			if strings.HasPrefix(pathway, "named-") {
 				if err := s.RecordManifest(ctx, testUID, "retained", "/manifest", digest); err != nil {
 					t.Fatal(err)
 				}
@@ -104,6 +104,19 @@ func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
 				if changed, err := s.CommitNamedDecision(ctx, testUID, "retained", decision, now); err != nil || !changed {
 					t.Fatalf("decision %v %v", changed, err)
 				}
+			case "request-changes", "named-request-changes":
+				wantState, wantKind, wantDecision = "denied", "human", "request_changes"
+				decision := proto.Decision{Digest: digest, Action: "request_changes", TimeUnixMS: now.UnixMilli()}
+				if strings.HasPrefix(pathway, "named-") {
+					decision.ChannelName, decision.ChatID, decision.MessageID, decision.OperatorUserID = "ops", 11, 41, 101
+				} else if err := s.RecordApproval(ctx, testUID, "retained", []byte(`{"card_id":41}`)); err != nil {
+					t.Fatal(err)
+				}
+				s.NoteConsumedDecision(testUID, "retained", decision)
+				feedback := &proto.ReviewFeedback{Uncertainties: []string{"unknown backup"}, Warnings: []proto.ReviewWarning{}, Suggestions: []proto.ReviewSuggestion{{Issue: "unknown backup", Action: "Inspect restore evidence", Actor: proto.SuggestionSubmitter}}}
+				if changed, err := s.CommitRequestChanges(ctx, testUID, "retained", decision, feedback, now); err != nil || !changed {
+					t.Fatalf("request changes %v %v", changed, err)
+				}
 			case "expiry":
 				wantState, wantDecision = "expired", "approved"
 				if count, err := s.SweepExpired(ctx, now); err != nil || count != 1 {
@@ -124,16 +137,21 @@ func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
 				t.Fatal(err)
 			}
 			var e struct {
-				Time     time.Time `json:"time"`
-				State    string    `json:"state"`
-				Kind     string    `json:"approval_kind"`
-				Decision string    `json:"decision"`
-				ExitCode *int      `json:"exit_code"`
+				Time       time.Time `json:"time"`
+				State      string    `json:"state"`
+				Kind       string    `json:"approval_kind"`
+				Decision   string    `json:"decision"`
+				ExitCode   *int      `json:"exit_code"`
+				ResultKind string    `json:"result_kind"`
 			}
 			if err := json.Unmarshal(data, &e); err != nil {
 				t.Fatal(err)
 			}
-			if e.Time.IsZero() || e.Time.Before(now) || e.State != wantState || e.Kind != wantKind || e.Decision != wantDecision || e.ExitCode == nil || *e.ExitCode != 17 {
+			validResult := e.ExitCode != nil && *e.ExitCode == 17
+			if strings.Contains(pathway, "request-changes") {
+				validResult = e.ExitCode == nil && e.ResultKind == "decision"
+			}
+			if e.Time.IsZero() || e.Time.Before(now) || e.State != wantState || e.Kind != wantKind || e.Decision != wantDecision || !validResult {
 				t.Fatalf("compaction corrupted outcome: %s", data)
 			}
 			if bytes.Count(data, []byte{'\n'}) != 1 {
@@ -272,7 +290,7 @@ func awaitingHumanJobs(t *testing.T, s *Store, ids ...string) {
 
 func TestReviewLogConsumedDecisionSurvivesEveryTerminalMutation(t *testing.T) {
 	for _, tc := range terminalMutations() {
-		for action, want := range map[string]string{"approve": "approved", "deny": "denied"} {
+		for action, want := range map[string]string{"approve": "approved", "deny": "denied", "request_changes": "request_changes"} {
 			t.Run(tc.name+"/"+action, func(t *testing.T) {
 				// Given two jobs awaiting a human, one of which had a decision consumed.
 				s := openTestStore(t)
@@ -294,7 +312,7 @@ func TestReviewLogConsumedDecisionSurvivesEveryTerminalMutation(t *testing.T) {
 
 func TestReviewLogDecisionRegisteredAfterTerminalMutationIsNotStranded(t *testing.T) {
 	for _, tc := range terminalMutations() {
-		for _, action := range []string{"approve", "deny"} {
+		for _, action := range []string{"approve", "deny", "request_changes"} {
 			t.Run(tc.name+"/"+action, func(t *testing.T) {
 				// Given a job a terminal mutation already ended and journaled, without a decision.
 				s := openTestStore(t)
@@ -315,43 +333,48 @@ func TestReviewLogDecisionRegisteredAfterTerminalMutationIsNotStranded(t *testin
 }
 
 func TestReviewLogDecisionRegistrationExcludesTerminalMutations(t *testing.T) {
-	// Given a job awaiting a human whose expiry sweep starts while its consumed decision is being registered.
-	s := openTestStore(t)
-	path := filepath.Join(t.TempDir(), "reviews.jsonl")
-	s.SetReviewLogPath(path)
-	awaitingHumanJobs(t, s, "decided")
-	type sweep struct {
-		count int
-		err   error
-	}
-	swept := make(chan sweep, 1)
-	s.beforeConsumedNote = func() {
-		waits := s.db.Stats().WaitCount
-		go func() {
-			count, err := s.SweepExpired(context.Background(), time.Now())
-			swept <- sweep{count, err}
-		}()
-		// The sweep has to queue behind the registration. If it can finish first, its
-		// snapshot misses the note that is stored after it.
-		for s.db.Stats().WaitCount == waits {
-			select {
-			case result := <-swept:
-				t.Errorf("sweep finished inside the registration step: %+v", result)
-				swept <- result
-				return
-			default:
-				runtime.Gosched()
+	for _, action := range []string{"approve", "request_changes"} {
+		t.Run(action, func(t *testing.T) {
+			// Given a job awaiting a human whose expiry sweep starts while its consumed decision is being registered.
+			s := openTestStore(t)
+			path := filepath.Join(t.TempDir(), "reviews.jsonl")
+			s.SetReviewLogPath(path)
+			awaitingHumanJobs(t, s, "decided")
+			type sweep struct {
+				count int
+				err   error
 			}
-		}
-	}
-	// When the decision is registered.
-	s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
-	// Then the sweep snapshots after the note, journals it, and nothing is left behind.
-	if result := <-swept; result.err != nil || result.count != 1 {
-		t.Fatalf("sweep %+v", result)
-	}
-	if got := journalOutcomes(t, path); got["decided"] != [3]string{"expired", "human", "approved"} || len(s.consumed) != 0 {
-		t.Fatalf("outcomes=%v retained=%v", got, s.consumed)
+			swept := make(chan sweep, 1)
+			s.beforeConsumedNote = func() {
+				waits := s.db.Stats().WaitCount
+				go func() {
+					count, err := s.SweepExpired(context.Background(), time.Now())
+					swept <- sweep{count, err}
+				}()
+				// The sweep has to queue behind the registration. If it can finish first, its
+				// snapshot misses the note that is stored after it.
+				for s.db.Stats().WaitCount == waits {
+					select {
+					case result := <-swept:
+						t.Errorf("sweep finished inside the registration step: %+v", result)
+						swept <- result
+						return
+					default:
+						runtime.Gosched()
+					}
+				}
+			}
+			// When the decision is registered.
+			s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: action})
+			// Then the sweep snapshots after the note, journals it, and nothing is left behind.
+			if result := <-swept; result.err != nil || result.count != 1 {
+				t.Fatalf("sweep %+v", result)
+			}
+			want := map[string]string{"approve": "approved", "request_changes": "request_changes"}[action]
+			if got := journalOutcomes(t, path); got["decided"] != [3]string{"expired", "human", want} || len(s.consumed) != 0 {
+				t.Fatalf("outcomes=%v retained=%v", got, s.consumed)
+			}
+		})
 	}
 }
 
@@ -383,6 +406,7 @@ func TestReviewLogConsumedDecisionNeverWaitsForStoreWithoutJournal(t *testing.T)
 	go func() {
 		defer close(noted)
 		s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
+		s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "request_changes"})
 	}()
 	// Then, with no journal to feed, it neither waits for the store nor tracks anything.
 	select {

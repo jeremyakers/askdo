@@ -60,7 +60,7 @@ func TestTelegramTrustedRootTextExecutableReviewedIncompleteThenApprovedOnce(t *
 		result <- client.Run(context.Background(), []string{"--detach", "--review=yes", "--reason", "trusted-root text exec review", "--", target}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
 	}()
 	card := awaitTelegramCard(t, fake)
-	if len(card.Buttons) != 3 || len(executor.Snapshot()) != 0 {
+	if card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" || len(executor.Snapshot()) != 0 {
 		t.Fatalf("review card=%+v executions=%d", card, len(executor.Snapshot()))
 	}
 	joined := ""

@@ -143,7 +143,7 @@ func TestReviewLogCompactKeepsUIDsSeparate(t *testing.T) {
 		event, summary, decision string
 	}{
 		{1000, "review", "alice review", ""}, {1001, "review", "bob review", ""},
-		{1001, "outcome", "", "denied"}, {1000, "outcome", "", "approved"},
+		{1001, "outcome", "", "request_changes"}, {1000, "outcome", "", "approved"},
 	} {
 		fmt.Fprintf(&data, `{"version":1,"event":%q,"time":"2026-01-01T00:00:00Z","job_id":"shared","submitter_uid":%d,"report":{"risk":"1","summary":%q},"decision":%q}`+"\n", r.event, r.uid, r.summary, r.decision)
 	}
@@ -162,7 +162,7 @@ func TestReviewLogCompactKeepsUIDsSeparate(t *testing.T) {
 		t.Fatalf("jobs collapsed: %s", text)
 	}
 	first, second, ok := strings.Cut(text, "\n  summary: \"alice review\"\n")
-	if !ok || !strings.Contains(first, `decision="approved"`) || !strings.Contains(second, `decision="denied"`) || !strings.Contains(second, "bob review") {
+	if !ok || !strings.Contains(first, `decision="approved"`) || !strings.Contains(second, `decision="request_changes"`) || !strings.Contains(second, "bob review") {
 		t.Fatalf("mismatched or nondeterministic join: %s", text)
 	}
 }
