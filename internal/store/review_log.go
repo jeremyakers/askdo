@@ -63,6 +63,7 @@ func outcomeForJob(job Job) reviewlog.Event {
 	if approval.Kind == "auto" {
 		decision = "approved"
 	}
+	hasDecision := (approval.Kind == "human" || approval.Kind == "auto") && (decision == "approved" || decision == "denied")
 	switch job.State {
 	case StateDenied:
 		decision = "denied"
@@ -70,9 +71,13 @@ func outcomeForJob(job Job) reviewlog.Event {
 			approval.Kind = "human"
 		}
 	case StateExpired:
-		decision = "expired"
+		if !hasDecision {
+			decision = "expired"
+		}
 	case StateCancelled:
-		decision = "cancelled"
+		if !hasDecision {
+			decision = "cancelled"
+		}
 	}
 	if decision == "" {
 		decision = "none"

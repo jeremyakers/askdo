@@ -64,6 +64,49 @@ func TestReviewLogCLI(t *testing.T) {
 	}
 }
 
+func TestReviewLogCompactRetainsOnlyRecentKeys(t *testing.T) {
+	// Given a large inactive history plus one recent outcome for an old review.
+	oldPath, oldEUID, oldObserver := reviewLogPath, getEUID, reviewLogRetainedJobs
+	t.Cleanup(func() { reviewLogPath, getEUID, reviewLogRetainedJobs = oldPath, oldEUID, oldObserver })
+	getEUID = func() int { return 0 }
+	reviewLogPath = filepath.Join(t.TempDir(), "reviews.jsonl")
+	old := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339Nano)
+	recent := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	var data bytes.Buffer
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&data, `{"version":1,"event":"unreviewed","time":%q,"job_id":"old-%d","submitter_uid":1000}`+"\n", old, i)
+	}
+	fmt.Fprintf(&data, `{"version":1,"event":"review","time":%q,"job_id":"active","submitter_uid":1000,"report":{"risk":"1","summary":"retained context"}}`+"\n", old)
+	fmt.Fprintf(&data, `{"version":1,"event":"unreviewed","time":%q,"job_id":"active","submitter_uid":1001}`+"\n", old)
+	fmt.Fprintf(&data, `{"version":1,"event":"outcome","time":%q,"job_id":"active","submitter_uid":1000,"state":"finished","decision":"approved"}`+"\n", recent)
+	if err := os.WriteFile(reviewLogPath, data.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		since string
+		want  int
+	}{{"1h", 1}, {"0", 1002}} {
+		t.Run(tc.since, func(t *testing.T) {
+			retained := -1
+			reviewLogRetainedJobs = func(n int) { retained = n }
+			// When the compact view selects recent activity (or explicitly all history).
+			var out, stderr bytes.Buffer
+			code := runReview([]string{"log", "--since", tc.since}, &out, &stderr)
+			// Then only selected keys consume retained-history memory, with old
+			// context still joined for the recent job and no cross-UID inclusion.
+			if code != 0 || retained != tc.want {
+				t.Errorf("code=%d retained=%d want=%d stderr=%s", code, retained, tc.want, &stderr)
+			}
+			if !strings.Contains(out.String(), "retained context") || !strings.Contains(out.String(), `decision="approved"`) {
+				t.Fatalf("lost joined context: %s", &out)
+			}
+			if tc.since != "0" && (strings.Contains(out.String(), "old-") || strings.Contains(out.String(), "uid=1001")) {
+				t.Fatal("inactive keys appeared")
+			}
+		})
+	}
+}
+
 func TestReviewLogCompactKeepsUIDsSeparate(t *testing.T) {
 	// Given two historical jobs sharing an ID but not a submitting UID.
 	oldPath, oldEUID := reviewLogPath, getEUID

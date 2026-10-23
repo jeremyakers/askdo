@@ -25,6 +25,9 @@ order. `--job` matches the ID exactly and shows each submitting UID separately;
 `--since 0` disables the time filter. Output write failures return nonzero. Malformed
 lines are reported by line number on stderr and skipped. A missing journal is
 empty history. A missing outcome means **not recorded**, not necessarily pending.
+For a recent compact view, two passes select active keys before retaining their
+records, so unrelated old jobs do not accumulate in memory. `--since 0` explicitly
+retains all history; `--job` limits retention to that ID.
 
 ## JSONL schema (version 1)
 
@@ -49,7 +52,12 @@ Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
   terminal state mutation before retention can compact the row, then appended
   after commit. A consumed human approval followed by a pre-launch failure is
   recorded as `human`/`approved` with state `failed`: approval did not imply
-  execution, and no dispatch/authorization checks are bypassed.
+  execution, and no dispatch/authorization checks are bypassed. Broker wrapper
+  failures atomically store and journal `result_kind: "wrapper"`. If an approved
+  foreground handoff later expires, is cancelled, or is invalidated by restart,
+  its decision remains `human`/`approved`; the final state conveys what happened
+  to the handoff. `expired`/`cancelled` decisions are synthesized only when no
+  human or auto decision has been recorded.
 
 The journal never copies captured file contents, environment values, credentials,
 provider response bodies, raw reviewer logs, or inspection selectors/payloads.

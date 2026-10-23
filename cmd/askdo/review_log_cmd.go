@@ -18,6 +18,9 @@ import (
 
 var reviewLogPath = reviewlog.DefaultPath
 
+// Test-only observer for compact-mode retained job count.
+var reviewLogRetainedJobs func(int)
+
 func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	if getEUID() != 0 {
 		fmt.Fprintln(stderr, "askdo review log requires root: the review journal is root-only (re-run with sudo)")
@@ -54,15 +57,42 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 		id  string
 		uid uint32
 	}
+	// First retain only keys with recent activity. The second pass can then
+	// join their older review context without keeping unrelated history.
+	// --since 0 requests all history; an exact --job already bounds selection.
+	var recent map[jobKey]struct{}
+	if !*raw && !cutoff.IsZero() && *job == "" {
+		recent = make(map[jobKey]struct{})
+		reader := bufio.NewReader(file)
+		for {
+			data, readErr := reader.ReadBytes('\n')
+			if event, valid := decodeReviewLogRecord(data); valid && !event.Time.Before(cutoff) {
+				recent[jobKey{event.JobID, event.SubmitterUID}] = struct{}{}
+			}
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			if readErr != nil {
+				fmt.Fprintln(stderr, "review log:", readErr)
+				return 1
+			}
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			fmt.Fprintln(stderr, "review log:", err)
+			return 1
+		}
+	}
 	jobs := make(map[jobKey]*joined)
 	reader := bufio.NewReader(file)
 	for line := 1; ; line++ {
 		data, readErr := reader.ReadBytes('\n')
 		if len(data) > 0 {
-			var event reviewlog.Event
-			if err := json.Unmarshal(data, &event); err != nil || event.Version != 1 || event.JobID == "" || event.Time.IsZero() || (event.Event != "review" && event.Event != "unreviewed" && event.Event != "outcome") {
+			event, valid := decodeReviewLogRecord(data)
+			key := jobKey{event.JobID, event.SubmitterUID}
+			_, selected := recent[key]
+			if !valid {
 				fmt.Fprintf(stderr, "review log: skipping malformed line %d\n", line)
-			} else if *job == "" || event.JobID == *job {
+			} else if (*job == "" || event.JobID == *job) && (recent == nil || selected) {
 				if *raw {
 					if !event.Time.Before(cutoff) {
 						if _, err := stdout.Write(append(bytes.TrimSuffix(data, []byte{'\n'}), '\n')); err != nil {
@@ -71,7 +101,6 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 						}
 					}
 				} else {
-					key := jobKey{event.JobID, event.SubmitterUID}
 					j := jobs[key]
 					if j == nil {
 						j = &joined{}
@@ -96,6 +125,9 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "review log:", readErr)
 			return 1
 		}
+	}
+	if reviewLogRetainedJobs != nil {
+		reviewLogRetainedJobs(len(jobs))
 	}
 	ids := make([]jobKey, 0, len(jobs))
 	for id, j := range jobs {
@@ -164,4 +196,12 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func decodeReviewLogRecord(data []byte) (reviewlog.Event, bool) {
+	var event reviewlog.Event
+	if err := json.Unmarshal(data, &event); err != nil || event.Version != 1 || event.JobID == "" || event.Time.IsZero() || (event.Event != "review" && event.Event != "unreviewed" && event.Event != "outcome") {
+		return reviewlog.Event{}, false
+	}
+	return event, true
 }

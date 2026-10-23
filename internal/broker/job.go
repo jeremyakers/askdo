@@ -235,7 +235,7 @@ func sanitizeClientDetail(s string) string {
 	}, s)
 }
 
-func (j *jobRuntime) transition(ctx context.Context, from, to store.State) (bool, error) {
+func (j *jobRuntime) transition(ctx context.Context, from, to store.State, result ...store.Result) (bool, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.state != from {
@@ -245,7 +245,13 @@ func (j *jobRuntime) transition(ctx context.Context, from, to store.State) (bool
 	if to == store.StateFailed && j.pendingApproval != nil && j.pendingApproval.consumed {
 		journalDecision = []proto.Decision{j.pendingApproval.consumedDecision}
 	}
-	changed, err := j.daemon.store.Transition(ctx, j.uid, j.req.RequestID, from, to, journalDecision...)
+	var changed bool
+	var err error
+	if len(result) > 0 {
+		changed, err = j.daemon.store.TransitionWithResult(ctx, j.uid, j.req.RequestID, from, to, result[0], journalDecision...)
+	} else {
+		changed, err = j.daemon.store.Transition(ctx, j.uid, j.req.RequestID, from, to, journalDecision...)
+	}
 	if err != nil || !changed {
 		return changed, err
 	}
@@ -1343,9 +1349,8 @@ func (j *jobRuntime) fail(detail string) {
 	if from.IsTerminal() || from == store.StateStarting || from == store.StateRunning {
 		return
 	}
-	if changed, _ := j.transition(context.Background(), from, store.StateFailed); changed {
-		result := store.Result{Kind: store.ResultWrapper}
-		_ = j.daemon.store.RecordResult(context.Background(), j.uid, j.req.RequestID, result)
+	result := store.Result{Kind: store.ResultWrapper}
+	if changed, _ := j.transition(context.Background(), from, store.StateFailed, result); changed {
 		j.publish(proto.ProgressEvent{Op: "progress", Stage: "failed", Detail: detail})
 		j.finishTerminal(store.StateFailed, result)
 	}

@@ -838,6 +838,23 @@ func (store *Store) getJob(ctx context.Context, uid uint32, requestID string) (J
 // A consumed decision is optional journal metadata for a failed pre-launch job;
 // it does not update approval_json, change guards, or authorize dispatch.
 func (store *Store) Transition(ctx context.Context, uid uint32, requestID string, from, to State, consumedDecision ...proto.Decision) (bool, error) {
+	return store.transition(ctx, uid, requestID, from, to, nil, consumedDecision...)
+}
+
+// TransitionWithResult persists the final result in the same guarded mutation
+// that sets the terminal state and captures its journal snapshot.
+func (store *Store) TransitionWithResult(ctx context.Context, uid uint32, requestID string, from, to State, result Result, consumedDecision ...proto.Decision) (bool, error) {
+	if err := validateResult(result); err != nil {
+		return false, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return false, fmt.Errorf("encode result: %w", err)
+	}
+	return store.transition(ctx, uid, requestID, from, to, encoded, consumedDecision...)
+}
+
+func (store *Store) transition(ctx context.Context, uid uint32, requestID string, from, to State, resultJSON []byte, consumedDecision ...proto.Decision) (bool, error) {
 	if !from.Valid() {
 		return false, &ErrInvalidState{State: from}
 	}
@@ -857,10 +874,10 @@ func (store *Store) Transition(ctx context.Context, uid uint32, requestID string
 		return false, fmt.Errorf("begin transition: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	changed, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?
+	changed, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?, result_json = COALESCE(?, result_json)
 		WHERE uid = ? AND request_id = ? AND state = ?
 		AND state NOT IN ('finished', 'cancelled', 'expired', 'denied', 'failed', 'unknown')`,
-		string(to), time.Now().UTC().UnixNano(), uid, requestID, string(from))
+		string(to), time.Now().UTC().UnixNano(), resultJSON, uid, requestID, string(from))
 	if err != nil {
 		return false, fmt.Errorf("transition job: %w", err)
 	}

@@ -104,12 +104,12 @@ func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
 					t.Fatalf("decision %v %v", changed, err)
 				}
 			case "expiry":
-				wantState, wantDecision = "expired", "expired"
+				wantState, wantDecision = "expired", "approved"
 				if count, err := s.SweepExpired(ctx, now); err != nil || count != 1 {
 					t.Fatalf("sweep %d %v", count, err)
 				}
 			case "restart":
-				wantState, wantDecision = "expired", "expired"
+				wantState, wantDecision = "expired", "approved"
 				if count, err := s.MarkRestartAmbiguous(ctx); err != nil || count != 1 {
 					t.Fatalf("restart %d %v", count, err)
 				}
@@ -137,6 +137,55 @@ func TestReviewLogCapturesOutcomeBeforeRetention(t *testing.T) {
 			}
 			if bytes.Count(data, []byte{'\n'}) != 1 {
 				t.Fatalf("unexpected duplicate records: %s", data)
+			}
+		})
+	}
+}
+
+func TestReviewLogApprovedHandoffKeepsDecision(t *testing.T) {
+	for _, action := range []string{"expiry", "cancel", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			// Given an approved, unclaimed foreground grant.
+			s := openTestStore(t)
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "reviews.jsonl")
+			s.SetReviewLogPath(path)
+			grant, _ := handoffFixture(t, s, "approved")
+			if ok, err := s.CreateForegroundGrant(ctx, grant); err != nil || !ok {
+				t.Fatalf("grant %v %v", ok, err)
+			}
+			// When it expires, is cancelled, or is invalidated on restart.
+			wantState := "cancelled"
+			switch action {
+			case "expiry":
+				wantState = "expired"
+				if n, err := s.SweepExpired(ctx, grant.ExpiresAtUTC); err != nil || n != 1 {
+					t.Fatalf("sweep %d %v", n, err)
+				}
+			case "cancel":
+				if changed, err := s.Transition(ctx, testUID, "approved", StateAwaitingHandoff, StateCancelled); err != nil || !changed {
+					t.Fatalf("cancel %v %v", changed, err)
+				}
+			case "restart":
+				if n, err := s.MarkRestartAmbiguous(ctx); err != nil || n != 1 {
+					t.Fatalf("restart %d %v", n, err)
+				}
+			}
+			// Then approval is preserved separately from the terminal job state.
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outcome struct {
+				State    string `json:"state"`
+				Kind     string `json:"approval_kind"`
+				Decision string `json:"decision"`
+			}
+			if err := json.Unmarshal(data, &outcome); err != nil {
+				t.Fatal(err)
+			}
+			if outcome.State != wantState || outcome.Kind != "human" || outcome.Decision != "approved" {
+				t.Fatalf("lost approval: %s", data)
 			}
 		})
 	}

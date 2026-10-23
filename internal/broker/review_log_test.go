@@ -34,6 +34,33 @@ func readReviewRecords(t *testing.T, h *brokerHarness) []map[string]json.RawMess
 	return records
 }
 
+func TestReviewLogWrapperFailurePersistsResult(t *testing.T) {
+	// Given a durable pre-dispatch job.
+	h := newBrokerHarness(t, nil, nil)
+	j, ctx := newFreezeTestJob(t, h)
+	// When an existing broker failure path rejects it.
+	j.fail("fixture failure detail")
+	// Then the row and the one terminal record both contain the wrapper result.
+	stored, err := h.daemon.store.GetJob(ctx, j.uid, j.req.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result store.Result
+	if err := json.Unmarshal(stored.ResultJSON, &result); err != nil {
+		t.Errorf("missing stored result: %q (%v)", stored.ResultJSON, err)
+	}
+	if stored.State != store.StateFailed || result.Kind != store.ResultWrapper {
+		t.Errorf("stored failure: state=%s result=%+v", stored.State, result)
+	}
+	records := readReviewRecords(t, h)
+	if len(records) != 1 || string(records[0]["result_kind"]) != `"wrapper"` || string(records[0]["state"]) != `"failed"` {
+		t.Fatalf("outcome=%v", records)
+	}
+	if j.failureDetail != "fixture failure detail" || len(h.executor.Snapshot()) != 0 {
+		t.Fatal("failure behavior changed")
+	}
+}
+
 func TestReviewLogAfterFreeze(t *testing.T) {
 	// Given a real staged capture and deliberately private inspection/provider data.
 	h := newBrokerHarness(t, nil, nil)
