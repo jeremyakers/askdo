@@ -298,7 +298,7 @@ func Validate[T Payload](value T) error {
 			return ErrProtocol
 		}
 		switch v.Action {
-		case Approve, Deny:
+		case Approve, Deny, RequestChanges:
 		default:
 			return ErrProtocol
 		}

@@ -540,7 +540,7 @@ func TestNotifyApproveFlow(t *testing.T) {
 	}
 
 	card := awaitCard(t, fake)
-	if card.ChatID != notifyChat || len(card.Buttons) != 3 {
+	if card.ChatID != notifyChat || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
 		t.Fatalf("card=%+v", card)
 	}
 	if !strings.Contains(card.Text, "Security risk: 4/5") {
@@ -552,7 +552,7 @@ func TestNotifyApproveFlow(t *testing.T) {
 	}
 	// Every button on the card binds the same nonce.
 	nonce := strings.TrimPrefix(approveData, "a:")
-	if card.ButtonData("d:") != "d:"+nonce || card.ButtonData("v:") != "v:"+nonce {
+	if card.ButtonData("d:") != "d:"+nonce || card.ButtonData("v:") != "v:"+nonce || card.ButtonData("r:") != "r:"+nonce {
 		t.Fatalf("buttons=%+v share no nonce %q", card.Buttons, nonce)
 	}
 

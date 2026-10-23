@@ -220,10 +220,15 @@ func (s *TicketStore) Consume(ctx context.Context, e inboxEntry) (bool, *TicketR
 	if r.State != fleetproto.TicketPending || r.Receipt == nil || e.token != r.TokenHash || e.facts.Nonce != b.Nonce {
 		return remove()
 	}
-	action := fleetproto.Approve
-	if e.facts.Action == telegram.ActionDeny {
+	var action fleetproto.Action
+	switch e.facts.Action {
+	case telegram.ActionApprove, telegram.ActionDetails:
+		action = fleetproto.Approve
+	case telegram.ActionDeny:
 		action = fleetproto.Deny
-	} else if e.facts.Action != telegram.ActionApprove && e.facts.Action != telegram.ActionDetails {
+	case telegram.ActionRequestChanges:
+		action = fleetproto.RequestChanges
+	default:
 		return remove()
 	}
 	hash, err := fleetproto.HashReceipt(*r.Receipt)

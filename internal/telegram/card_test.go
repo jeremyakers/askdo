@@ -100,7 +100,7 @@ func TestReviewedSecurityScoreOnAllCards(t *testing.T) {
 					t.Errorf("security score %q missing: %s", tc.visible, text)
 				}
 			}
-			if len(kb.InlineKeyboard) != 1 || len(kb.InlineKeyboard[0]) != 3 || kb.InlineKeyboard[0][0].Text != "Approve once" {
+			if len(kb.InlineKeyboard) != 1 || len(kb.InlineKeyboard[0]) == 0 || kb.InlineKeyboard[0][0].Text != "Approve once" {
 				t.Fatalf("human approval controls changed: %+v", kb)
 			}
 		})

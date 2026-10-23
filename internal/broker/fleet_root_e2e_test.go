@@ -961,6 +961,7 @@ func TestRootFleetActualChildTLSDispatch(t *testing.T) {
 	}{
 		{"reviewed_approve", "approve", "1", false, false, false, store.StateFinished},
 		{"reviewed_deny", "deny", "1", false, false, false, store.StateDenied},
+		{"reviewed_request_changes", "request_changes", "1", false, false, false, store.StateDenied},
 		{"auto_notice", "", "1", true, false, false, store.StateFinished},
 		{"captured_always_human", "approve", "1", true, true, false, store.StateFinished},
 		{"captured_unreviewed_always_human", "approve", "1", true, true, true, store.StateFinished},
@@ -997,6 +998,9 @@ func TestRootFleetActualChildTLSDispatch(t *testing.T) {
 				if tc.action == "deny" {
 					prefix = "d:"
 				}
+				if tc.action == "request_changes" {
+					prefix = "r:"
+				}
 				f.bot.QueueCallback(1, "fixture", telegramOperator, telegramChat, card.ID, card.ButtonData(prefix))
 			}
 			job := awaitRootFleetState(t, conn, f.broker.daemon.store, id, tc.want, store.StateFailed)
@@ -1014,6 +1018,15 @@ func TestRootFleetActualChildTLSDispatch(t *testing.T) {
 				event, _, err := fleetproto.Verify[fleetproto.Event](f.publicKey, envelope)
 				if err != nil || event.Sequence != uint64(i+1) {
 					t.Fatalf("audit proof failed: %v", err)
+				}
+				if tc.action == "request_changes" && event.Decision != nil && string(event.Decision.Action) != tc.action {
+					t.Fatalf("signed decision lost action: %+v", event.Decision)
+				}
+			}
+			if tc.action == "request_changes" {
+				result := decodeStoredResult(job)
+				if result.Decision != tc.action || result.Feedback == nil {
+					t.Fatalf("missing durable feedback: %s", job.ResultJSON)
 				}
 			}
 			var sub fleetproto.TicketSubmission

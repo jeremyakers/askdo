@@ -84,10 +84,10 @@ func TestCaptureStdinWireAndLegacy(t *testing.T) {
 			case req := <-result:
 				if source == "pipe" || source == "file" {
 					decoded, err := base64.StdEncoding.DecodeString(req.CapturedStdinBase64)
-					if err != nil || !bytes.Equal(decoded, text) || req.ProtocolVersion != proto.CapturedStdinProtocolVersion || req.Lifecycle != proto.LifecycleDetached || len(req.Argv) != 1 || req.Argv[0] != "bash" {
+					if err != nil || !bytes.Equal(decoded, text) || req.ProtocolVersion != proto.FeedbackProtocolVersion || req.Lifecycle != proto.LifecycleDetached || len(req.Argv) != 1 || req.Argv[0] != "bash" {
 						t.Fatalf("request: %+v, decode: %v", req, err)
 					}
-				} else if req.CapturedStdinBase64 != "" || req.ProtocolVersion != proto.CanonicalProtocolVersion {
+				} else if req.CapturedStdinBase64 != "" || req.ProtocolVersion != proto.FeedbackProtocolVersion {
 					t.Fatalf("legacy request: %+v", req)
 				}
 			case <-time.After(time.Second):

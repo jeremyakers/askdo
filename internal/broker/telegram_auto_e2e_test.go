@@ -198,7 +198,7 @@ func TestTelegramAutoIneligibleUsesHumanCard(t *testing.T) {
 			h.peerUID.Store(tc.uid)
 			result, _, stderr := runApprovalCLI(t, h.socket)
 			card := awaitTelegramCard(t, fake)
-			if len(card.Buttons) != 3 || len(executor.Snapshot()) != 0 {
+			if card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" || len(executor.Snapshot()) != 0 {
 				t.Fatalf("human card=%+v executions=%d", card, len(executor.Snapshot()))
 			}
 			fake.QueueCallback(1, "deny", telegramOperator, telegramChat, card.ID, card.ButtonData("d:"))

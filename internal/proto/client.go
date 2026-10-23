@@ -30,7 +30,10 @@ const (
 	CanonicalProtocolVersion = 4
 	// CapturedStdinProtocolVersion adds frozen argv stdin to canonical submits.
 	CapturedStdinProtocolVersion = 5
-	MaxCapturedStdinBytes        = 1 << 20
+	// FeedbackProtocolVersion opts a connection into request-changes feedback.
+	// Submit otherwise follows v4/v5; status and attach may also advertise it.
+	FeedbackProtocolVersion = 6
+	MaxCapturedStdinBytes   = 1 << 20
 )
 
 // Lifecycle values accepted by AskdoProtocolVersion submit requests.
@@ -95,11 +98,11 @@ type SubmitRequest struct {
 	Args                []string     `json:"args,omitempty"`
 	Files               []BundleFile `json:"files,omitempty"`
 	SensitiveInclusions []string     `json:"sensitive_inclusions,omitempty"`
-	// CapturedStdinBase64 is present only in version 5 argv requests. Empty
+	// CapturedStdinBase64 is present only in version 5/6 argv requests. Empty
 	// input is omitted and uses the existing version 4 wire contract.
 	CapturedStdinBase64  string `json:"captured_stdin_base64,omitempty"`
 	capturedStdinPresent bool
-	// Lifecycle is required at versions 3 through 5 and forbidden at version 2.
+	// Lifecycle is required at versions 3 through 6 and forbidden at version 2.
 	// It declares the job lifetime only; it carries no
 	// caller identity (the broker authenticates via SO_PEERCRED).
 	Lifecycle string `json:"lifecycle,omitempty"`
@@ -141,14 +144,16 @@ func (r *SubmitRequest) UnmarshalJSON(data []byte) error {
 
 // StatusRequest asks for the state of an existing job.
 type StatusRequest struct {
-	Op        string `json:"op"`
-	RequestID string `json:"request_id"`
+	Op              string `json:"op"`
+	RequestID       string `json:"request_id"`
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
 }
 
 // AttachRequest asks to replay and follow an existing job's output.
 type AttachRequest struct {
-	Op        string `json:"op"`
-	RequestID string `json:"request_id"`
+	Op              string `json:"op"`
+	RequestID       string `json:"request_id"`
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
 }
 
 // CancelRequest without a capability retains the legacy pre-dispatch contract.
@@ -266,12 +271,22 @@ type OutputEvent struct {
 
 // ResultEvent communicates a terminal job outcome.
 type ResultEvent struct {
-	Op        string `json:"op"`
-	RequestID string `json:"request_id,omitempty"`
-	State     string `json:"state"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	Signal    *int   `json:"signal,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Op        string          `json:"op"`
+	RequestID string          `json:"request_id,omitempty"`
+	State     string          `json:"state"`
+	ExitCode  *int            `json:"exit_code,omitempty"`
+	Signal    *int            `json:"signal,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Decision  string          `json:"decision,omitempty"`
+	Feedback  *ReviewFeedback `json:"feedback,omitempty"`
+}
+
+// ForProtocol preserves the legacy result wire for strict older decoders.
+func (e ResultEvent) ForProtocol(version int) ResultEvent {
+	if version < FeedbackProtocolVersion {
+		e.Decision, e.Feedback = "", nil
+	}
+	return e
 }
 
 // WaitTimeoutEvent tells the client its local waiting budget elapsed.
@@ -297,16 +312,16 @@ func (r SubmitRequest) Validate() error {
 		if r.Lifecycle != "" || r.TerminalType != "" {
 			return errors.New("protocol version 2 forbids lifecycle and terminal_type")
 		}
-	case AskdoProtocolVersion, CanonicalProtocolVersion, CapturedStdinProtocolVersion:
+	case AskdoProtocolVersion, CanonicalProtocolVersion, CapturedStdinProtocolVersion, FeedbackProtocolVersion:
 		if err := validateLifecycle(r.Lifecycle, r.TerminalType); err != nil {
 			return err
 		}
 	default:
 		return fmt.Errorf("unsupported protocol version %d", r.ProtocolVersion)
 	}
-	if r.ProtocolVersion == CapturedStdinProtocolVersion {
+	if r.ProtocolVersion == CapturedStdinProtocolVersion || (r.ProtocolVersion == FeedbackProtocolVersion && (r.CapturedStdinBase64 != "" || r.capturedStdinPresent)) {
 		if r.Mode != "argv" || r.Lifecycle != LifecycleDetached || r.CapturedStdinBase64 == "" {
-			return errors.New("protocol version 5 requires detached argv with captured stdin")
+			return errors.New("captured stdin requires detached argv with nonempty input")
 		}
 		if len(r.CapturedStdinBase64) > base64.StdEncoding.EncodedLen(MaxCapturedStdinBytes) {
 			return errors.New("captured stdin exceeds 1 MiB")
@@ -316,9 +331,9 @@ func (r SubmitRequest) Validate() error {
 			return errors.New("captured stdin must be nonempty canonical base64 UTF-8 text without NUL, at most 1 MiB")
 		}
 	} else if r.CapturedStdinBase64 != "" || r.capturedStdinPresent {
-		return errors.New("captured stdin requires protocol version 5")
+		return errors.New("captured stdin requires protocol version 5 or 6")
 	}
-	if r.ProtocolVersion == CanonicalProtocolVersion || r.ProtocolVersion == CapturedStdinProtocolVersion {
+	if r.ProtocolVersion == CanonicalProtocolVersion || r.ProtocolVersion == CapturedStdinProtocolVersion || r.ProtocolVersion == FeedbackProtocolVersion {
 		if err := jobid.Validate(r.RequestID); err != nil {
 			return fmt.Errorf("invalid canonical request_id: %w", err)
 		}
@@ -376,10 +391,27 @@ func (r SubmitRequest) Validate() error {
 }
 
 // Validate validates a status request.
-func (r StatusRequest) Validate() error { return validateSimpleRequest(r.Op, "status", r.RequestID) }
+func (r StatusRequest) Validate() error {
+	if err := validateFeedbackVersion(r.ProtocolVersion); err != nil {
+		return err
+	}
+	return validateSimpleRequest(r.Op, "status", r.RequestID)
+}
 
 // Validate validates an attach request.
-func (r AttachRequest) Validate() error { return validateSimpleRequest(r.Op, "attach", r.RequestID) }
+func (r AttachRequest) Validate() error {
+	if err := validateFeedbackVersion(r.ProtocolVersion); err != nil {
+		return err
+	}
+	return validateSimpleRequest(r.Op, "attach", r.RequestID)
+}
+
+func validateFeedbackVersion(version int) error {
+	if version != 0 && version != FeedbackProtocolVersion {
+		return fmt.Errorf("unsupported feedback protocol version %d", version)
+	}
+	return nil
+}
 
 // Validate validates a cancel request.
 func (r CancelRequest) Validate() error {
@@ -479,6 +511,12 @@ func (e ResultEvent) Validate() error {
 	}
 	if e.ExitCode != nil && e.Signal != nil {
 		return errors.New("result cannot contain both exit code and signal")
+	}
+	if e.Decision != "" || e.Feedback != nil {
+		if e.State != "denied" || e.Decision != "request_changes" || e.Feedback == nil || e.ExitCode != nil || e.Signal != nil {
+			return errors.New("invalid request-changes result")
+		}
+		return e.Feedback.Validate()
 	}
 	return nil
 }

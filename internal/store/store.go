@@ -68,14 +68,17 @@ const (
 	ResultSignal        ResultKind = "signal"
 	ResultLaunchFailure ResultKind = "launch_failure"
 	ResultWrapper       ResultKind = "wrapper"
+	ResultDecision      ResultKind = "decision"
 )
 
 // Result is the durable result payload. ExitCode and Signal are pointers so an
 // absent value remains distinguishable from a command exit code or signal of 0.
 type Result struct {
-	Kind     ResultKind `json:"kind"`
-	ExitCode *int       `json:"exit_code,omitempty"`
-	Signal   *int       `json:"signal,omitempty"`
+	Kind     ResultKind            `json:"kind"`
+	ExitCode *int                  `json:"exit_code,omitempty"`
+	Signal   *int                  `json:"signal,omitempty"`
+	Decision string                `json:"decision,omitempty"`
+	Feedback *proto.ReviewFeedback `json:"feedback,omitempty"`
 }
 
 // Job is the complete durable row. Nil payload fields indicate a compacted
@@ -440,8 +443,37 @@ type AutoStartAuthorization struct {
 // and stores the winning tuple with the terminal denial or dispatch state.
 // The broker checks the worker's decision and frozen evidence before calling.
 func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, requestID string, decision proto.Decision, now time.Time) (bool, error) {
+	return store.commitNamedDecision(ctx, uid, requestID, decision, now, nil)
+}
+
+// CommitRequestChanges atomically denies execution and retains feedback in the
+// existing result JSON. Named/fleet routes use the same authenticated tuple CAS.
+func (store *Store) CommitRequestChanges(ctx context.Context, uid uint32, requestID string, decision proto.Decision, feedback *proto.ReviewFeedback, now time.Time) (bool, error) {
+	result := Result{Kind: ResultDecision, Decision: "request_changes", Feedback: feedback}
+	if decision.Action != "request_changes" || now.IsZero() {
+		return false, nil
+	}
+	if err := validateResult(result); err != nil {
+		return false, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return false, err
+	}
+	if decision.ChannelName != "" {
+		return store.commitNamedDecision(ctx, uid, requestID, decision, now, encoded)
+	}
+	updated, err := store.db.ExecContext(ctx, `UPDATE jobs SET state = ?, result_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ?`, StateDenied, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman)
+	if err != nil {
+		return false, err
+	}
+	n, err := updated.RowsAffected()
+	return n == 1, err
+}
+
+func (store *Store) commitNamedDecision(ctx context.Context, uid uint32, requestID string, decision proto.Decision, now time.Time, resultJSON []byte) (bool, error) {
 	if requestID == "" || !validDigest(decision.Digest) || decision.ChannelName == "" || decision.ChatID == 0 ||
-		decision.OperatorUserID <= 0 || decision.MessageID <= 0 || (decision.Action != "approve" && decision.Action != "deny") || now.IsZero() {
+		decision.OperatorUserID <= 0 || decision.MessageID <= 0 || (decision.Action != "approve" && decision.Action != "deny" && !(decision.Action == "request_changes" && resultJSON != nil)) || now.IsZero() {
 		return false, nil
 	}
 	tx, err := store.db.BeginTx(ctx, nil)
@@ -486,7 +518,7 @@ func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, request
 		return false, err
 	}
 	for key, value := range map[string]any{
-		"kind": "human", "decision": map[string]string{"approve": "approved", "deny": "denied"}[decision.Action],
+		"kind": "human", "decision": map[string]string{"approve": "approved", "deny": "denied", "request_changes": "request_changes"}[decision.Action],
 		"deciding_user_id": decision.OperatorUserID, "deciding_chat_id": decision.ChatID,
 		"deciding_message_id": decision.MessageID, "decision_time_unix_ms": decision.TimeUnixMS,
 	} {
@@ -501,10 +533,10 @@ func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, request
 		return false, err
 	}
 	state := StateStarting
-	if decision.Action == "deny" {
+	if decision.Action == "deny" || decision.Action == "request_changes" {
 		state = StateDenied
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, approval_json = ?, result_json = COALESCE(?, result_json), updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, resultJSON, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
 	if err != nil {
 		return false, err
 	}
@@ -1273,6 +1305,8 @@ func validateResult(result Result) error {
 		}
 	case ResultLaunchFailure, ResultWrapper:
 		return nil
+	case ResultDecision:
+		return (proto.ResultEvent{Op: "result", State: "denied", Decision: result.Decision, Feedback: result.Feedback, ExitCode: result.ExitCode, Signal: result.Signal}).Validate()
 	default:
 		return fmt.Errorf("invalid result kind %q", result.Kind)
 	}

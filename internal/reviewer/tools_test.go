@@ -325,7 +325,11 @@ func TestDefinitionsIncludeScopeAndNoOptInTools(t *testing.T) {
 		}
 		if properties, ok := schema["properties"].(map[string]any); ok {
 			required, ok := schema["required"].([]any)
-			if !ok || len(required) != len(properties) {
+			requiredCount := len(properties)
+			if def.Name == "submit_review" && properties["suggestions"] != nil {
+				requiredCount-- // Suggestions are explicitly optional advice.
+			}
+			if !ok || len(required) != requiredCount {
 				t.Fatalf("%s schema omits structurally required arguments: %+v", def.Name, schema)
 			}
 			for _, item := range required {

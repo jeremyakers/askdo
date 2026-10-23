@@ -32,7 +32,7 @@ func TestModelImmediateReviewNoHostReadsRequiresHumanApproval(t *testing.T) {
 		result <- client.Run(context.Background(), []string{"--detach", "--reason", "no reads", "--", "/usr/bin/id"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
 	}()
 	card := awaitTelegramCard(t, fake)
-	if len(card.Buttons) != 3 || len(executor.Snapshot()) != 0 {
+	if card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" || len(executor.Snapshot()) != 0 {
 		t.Fatalf("approval gate card=%+v executions=%d", card, len(executor.Snapshot()))
 	}
 	var review proto.ReviewComplete

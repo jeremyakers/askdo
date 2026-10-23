@@ -1,6 +1,7 @@
 package reviewer
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,8 @@ const (
 	defaultResourceCalibration = `; never raise the security rating for ordinary resource costs alone.`
 
 	reviewerDuties = `In submit_review, explain likely effects, the reasons for your rating, and uncertainties that affect your assessment. If inspection fails or access is denied or withheld, continue with the available information and mention the limitation only if it matters to your assessment. Name the exact denied path and what was attempted when relevant. If a child path was inspected but its parent, mount, or other provenance was not, distinguish that observed child evidence from the unverified parent or mount boundary; do not imply that all inspection failed.
+
+In suggestions, prioritize the most important uncertainties or warnings and suggest concrete evidence or request changes that would resolve them. Each suggestion names the issue, the action, and the actor: submitter for changes the requesting agent can make, administrator for inspection scope, configuration, or other changes it cannot authorize. Suggestions are advice only, not authorization; omit them or use an empty array when none are useful.
 
 When captured_stdin is present, read its path using read_path with base "bundle" (paginate if needed); if not fully read, say so in missing_context rather than claiming to have reviewed its contents.
 
@@ -64,7 +67,7 @@ func SystemInstructions(policy *proto.RiskPolicy) string {
 // structural validation, not the removed file-importance flag. Trusted code wraps the
 // validated report into proto.ReviewComplete for the private pipe; the
 // review_complete.report wire nesting is unchanged.
-const EmbeddedReportSchema = `{"type":"object","additionalProperties":false,"required":["risk","summary","effects","warnings","missing_context","reversibility","intent_match"],"properties":{"risk":{"type":"string","enum":["1","2","3","4","5","unknown"]},"summary":{"type":"string","maxLength":2048},"effects":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":512}},"warnings":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["message","evidence"],"properties":{"message":{"type":"string","maxLength":512},"evidence":{"type":"string","maxLength":512}}}},"missing_context":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":512}},"reversibility":{"type":"string","maxLength":1024},"intent_match":{"type":"string","enum":["consistent","inconsistent","unverified"]}}}`
+const EmbeddedReportSchema = `{"type":"object","additionalProperties":false,"required":["risk","summary","effects","warnings","missing_context","reversibility","intent_match"],"properties":{"risk":{"type":"string","enum":["1","2","3","4","5","unknown"]},"summary":{"type":"string","maxLength":2048},"effects":{"type":"array","maxItems":32,"items":{"type":"string","maxLength":512}},"warnings":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"required":["message","evidence"],"properties":{"message":{"type":"string","maxLength":512},"evidence":{"type":"string","maxLength":512}}}},"missing_context":{"type":"array","maxItems":16,"items":{"type":"string","maxLength":512}},"suggestions":{"type":"array","maxItems":16,"items":{"type":"object","additionalProperties":false,"required":["issue","action","actor"],"properties":{"issue":{"type":"string","maxLength":512},"action":{"type":"string","maxLength":512},"actor":{"type":"string","enum":["submitter","administrator"]}}}},"reversibility":{"type":"string","maxLength":1024},"intent_match":{"type":"string","enum":["consistent","inconsistent","unverified"]}}}`
 
 var ErrMalformedReview = errors.New("malformed submit_review arguments")
 
@@ -102,6 +105,19 @@ func ValidateReportArgs(data []byte) (proto.ReviewReport, error) {
 		}
 		if _, ok := warningFields["evidence"]; !ok {
 			return proto.ReviewReport{}, fmt.Errorf("%w: warning evidence is required", ErrMalformedReview)
+		}
+	}
+	if raw, present := fields["suggestions"]; present {
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil || items == nil {
+			return proto.ReviewReport{}, fmt.Errorf("%w: invalid suggestions", ErrMalformedReview)
+		}
+		for _, item := range items {
+			for _, required := range []string{"issue", "action", "actor"} {
+				if value, ok := item[required]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					return proto.ReviewReport{}, fmt.Errorf("%w: suggestion %s is required", ErrMalformedReview, required)
+				}
+			}
 		}
 	}
 	probe := proto.ReviewComplete{Type: "review_complete", Report: report, ModelHistory: []proto.ModelHistoryEntry{}}

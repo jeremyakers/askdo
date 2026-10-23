@@ -247,7 +247,7 @@ func (f *ticketWireFixture) receipt(t *testing.T, host, bearer string, sub fleet
 }
 
 func TestTLSConcurrentCollidingJobsAliasesAndFirstWinner(t *testing.T) {
-	for _, first := range []string{telegram.ActionApprove, telegram.ActionDeny} {
+	for _, first := range []string{telegram.ActionApprove, telegram.ActionDeny, "r"} {
 		t.Run(first, func(t *testing.T) {
 			// Given two hosts with colliding local job IDs and aliased actual bot tokens.
 			f := wireFixture(t, 0)
@@ -297,6 +297,9 @@ func TestTLSConcurrentCollidingJobsAliasesAndFirstWinner(t *testing.T) {
 			want := fleetproto.Approve
 			if first == telegram.ActionDeny {
 				want = fleetproto.Deny
+			}
+			if first == "r" {
+				want = fleetproto.Action("request_changes")
 			}
 			if event.Decision.Action != want || event.Decision.OperatorID != 5 {
 				t.Fatal(event.Decision)

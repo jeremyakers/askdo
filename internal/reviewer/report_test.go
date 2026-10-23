@@ -22,6 +22,40 @@ func TestReviewSecurityRiskScores(t *testing.T) {
 
 const validReview = `{"risk":"4","summary":"Will change state.","effects":["Changes a file."],"warnings":[{"message":"May fail.","evidence":"f1:1"}],"missing_context":[],"reversibility":"No verified rollback.","intent_match":"unverified"}`
 
+func TestReviewSuggestions_whenOptionalOrInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name, suggestions string
+		valid             bool
+	}{
+		{"absent", "", true},
+		{"empty", `[]`, true},
+		{"null array", `null`, false},
+		{"submitter", `[{"issue":"Unknown backup","action":"Supply backup evidence","actor":"submitter"}]`, true},
+		{"administrator", `[{"issue":"Inspection denied","action":"Review inspection scope","actor":"administrator"}]`, true},
+		{"bad actor", `[{"issue":"Unknown backup","action":"Supply evidence","actor":"root"}]`, false},
+		{"missing issue", `[{"action":"Supply evidence","actor":"submitter"}]`, false},
+		{"missing action", `[{"issue":"Unknown backup","actor":"submitter"}]`, false},
+		{"null issue", `[{"issue":null,"action":"Inspect","actor":"submitter"}]`, false},
+		{"long issue", `[{"issue":"` + strings.Repeat("x", 513) + `","action":"Inspect","actor":"submitter"}]`, false},
+		{"long action", `[{"issue":"Unknown","action":"` + strings.Repeat("x", 513) + `","actor":"submitter"}]`, false},
+		{"too many", `[` + strings.TrimSuffix(strings.Repeat(`{"issue":"Unknown","action":"Inspect","actor":"submitter"},`, 17), ",") + `]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given a legacy report with an optional suggestion extension.
+			input := validReview
+			if tc.suggestions != "" {
+				input = strings.TrimSuffix(input, "}") + `,"suggestions":` + tc.suggestions + `}`
+			}
+			// When the submit_review boundary parses the report.
+			report, err := ValidateReportArgs([]byte(input))
+			// Then only bounded suggestions with a known actor are accepted.
+			if (err == nil) != tc.valid {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+		})
+	}
+}
+
 func TestValidateReportArgs(t *testing.T) {
 	if report, err := ValidateReportArgs([]byte(validReview)); err != nil || report.Risk != "4" {
 		t.Fatalf("report=%#v err=%v", report, err)

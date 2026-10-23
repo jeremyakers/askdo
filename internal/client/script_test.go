@@ -93,7 +93,7 @@ func TestScriptSubmitsOnlySelectedSnapshot(t *testing.T) {
 					return
 				}
 				want := proto.SubmitRequest{
-					Op: "submit", ProtocolVersion: proto.CanonicalProtocolVersion,
+					Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion,
 					RequestID: testCanonicalID, Reason: "script test", ForceReview: true,
 					Mode: "bundle", CWD: invocation, Entry: tc.basename,
 					Args:                []string{"one argument", "--help"},

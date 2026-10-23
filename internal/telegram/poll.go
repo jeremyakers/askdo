@@ -40,7 +40,7 @@ var ErrExpired = errors.New("telegram: approval expired")
 // re-checks digest, operator/message IDs, pending state and expiry under
 // its dispatch lock before any dispatch commit.
 type Decision struct {
-	// Action is "approve" or "deny" (proto.Decision action enum).
+	// Action is "approve", "deny", or "request_changes" (proto.Decision enum).
 	Action string
 	// OperatorUserID is the authenticated numeric Telegram user ID.
 	OperatorUserID int64
@@ -161,7 +161,7 @@ func NewPollerWithSource(client *Client, cfg PollerConfig, source UpdateSource) 
 	return p, nil
 }
 
-// Wait polls until one validated approve/deny decision, expiry, a Telegram
+// Wait polls until one validated terminal decision, expiry, a Telegram
 // API/transport failure, or context cancellation. Telegram unavailability
 // is returned as an error — it never implies approval (fail closed).
 func (p *Poller) Wait(ctx context.Context) (Decision, error) {
@@ -198,7 +198,7 @@ func (p *Poller) Wait(ctx context.Context) (Decision, error) {
 
 // processUpdate validates one update against the pending approval binding.
 // It returns a terminal Decision only for a validated, unexpired, first
-// approve/deny callback. Every other callback is acked-and-ignored with a
+// approve/deny/request_changes callback. Every other callback is acked-and-ignored with a
 // brief rejection text; non-callback updates are ignored (there is no
 // callback to acknowledge).
 func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (Decision, bool, error) {
@@ -269,6 +269,9 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 	case ActionDeny:
 		decision.Action = "deny"
 		p.ack(ctx, cb.ID, ackDeny)
+	case ActionRequestChanges:
+		decision.Action = "request_changes"
+		p.ack(ctx, cb.ID, "Changes requested; command will not run.")
 	}
 	// Remove the buttons as best-effort cleanup (design §9 step 5).
 	for _, t := range p.cfg.Targets {
@@ -286,14 +289,14 @@ func (p *Poller) ack(ctx context.Context, callbackQueryID, text string) {
 }
 
 // parseCallbackData splits "<action>:<nonce>" callback data. Only the
-// fixed one-character actions a/d/v with a 32-hex nonce are well-formed;
+// fixed one-character actions a/d/v/r with a 32-hex nonce are well-formed;
 // anything else (including model-crafted text) cannot become a decision.
 func parseCallbackData(data string) (action, nonce string, ok bool) {
 	if len(data) != 2+32 || data[1] != ':' {
 		return "", "", false
 	}
 	switch data[0] {
-	case ActionApprove[0], ActionDeny[0], ActionDetails[0]:
+	case ActionApprove[0], ActionDeny[0], ActionDetails[0], ActionRequestChanges[0]:
 	default:
 		return "", "", false
 	}
