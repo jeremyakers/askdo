@@ -31,21 +31,31 @@ func fromStat(st unix.Stat_t) Metadata {
 // StatPath inspects a final symlink itself. Resolve is an independent policy
 // check of the target; dangling links cannot resolve successfully.
 func (p *Policy) StatPath(path string, resolve bool) (Metadata, Status) {
+	m, status, _ := p.StatPathReason(path, resolve)
+	return m, status
+}
+
+// StatPathReason is StatPath with the closed Reason of a denied status, taken
+// from the same rule decision or open attempt that produced the status.
+func (p *Policy) StatPathReason(path string, resolve bool) (Metadata, Status, Reason) {
 	root, rel, ok := p.selectRoot(path)
 	if !ok {
-		return Metadata{}, StatusInspectionDenied
+		d := p.rule(path)
+		return Metadata{}, StatusInspectionDenied, d.reason
 	}
 	fd, err := p.open(root, rel, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return Metadata{}, resultForError(err).Status
+		r := resultForError(err)
+		return Metadata{}, r.Status, r.Reason
 	}
 	defer unix.Close(fd)
 	a, err := p.authorizeFD(fd, path)
 	if err != nil {
-		return Metadata{}, resultForError(err).Status
+		r := resultForError(err)
+		return Metadata{}, r.Status, r.Reason
 	}
 	if a.sensitive {
-		return Metadata{}, StatusWithheld
+		return Metadata{}, StatusWithheld, ""
 	}
 	m := fromStat(a.stat)
 	if m.Type == "symlink" {
@@ -53,31 +63,32 @@ func (p *Policy) StatPath(path string, resolve bool) (Metadata, Status) {
 		buf := make([]byte, 4097)
 		n, err := unix.Readlinkat(fd, "", buf)
 		if err != nil || n > 4096 {
-			return Metadata{}, StatusUnresolved
+			return Metadata{}, StatusUnresolved, ""
 		}
 		m.Target = string(buf[:n])
 		if strings.IndexByte(m.Target, 0) >= 0 {
-			return Metadata{}, StatusInspectionDenied
+			return Metadata{}, StatusInspectionDenied, ""
 		}
 		targetPath := m.Target
 		if !filepath.IsAbs(targetPath) {
 			targetPath = filepath.Join(filepath.Dir(path), targetPath)
 		}
 		targetPath = filepath.Clean(targetPath)
-		if !p.rule(targetPath).allowed {
-			return Metadata{}, StatusInspectionDenied
+		if d := p.rule(targetPath); !d.allowed {
+			return Metadata{}, StatusInspectionDenied, d.reason
 		}
 		if p.MatchesSensitive(targetPath) {
-			return Metadata{}, StatusWithheld
+			return Metadata{}, StatusWithheld, ""
 		}
 		if resolve {
 			resolvedFD, resolved, err := p.authorizedOpen(path, 0)
 			if err != nil {
-				return Metadata{}, resultForError(err).Status
+				r := resultForError(err)
+				return Metadata{}, r.Status, r.Reason
 			}
 			unix.Close(resolvedFD)
 			if resolved.sensitive {
-				return Metadata{}, StatusWithheld
+				return Metadata{}, StatusWithheld, ""
 			}
 			m.ResolvedPath = resolved.resolved
 		}
@@ -86,9 +97,9 @@ func (p *Policy) StatPath(path string, resolve bool) (Metadata, Status) {
 	}
 	var after unix.Stat_t
 	if err := unix.Fstat(fd, &after); err != nil || rangeChanged(a.stat, after) || p.revalidateLink(path, a) != nil {
-		return Metadata{}, StatusChangedDuringCapture
+		return Metadata{}, StatusChangedDuringCapture, ""
 	}
-	return m, StatusOK
+	return m, StatusOK, ""
 }
 
 func (p *Policy) revalidateLink(path string, before authorization) error {
@@ -119,11 +130,24 @@ type MountDetails struct {
 
 // MountPath reports just the active mount for one authorized object.
 func (p *Policy) MountPath(path string) (MountDetails, Status) {
+	m, status, _ := p.MountPathReason(path)
+	return m, status
+}
+
+// MountPathReason is MountPath with the closed Reason of a denied status,
+// taken from the same open attempt that produced the status.
+func (p *Policy) MountPathReason(path string) (MountDetails, Status, Reason) {
 	fd, a, err := p.authorizedOpen(path, 0)
 	if err != nil {
-		return MountDetails{}, resultForError(err).Status
+		r := resultForError(err)
+		return MountDetails{}, r.Status, r.Reason
 	}
 	defer unix.Close(fd)
+	m, status := p.mountDetails(fd, path, a)
+	return m, status, ""
+}
+
+func (p *Policy) mountDetails(fd int, path string, a authorization) (MountDetails, Status) {
 	if a.sensitive {
 		return MountDetails{}, StatusWithheld
 	}

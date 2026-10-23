@@ -105,7 +105,7 @@ func (p *Policy) initializeResolver() error {
 		return err
 	}
 	if flags&unix.O_PATH == 0 || cloexec&unix.FD_CLOEXEC == 0 {
-		return denied("legacy descriptor flags unavailable")
+		return denied("", "legacy descriptor flags unavailable")
 	}
 	var anchor, opened unix.Stat_t
 	if err := unix.Fstat(fd, &anchor); err != nil {
@@ -115,7 +115,7 @@ func (p *Policy) initializeResolver() error {
 		return err
 	}
 	if anchor.Dev != opened.Dev || anchor.Ino != opened.Ino || opened.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return denied("legacy root anchor changed")
+		return denied("", "legacy root anchor changed")
 	}
 	return nil
 }
@@ -161,7 +161,7 @@ func (p *Policy) legacyOpen(rel string, flags int, mode uint32) (int, error) {
 	// Only metadata descriptors cross this boundary. Readable acquisition is
 	// exclusively the post-authorization procfd upgrade in authorizedOpen.
 	if flags&unix.O_PATH == 0 || mode != 0 {
-		return -1, denied("legacy lookup requires O_PATH")
+		return -1, denied("", "legacy lookup requires O_PATH")
 	}
 	rel = strings.TrimPrefix(rel, "/")
 	if rel == "" {

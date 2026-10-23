@@ -146,7 +146,7 @@ func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
 		}
 		blocks = append(blocks, fmt.Sprintf("- <code>%s</code>: %s\n", esc(name), status))
 	}
-	blocks = append(blocks, fmt.Sprintf("<b>Host:</b> <code>%s</code>\n", esc(in.Host)))
+	blocks = append(blocks, fmt.Sprintf("<b>Host:</b> <code>%s / %s</code>\n", esc(in.Host), esc(in.JobID)))
 	if env := stripControls(in.Container); env != "" {
 		blocks = append(blocks, fmt.Sprintf("<b>Environment:</b> %s\n", esc(env)))
 	}
@@ -433,7 +433,7 @@ func summaryBlocks(in CardInput) []string {
 			add("\n")
 		}
 	}
-	add("<b>Host:</b> <code>%s</code>\n", esc(in.Host))
+	add("<b>Host:</b> <code>%s / %s</code>\n", esc(in.Host), esc(in.JobID))
 	if env := stripControls(in.Container); env != "" {
 		add("<b>Environment:</b> %s\n", esc(env))
 	}

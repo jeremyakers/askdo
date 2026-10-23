@@ -362,8 +362,9 @@ of the trust boundary — enforces:
   argument bounds, and result shape (`internal/proto/worker.go`). Non-`ok`
   statuses (`withheld`, `binary`, `inspection_denied`, `not_found`,
   `changed_during_capture`, `limit_exceeded`, `unresolved`, `unknown`) carry
-  no payload; legacy tools return only status, while the four new operations
-  can also return a closed `reason_code` (see [wire reference](protocol-worker.md#inspect_result-bw)).
+   no payload. Direct path tools may attach a closed `reason_code` to a policy
+   denial, while metadata tools support the wider closed reason/status pairs
+   (see [wire reference](protocol-worker.md#inspect_result-bw)).
   Denial is an ordinary tool result, not proof that the guessed path exists;
   the model can still submit its report.
 - **Inspection policy:** descriptor-relative, read-only, openat2-based access
@@ -375,8 +376,13 @@ of the trust boundary — enforces:
   protected identities, multi-hardlink regular file refusal, both path
   spellings and reachable same-object mount aliases — and the object and path
   are revalidated after each bounded read. `read_roots` may exclude a host
-  file the operation will execute: the model then receives a denied tool
-  result and can say so in its report.
+   file the operation will execute: the model then receives a denied tool
+   result and can say so in its report.
+   `outside_scope` identifies a configured-scope refusal, not a universal
+   inability to inspect; `protected_path`, `unverified_identity` and
+   `unsupported_object` distinguish other policy/object boundaries when the
+   same decision establishes them. Unknown causes are not guessed from errno
+   text or a later check, and reasons never include private rule/path spellings.
 - **Sensitive name masks:** a permitted host path or staged bundle path whose
   requested or resolved name matches `inspection.sensitive_masks` (or a
   client `sensitive_inclusions` opt-in) is answered `withheld` without
@@ -385,8 +391,8 @@ of the trust boundary — enforces:
   filename, or a secret value placed in argv, the environment, or `--reason`,
   can still leak. The broker records every reference it withheld (host
   spellings and masked bundle paths) as a factual access-policy signal — not
-  a completeness assessment — and the reviewed Telegram card discloses the
-  count and up to 16 references in a code-constructed warning.
+   a completeness assessment — and the reviewed Telegram card discloses the
+   count and up to 16 references in a code-constructed warning.
 - **Freeze-time validation** (`internal/broker/manifest.go`): the report and
   model history are re-validated against the wire schema; the caller's
   working directory identity is re-verified; every staged bundle file —
@@ -401,7 +407,15 @@ of the trust boundary — enforces:
   received bounded bytes or observational metadata for paths it chose — but a
   captured-stdin script is
   the one broker-captured artifact with broker-verified read coverage (see
-  *Completeness honesty model*).
+   *Completeness honesty model*).
+
+For a generated self-contained Bash file, the source CLI's `--script PATH`
+submits only that file through existing bundle capture. The staged copy is
+available to the reviewer even if its original `/tmp` or application path is
+outside host read roots. Ordinary argv does not gain implicit file capture or
+host-inspection access. Related live configuration remains subject to the
+administrator's roots and masks; capture does not make a model's inspection or
+assessment complete by itself.
 
 ### Inspection budgets and audit evidence
 
