@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -217,61 +218,140 @@ func journalOutcomes(t *testing.T, path string) map[string][3]string {
 	return outcomes
 }
 
-func TestReviewLogConsumedDecisionSurvivesEveryTerminalMutation(t *testing.T) {
+// terminalMutation is one store mutation that ends jobs awaiting a human, with
+// the state it produces and the decision the journal synthesizes when no
+// operator decision is on record.
+type terminalMutation struct {
+	name     string
+	state    State
+	fallback string
+	apply    func(t *testing.T, s *Store, ids ...string)
+}
+
+func terminalMutations() []terminalMutation {
 	ctx := context.Background()
-	transitionAll := func(to State) func(*testing.T, *Store) {
-		return func(t *testing.T, s *Store) {
-			for _, id := range []string{"decided", "undecided"} {
+	each := func(to State) func(*testing.T, *Store, ...string) {
+		return func(t *testing.T, s *Store, ids ...string) {
+			for _, id := range ids {
 				if !mustTransition(t, s, id, StateAwaitingHuman, to) {
 					t.Fatalf("transition %s to %s", id, to)
 				}
 			}
 		}
 	}
-	for _, tc := range []struct {
-		name          string
-		state         State
-		undecided     string
-		terminalSweep func(*testing.T, *Store)
-	}{
-		{"expiry sweep", StateExpired, "expired", func(t *testing.T, s *Store) {
-			if n, err := s.SweepExpired(ctx, time.Now()); err != nil || n != 2 {
+	return []terminalMutation{
+		{"expiry sweep", StateExpired, "expired", func(t *testing.T, s *Store, ids ...string) {
+			if n, err := s.SweepExpired(ctx, time.Now()); err != nil || n != len(ids) {
 				t.Fatalf("sweep %d %v", n, err)
 			}
 		}},
-		{"restart sweep", StateExpired, "expired", func(t *testing.T, s *Store) {
-			if n, err := s.MarkRestartAmbiguous(ctx); err != nil || n != 2 {
+		{"restart sweep", StateExpired, "expired", func(t *testing.T, s *Store, ids ...string) {
+			if n, err := s.MarkRestartAmbiguous(ctx); err != nil || n != len(ids) {
 				t.Fatalf("restart %d %v", n, err)
 			}
 		}},
-		{"deadline expiry", StateExpired, "expired", transitionAll(StateExpired)},
-		{"cancellation", StateCancelled, "cancelled", transitionAll(StateCancelled)},
-		{"dispatch failure", StateFailed, "none", transitionAll(StateFailed)},
-	} {
+		{"deadline expiry", StateExpired, "expired", each(StateExpired)},
+		{"cancellation", StateCancelled, "cancelled", each(StateCancelled)},
+		{"dispatch failure", StateFailed, "none", each(StateFailed)},
+	}
+}
+
+// awaitingHumanJobs creates jobs waiting for a human, with a lapsed client
+// deadline and only the notification binding as their approval record.
+func awaitingHumanJobs(t *testing.T, s *Store, ids ...string) {
+	t.Helper()
+	past := time.Now().Add(-time.Hour)
+	for _, id := range ids {
+		createTestJob(t, s, id, &past)
+		mustTransition(t, s, id, StateQueued, StateAwaitingHuman)
+		if err := s.RecordApproval(context.Background(), testUID, id, []byte(`{"card_id":1,"digest":"d"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestReviewLogConsumedDecisionSurvivesEveryTerminalMutation(t *testing.T) {
+	for _, tc := range terminalMutations() {
 		for action, want := range map[string]string{"approve": "approved", "deny": "denied"} {
 			t.Run(tc.name+"/"+action, func(t *testing.T) {
 				// Given two jobs awaiting a human, one of which had a decision consumed.
 				s := openTestStore(t)
 				path := filepath.Join(t.TempDir(), "reviews.jsonl")
 				s.SetReviewLogPath(path)
-				past := time.Now().Add(-time.Hour)
-				for _, id := range []string{"decided", "undecided"} {
-					createTestJob(t, s, id, &past)
-					mustTransition(t, s, id, StateQueued, StateAwaitingHuman)
-					if err := s.RecordApproval(ctx, testUID, id, []byte(`{"card_id":1,"digest":"d"}`)); err != nil {
-						t.Fatal(err)
-					}
-				}
+				awaitingHumanJobs(t, s, "decided", "undecided")
 				s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: action})
 				// When a terminal mutation commits for both.
-				tc.terminalSweep(t, s)
+				tc.apply(t, s, "decided", "undecided")
 				// Then only the decided job keeps the human decision.
 				got := journalOutcomes(t, path)
-				if got["decided"] != [3]string{string(tc.state), "human", want} || got["undecided"] != [3]string{string(tc.state), "none", tc.undecided} {
+				if got["decided"] != [3]string{string(tc.state), "human", want} || got["undecided"] != [3]string{string(tc.state), "none", tc.fallback} {
 					t.Fatalf("outcomes=%v", got)
 				}
 			})
 		}
+	}
+}
+
+func TestReviewLogDecisionRegisteredAfterTerminalMutationIsNotStranded(t *testing.T) {
+	for _, tc := range terminalMutations() {
+		for _, action := range []string{"approve", "deny"} {
+			t.Run(tc.name+"/"+action, func(t *testing.T) {
+				// Given a job a terminal mutation already ended and journaled, without a decision.
+				s := openTestStore(t)
+				path := filepath.Join(t.TempDir(), "reviews.jsonl")
+				s.SetReviewLogPath(path)
+				awaitingHumanJobs(t, s, "late")
+				tc.apply(t, s, "late")
+				// When the callback consumed beforehand is registered afterwards.
+				s.NoteConsumedDecision(testUID, "late", proto.Decision{Action: action})
+				// Then the outcome keeps saying no one decided, and no note is left behind.
+				got := journalOutcomes(t, path)
+				if got["late"] != [3]string{string(tc.state), "none", tc.fallback} || len(s.consumed) != 0 {
+					t.Fatalf("outcomes=%v retained=%v", got, s.consumed)
+				}
+			})
+		}
+	}
+}
+
+func TestReviewLogDecisionRegistrationExcludesTerminalMutations(t *testing.T) {
+	// Given a job awaiting a human whose expiry sweep starts while its consumed decision is being registered.
+	s := openTestStore(t)
+	path := filepath.Join(t.TempDir(), "reviews.jsonl")
+	s.SetReviewLogPath(path)
+	awaitingHumanJobs(t, s, "decided")
+	type sweep struct {
+		count int
+		err   error
+	}
+	swept := make(chan sweep, 1)
+	s.beforeConsumedNote = func() {
+		waits := s.db.Stats().WaitCount
+		go func() {
+			count, err := s.SweepExpired(context.Background(), time.Now())
+			swept <- sweep{count, err}
+		}()
+		// The sweep has to queue behind the registration. If it can finish first, its
+		// snapshot misses the note that is stored after it.
+		for s.db.Stats().WaitCount == waits {
+			select {
+			case result := <-swept:
+				t.Errorf("sweep finished inside the registration step: %+v", result)
+				swept <- result
+				return
+			default:
+				runtime.Gosched()
+			}
+		}
+	}
+	// When the decision is registered.
+	s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
+	// Then the sweep snapshots after the note, journals it, and nothing is left behind.
+	if result := <-swept; result.err != nil || result.count != 1 {
+		t.Fatalf("sweep %+v", result)
+	}
+	if got := journalOutcomes(t, path); got["decided"] != [3]string{"expired", "human", "approved"} || len(s.consumed) != 0 {
+		t.Fatalf("outcomes=%v retained=%v", got, s.consumed)
 	}
 }
 
@@ -290,12 +370,38 @@ func TestReviewLogConsumedDecisionIsForgottenOnceJournaled(t *testing.T) {
 	}
 }
 
-func TestReviewLogConsumedDecisionIsNotTrackedWithoutJournal(t *testing.T) {
-	// Given a store with journaling disabled.
+func TestReviewLogConsumedDecisionNeverWaitsForStoreWithoutJournal(t *testing.T) {
+	// Given a store with journaling disabled whose only connection is busy.
 	s := openTestStore(t)
+	busy, err := s.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
 	// When a decision is consumed.
-	s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
-	// Then nothing accumulates for a journal that will never be written.
+	noted := make(chan struct{})
+	go func() {
+		defer close(noted)
+		s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
+	}()
+	// Then, with no journal to feed, it neither waits for the store nor tracks anything.
+	select {
+	case <-noted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waited for the store with journaling disabled")
+	}
+	if len(s.consumed) != 0 {
+		t.Fatalf("retained %v", s.consumed)
+	}
+}
+
+func TestReviewLogConsumedDecisionForUnknownJobIsNotTracked(t *testing.T) {
+	// Given a journaling store that has no such job.
+	s := openTestStore(t)
+	s.SetReviewLogPath(filepath.Join(t.TempDir(), "reviews.jsonl"))
+	// When a decision is consumed for it.
+	s.NoteConsumedDecision(testUID, "unknown", proto.Decision{Action: "approve"})
+	// Then no note is kept for a job whose outcome can never be journaled.
 	if len(s.consumed) != 0 {
 		t.Fatalf("retained %v", s.consumed)
 	}

@@ -329,6 +329,24 @@ func awaitingApprovalJob(t *testing.T, h *brokerHarness, deadline *time.Time) (*
 	return job, ctx, &proto.Decision{Digest: digest, OperatorUserID: 1, MessageID: 1, Action: "approve", TimeUnixMS: time.Now().UnixMilli()}
 }
 
+// exitedWorkerSession is a reviewer worker that already exited successfully,
+// which is all pre-launch validation requires of it.
+func exitedWorkerSession(t *testing.T, ctx context.Context) WorkerSession {
+	t.Helper()
+	session, err := (protocolWorker{run: func(context.Context, net.Conn) error { return nil }}).Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
+// consumedNotes counts consumed decisions the store still holds for jobs whose
+// outcome was not journaled. The set is unexported, so a stranded note is
+// observed by reflection rather than by widening the store's API.
+func consumedNotes(s *store.Store) int {
+	return reflect.ValueOf(s).Elem().FieldByName("consumed").Len()
+}
+
 // lastOutcome returns the final record, which must be the job's only outcome.
 func lastOutcome(t *testing.T, h *brokerHarness) map[string]json.RawMessage {
 	t.Helper()
@@ -367,11 +385,7 @@ func TestReviewLogConsumedApprovalSurvivesTerminalRaces(t *testing.T) {
 			// Given a valid approve callback, consumed while pre-launch validation is blocked.
 			h := newBrokerHarness(t, nil, nil)
 			job, ctx, decision := awaitingApprovalJob(t, h, lapsed())
-			session, err := (protocolWorker{run: func(context.Context, net.Conn) error { return nil }}).Start(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			gate := &gatedWaitSession{WorkerSession: session, entered: make(chan struct{}), release: make(chan struct{})}
+			gate := &gatedWaitSession{WorkerSession: exitedWorkerSession(t, ctx), entered: make(chan struct{}), release: make(chan struct{})}
 			job.worker = gate
 			handled := make(chan struct{})
 			go func() { defer close(handled); job.consumeDecision(ctx, decision) }()
@@ -434,5 +448,83 @@ func TestReviewLogLapsedWrongUserReplayDoesNotInventApproval(t *testing.T) {
 	outcome := lastOutcome(t, h)
 	if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"expired"` {
 		t.Fatalf("invented a decision: %s", mustJSON(t, outcome))
+	}
+}
+
+func TestReviewLogDecisionAfterTerminalWinnerStrandsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name, decision string
+		state          store.State
+		win            func(*testing.T, *brokerHarness, *jobRuntime, context.Context)
+	}{
+		{"deadline timer", "expired", store.StateExpired, func(t *testing.T, _ *brokerHarness, j *jobRuntime, ctx context.Context) {
+			if !j.checkDeadline(ctx) {
+				t.Fatal("deadline timer did not win")
+			}
+		}},
+		{"cancellation", "cancelled", store.StateCancelled, func(t *testing.T, _ *brokerHarness, j *jobRuntime, _ context.Context) {
+			if _, cancelled, err := j.cancel("client"); err != nil || !cancelled {
+				t.Fatalf("cancel %v %v", cancelled, err)
+			}
+		}},
+		// The sweep never touches the runtime, which still believes the job awaits a human.
+		{"expiry sweep", "expired", store.StateExpired, func(t *testing.T, h *brokerHarness, _ *jobRuntime, ctx context.Context) {
+			if n, err := h.daemon.store.SweepExpired(ctx, time.Now()); err != nil || n != 1 {
+				t.Fatalf("sweep %d %v", n, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given a job that a terminal winner already ended and journaled.
+			h := newBrokerHarness(t, nil, nil)
+			lapsed := time.Now().Add(-time.Hour)
+			job, ctx, decision := awaitingApprovalJob(t, h, &lapsed)
+			job.worker = exitedWorkerSession(t, ctx)
+			tc.win(t, h, job, ctx)
+			// When the approve callback arrives afterwards.
+			job.consumeDecision(ctx, decision)
+			// Then it neither runs, rewrites the outcome, nor leaves a note behind.
+			stored, err := h.daemon.store.GetJob(ctx, job.uid, job.req.RequestID)
+			if err != nil || stored.State != tc.state || len(h.executor.Snapshot()) != 0 {
+				t.Fatalf("state=%s executions=%d err=%v", stored.State, len(h.executor.Snapshot()), err)
+			}
+			outcome := lastOutcome(t, h)
+			if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"`+tc.decision+`"` {
+				t.Fatalf("fabricated an earlier approval: %s", mustJSON(t, outcome))
+			}
+			if n := consumedNotes(h.daemon.store); n != 0 {
+				t.Fatalf("%d stranded notes", n)
+			}
+		})
+	}
+}
+
+func TestReviewLogSweepBeforeDecisionRegistrationStrandsNothing(t *testing.T) {
+	// Given a validated approve callback that is not yet registered with the store, and a lapsed client deadline.
+	h := newBrokerHarness(t, nil, nil)
+	lapsed := time.Now().Add(-time.Hour)
+	job, ctx, decision := awaitingApprovalJob(t, h, &lapsed)
+	job.worker = exitedWorkerSession(t, ctx)
+	job.beforeDecisionNote = func() {
+		// When an expiry sweep, which never takes the job lock, commits in that window.
+		if job.pendingApproval.consumed {
+			t.Error("decision was consumed before the store could register it")
+		}
+		if n, err := h.daemon.store.SweepExpired(ctx, time.Now()); err != nil || n != 1 {
+			t.Errorf("sweep %d %v", n, err)
+		}
+	}
+	job.consumeDecision(ctx, decision)
+	// Then the row stays expired, nothing runs, no earlier approval is claimed, and no note is stranded.
+	stored, err := h.daemon.store.GetJob(ctx, job.uid, job.req.RequestID)
+	if err != nil || stored.State != store.StateExpired || len(h.executor.Snapshot()) != 0 {
+		t.Fatalf("state=%s executions=%d err=%v", stored.State, len(h.executor.Snapshot()), err)
+	}
+	outcome := lastOutcome(t, h)
+	if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"expired"` {
+		t.Fatalf("fabricated an earlier approval: %s", mustJSON(t, outcome))
+	}
+	if n := consumedNotes(h.daemon.store); n != 0 {
+		t.Fatalf("%d stranded notes", n)
 	}
 }

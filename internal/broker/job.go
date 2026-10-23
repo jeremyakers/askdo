@@ -95,7 +95,10 @@ type jobRuntime struct {
 	// consumeDecision/expireApproval, and never revived: a daemon restart
 	// drops it and MarkRestartAmbiguous expires the store row.
 	pendingApproval *approvalBinding
-	fleet           *fleetJob // owned by the root review/ticket lifecycle, never the worker
+	// Test-only interleaving seam: a validated decision, not yet registered
+	// with the store. Called under mu.
+	beforeDecisionNote func()
+	fleet              *fleetJob // owned by the root review/ticket lifecycle, never the worker
 	// riskPolicy is the administrator rubric snapshot of this AI review, read
 	// once before the worker starts and never replaced. Retries, fallback models
 	// and manifest rebuilds all use it; nil means the embedded default.
@@ -805,9 +808,16 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	// Consume exactly once, before any commit: a losing cancel/expiry race or
 	// a replayed decision can never authorize again. The store journals this
 	// decision with whichever terminal outcome commits next, including a
-	// deadline, cancellation or sweep that wins before dispatch.
-	pending.consumed = true
+	// deadline, cancellation or sweep that wins before dispatch. It is
+	// registered first, so nothing is consumed that the store had no chance to
+	// record: a sweep, which does not take mu, either commits before the
+	// registration (the job has then already ended and nothing is recorded) or
+	// snapshots the note.
+	if j.beforeDecisionNote != nil {
+		j.beforeDecisionNote()
+	}
 	j.daemon.store.NoteConsumedDecision(j.uid, j.req.RequestID, *decision)
+	pending.consumed = true
 	action := decision.Action
 	j.mu.Unlock()
 

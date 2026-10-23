@@ -51,12 +51,15 @@ Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
   tracking honestly; it does not invent an exit code. Older version-1 records may
   lack `result_kind`/`signal`. Outcome fields are captured atomically with the
   terminal state mutation before retention can compact the row, then appended
-  after commit. A human decision the broker consumed stays recorded as `human`
+  after commit. A human decision registered while the job is live stays recorded as `human`
   with `approved` (or `denied`) whichever terminal state the job reaches before
   dispatch commits: a pre-launch failure, a client deadline that lapses during
   pre-launch checks, cancellation, or an expiry sweep yields `failed`, `expired`
   or `cancelled` beside that decision. Approval did not imply execution, and no
-  dispatch/authorization checks are bypassed. This record of a consumed decision
+  dispatch/authorization checks are bypassed. Registration and terminal snapshots
+  serialize on the store's single connection. If a terminal mutation wins before
+  registration, the already-ended job keeps its no-decision outcome and no late
+  decision is retained. This record of a consumed decision
   is held in broker memory only until the outcome is appended, and is never
   written early to the approval record. If the broker dies after consuming a
   decision and before dispatch (or foreground handoff) commits, restart recovery

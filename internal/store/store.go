@@ -158,11 +158,14 @@ type Store struct {
 	db            *sql.DB
 	reviewLogPath string
 	// Audit-only operator decisions consumed but not yet journaled; see
-	// NoteConsumedDecision. consumedMu is a leaf lock, never held across I/O.
+	// NoteConsumedDecision. consumedMu is a leaf lock: taken after the store's
+	// connection, never before it, and never held across I/O.
 	consumedMu sync.Mutex
 	consumed   map[journalKey]string
-	// Test-only interleaving seam: after terminal commit, before journaling.
+	// Test-only interleaving seams: after terminal commit, before journaling;
+	// and inside NoteConsumedDecision, just before the note is stored.
 	beforeReviewLogAppend func()
+	beforeConsumedNote    func()
 }
 
 // Open opens path, configures SQLite durability, and performs the schema
@@ -187,6 +190,8 @@ func Open(path string) (*Store, error) {
 	}
 	// One process owns the broker lifecycle. A single connection also prevents
 	// self-contention while SQLite's busy timeout protects process handover.
+	// NoteConsumedDecision relies on it: holding the connection excludes every
+	// terminal mutation, whose transaction and journal snapshot need it too.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 

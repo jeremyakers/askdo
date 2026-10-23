@@ -22,13 +22,20 @@ type journalKey struct {
 }
 
 // NoteConsumedDecision records that the broker consumed a validated operator
-// decision for the job. Every terminal mutation that commits afterwards —
-// dispatch failure, deadline, cancellation, or an expiry or restart sweep —
-// then journals the human decision that occurred rather than inferring one from
-// the final state. It is audit-only: it never reaches approval_json or any
-// guard, authorizes nothing, and does nothing unless journaling is enabled. The
-// note is memory-only: it is dropped once the job's outcome is appended and does
-// not survive a restart.
+// decision for the job. A terminal mutation that commits afterwards — dispatch
+// failure, deadline, cancellation, or an expiry or restart sweep — then journals
+// the human decision that occurred rather than inferring one from the final
+// state. It is audit-only: it never reaches approval_json or any guard,
+// authorizes nothing, and does nothing unless journaling is enabled.
+//
+// The check that the job has not already ended and the note are made while
+// holding the store's only connection, which every terminal mutation also needs
+// for its transaction and snapshot. A mutation therefore either commits first —
+// the job is then terminal, nothing is stored, and no earlier approval is
+// claimed for an outcome that never saw one — or begins after the note is
+// stored and snapshots it. A note is never stranded behind a terminal outcome.
+// It is dropped when the job's outcome is appended and, being memory-only, does
+// not survive a restart. A check that cannot be answered stores nothing.
 func (store *Store) NoteConsumedDecision(uid uint32, requestID string, decision proto.Decision) {
 	var outcome string
 	switch decision.Action {
@@ -39,6 +46,26 @@ func (store *Store) NoteConsumedDecision(uid uint32, requestID string, decision 
 	}
 	if store.reviewLogPath == "" || outcome == "" {
 		return
+	}
+	// Not the job's lifecycle context: cancelling a job, as shutdown does, must
+	// not drop the decision it is cancelled with.
+	ctx := context.Background()
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		slog.Warn("review log decision note skipped", "request_id", requestID, "error", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	var state State
+	if err := conn.QueryRowContext(ctx, `SELECT state FROM jobs WHERE uid = ? AND request_id = ?`, uid, requestID).Scan(&state); err != nil {
+		slog.Warn("review log decision note skipped", "request_id", requestID, "error", err)
+		return
+	}
+	if state.IsTerminal() {
+		return
+	}
+	if store.beforeConsumedNote != nil {
+		store.beforeConsumedNote()
 	}
 	store.consumedMu.Lock()
 	defer store.consumedMu.Unlock()
