@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -395,6 +396,13 @@ func (j *jobRuntime) run(ctx context.Context) {
 		j.mu.Lock()
 		j.riskPolicy = snapshot
 		j.mu.Unlock()
+		// Raw rubric bytes can fit while JSON escaping and the rest of the
+		// bootstrap exceed the frame limit. Use the actual worker encoding path
+		// before starting a worker, preserving the classified policy failure.
+		if snapshot != nil && errors.Is(writeWorker(io.Discard, j.bootstrap(), proto.BrokerToWorker), proto.ErrFrameTooLarge) {
+			j.fail(riskPolicyFailure(errRiskPolicyInvalid))
+			return
+		}
 	}
 
 	var session WorkerSession

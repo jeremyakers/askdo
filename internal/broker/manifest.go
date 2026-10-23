@@ -222,6 +222,9 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 	if err != nil {
 		return nil, "", &freezeError{code: "broker_error", reason: "serialize approval manifest: " + err.Error()}
 	}
+	if effectiveLifecycle(j.req) == proto.LifecycleForeground && len(encoded) > helperManifestMaxBytes {
+		return nil, "", &freezeError{code: "broker_error", reason: "approval manifest exceeds the 1 MiB foreground handoff limit"}
+	}
 	if plan != nil {
 		// Auto-start requires approval_json to remain NULL until its atomic
 		// audit-and-dispatch commit. The spool and manifest_hash bind the bytes.

@@ -280,6 +280,7 @@ Files must be UTF-8 without NUL. In fleet mode the complete system message must
 also fit the existing 262144-byte content limit and permit only newline and tab
 among control characters; use LF line endings, not CRLF. These are existing
 transport rules, not a new policy grammar.
+The broker rejects rubric-bearing bootstraps that exceed the existing 64 MiB encoded frame limit before starting a reviewer, and foreground review manifests that exceed the existing 1 MiB handoff limit before requesting approval; detached manifests are unaffected by the handoff limit.
 Direct providers retain their own request and context limits; fitting the local
 worker frame does not guarantee that a provider can accept a large rubric.
 
