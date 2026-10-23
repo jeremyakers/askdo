@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/proto"
@@ -156,6 +157,10 @@ func (err *ErrInvalidState) Error() string {
 type Store struct {
 	db            *sql.DB
 	reviewLogPath string
+	// Audit-only operator decisions consumed but not yet journaled; see
+	// NoteConsumedDecision. consumedMu is a leaf lock, never held across I/O.
+	consumedMu sync.Mutex
+	consumed   map[journalKey]string
 	// Test-only interleaving seam: after terminal commit, before journaling.
 	beforeReviewLogAppend func()
 }
@@ -835,15 +840,13 @@ func (store *Store) getJob(ctx context.Context, uid uint32, requestID string) (J
 
 // Transition atomically moves a job from from to to. It returns false when the
 // stored state differs, the transition is a no-op, or the record is terminal.
-// A consumed decision is optional journal metadata for a failed pre-launch job;
-// it does not update approval_json, change guards, or authorize dispatch.
-func (store *Store) Transition(ctx context.Context, uid uint32, requestID string, from, to State, consumedDecision ...proto.Decision) (bool, error) {
-	return store.transition(ctx, uid, requestID, from, to, nil, consumedDecision...)
+func (store *Store) Transition(ctx context.Context, uid uint32, requestID string, from, to State) (bool, error) {
+	return store.transition(ctx, uid, requestID, from, to, nil)
 }
 
 // TransitionWithResult persists the final result in the same guarded mutation
 // that sets the terminal state and captures its journal snapshot.
-func (store *Store) TransitionWithResult(ctx context.Context, uid uint32, requestID string, from, to State, result Result, consumedDecision ...proto.Decision) (bool, error) {
+func (store *Store) TransitionWithResult(ctx context.Context, uid uint32, requestID string, from, to State, result Result) (bool, error) {
 	if err := validateResult(result); err != nil {
 		return false, err
 	}
@@ -851,10 +854,10 @@ func (store *Store) TransitionWithResult(ctx context.Context, uid uint32, reques
 	if err != nil {
 		return false, fmt.Errorf("encode result: %w", err)
 	}
-	return store.transition(ctx, uid, requestID, from, to, encoded, consumedDecision...)
+	return store.transition(ctx, uid, requestID, from, to, encoded)
 }
 
-func (store *Store) transition(ctx context.Context, uid uint32, requestID string, from, to State, resultJSON []byte, consumedDecision ...proto.Decision) (bool, error) {
+func (store *Store) transition(ctx context.Context, uid uint32, requestID string, from, to State, resultJSON []byte) (bool, error) {
 	if !from.Valid() {
 		return false, &ErrInvalidState{State: from}
 	}
@@ -880,11 +883,6 @@ func (store *Store) transition(ctx context.Context, uid uint32, requestID string
 		string(to), time.Now().UTC().UnixNano(), resultJSON, uid, requestID, string(from))
 	if err != nil {
 		return false, fmt.Errorf("transition job: %w", err)
-	}
-	if to == StateFailed && len(consumedDecision) > 0 && consumedDecision[0].Action == "approve" {
-		for i := range outcomes {
-			outcomes[i].ApprovalKind, outcomes[i].Decision = "human", "approved"
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit transition: %w", err)

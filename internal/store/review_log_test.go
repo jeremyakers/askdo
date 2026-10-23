@@ -190,3 +190,113 @@ func TestReviewLogApprovedHandoffKeepsDecision(t *testing.T) {
 		})
 	}
 }
+
+// journalOutcomes returns each job's journaled final state, approval kind and decision.
+func journalOutcomes(t *testing.T, path string) map[string][3]string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomes := map[string][3]string{}
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte{'\n'}) {
+		var e struct {
+			JobID    string `json:"job_id"`
+			State    string `json:"state"`
+			Kind     string `json:"approval_kind"`
+			Decision string `json:"decision"`
+		}
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatal(err)
+		}
+		if _, dup := outcomes[e.JobID]; dup {
+			t.Fatalf("duplicate outcome for %s: %s", e.JobID, data)
+		}
+		outcomes[e.JobID] = [3]string{e.State, e.Kind, e.Decision}
+	}
+	return outcomes
+}
+
+func TestReviewLogConsumedDecisionSurvivesEveryTerminalMutation(t *testing.T) {
+	ctx := context.Background()
+	transitionAll := func(to State) func(*testing.T, *Store) {
+		return func(t *testing.T, s *Store) {
+			for _, id := range []string{"decided", "undecided"} {
+				if !mustTransition(t, s, id, StateAwaitingHuman, to) {
+					t.Fatalf("transition %s to %s", id, to)
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		state         State
+		undecided     string
+		terminalSweep func(*testing.T, *Store)
+	}{
+		{"expiry sweep", StateExpired, "expired", func(t *testing.T, s *Store) {
+			if n, err := s.SweepExpired(ctx, time.Now()); err != nil || n != 2 {
+				t.Fatalf("sweep %d %v", n, err)
+			}
+		}},
+		{"restart sweep", StateExpired, "expired", func(t *testing.T, s *Store) {
+			if n, err := s.MarkRestartAmbiguous(ctx); err != nil || n != 2 {
+				t.Fatalf("restart %d %v", n, err)
+			}
+		}},
+		{"deadline expiry", StateExpired, "expired", transitionAll(StateExpired)},
+		{"cancellation", StateCancelled, "cancelled", transitionAll(StateCancelled)},
+		{"dispatch failure", StateFailed, "none", transitionAll(StateFailed)},
+	} {
+		for action, want := range map[string]string{"approve": "approved", "deny": "denied"} {
+			t.Run(tc.name+"/"+action, func(t *testing.T) {
+				// Given two jobs awaiting a human, one of which had a decision consumed.
+				s := openTestStore(t)
+				path := filepath.Join(t.TempDir(), "reviews.jsonl")
+				s.SetReviewLogPath(path)
+				past := time.Now().Add(-time.Hour)
+				for _, id := range []string{"decided", "undecided"} {
+					createTestJob(t, s, id, &past)
+					mustTransition(t, s, id, StateQueued, StateAwaitingHuman)
+					if err := s.RecordApproval(ctx, testUID, id, []byte(`{"card_id":1,"digest":"d"}`)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: action})
+				// When a terminal mutation commits for both.
+				tc.terminalSweep(t, s)
+				// Then only the decided job keeps the human decision.
+				got := journalOutcomes(t, path)
+				if got["decided"] != [3]string{string(tc.state), "human", want} || got["undecided"] != [3]string{string(tc.state), "none", tc.undecided} {
+					t.Fatalf("outcomes=%v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestReviewLogConsumedDecisionIsForgottenOnceJournaled(t *testing.T) {
+	// Given a consumed decision whose job then expires.
+	s := openTestStore(t)
+	s.SetReviewLogPath(filepath.Join(t.TempDir(), "reviews.jsonl"))
+	createTestJob(t, s, "decided", nil)
+	mustTransition(t, s, "decided", StateQueued, StateAwaitingHuman)
+	s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
+	// When its outcome is journaled.
+	mustTransition(t, s, "decided", StateAwaitingHuman, StateExpired)
+	// Then nothing is retained for it.
+	if len(s.consumed) != 0 {
+		t.Fatalf("retained %v", s.consumed)
+	}
+}
+
+func TestReviewLogConsumedDecisionIsNotTrackedWithoutJournal(t *testing.T) {
+	// Given a store with journaling disabled.
+	s := openTestStore(t)
+	// When a decision is consumed.
+	s.NoteConsumedDecision(testUID, "decided", proto.Decision{Action: "approve"})
+	// Then nothing accumulates for a journal that will never be written.
+	if len(s.consumed) != 0 {
+		t.Fatalf("retained %v", s.consumed)
+	}
+}

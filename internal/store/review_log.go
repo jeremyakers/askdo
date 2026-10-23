@@ -7,12 +7,46 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewlog"
 )
 
 // SetReviewLogPath enables best-effort terminal journaling. Configure it before
 // using the store concurrently. It neither opens the file nor gates startup.
 func (store *Store) SetReviewLogPath(path string) { store.reviewLogPath = path }
+
+// journalKey identifies one job in memory-only journal state.
+type journalKey struct {
+	uid       uint32
+	requestID string
+}
+
+// NoteConsumedDecision records that the broker consumed a validated operator
+// decision for the job. Every terminal mutation that commits afterwards —
+// dispatch failure, deadline, cancellation, or an expiry or restart sweep —
+// then journals the human decision that occurred rather than inferring one from
+// the final state. It is audit-only: it never reaches approval_json or any
+// guard, authorizes nothing, and does nothing unless journaling is enabled. The
+// note is memory-only: it is dropped once the job's outcome is appended and does
+// not survive a restart.
+func (store *Store) NoteConsumedDecision(uid uint32, requestID string, decision proto.Decision) {
+	var outcome string
+	switch decision.Action {
+	case "approve":
+		outcome = "approved"
+	case "deny":
+		outcome = "denied"
+	}
+	if store.reviewLogPath == "" || outcome == "" {
+		return
+	}
+	store.consumedMu.Lock()
+	defer store.consumedMu.Unlock()
+	if store.consumed == nil {
+		store.consumed = make(map[journalKey]string)
+	}
+	store.consumed[journalKey{uid, requestID}] = outcome
+}
 
 // updateReturningOutcomes captures journal fields in the mutation's transaction.
 // RETURNING identifies exactly the changed rows, even if bulk callers reuse a
@@ -34,7 +68,10 @@ func (store *Store) updateReturningOutcomes(ctx context.Context, tx *sql.Tx, que
 		count++
 		if store.reviewLogPath != "" && job.State.IsTerminal() {
 			job.UpdatedAt = time.Unix(0, updated).UTC()
-			events = append(events, outcomeForJob(job))
+			store.consumedMu.Lock()
+			consumed := store.consumed[journalKey{job.UID, job.RequestID}]
+			store.consumedMu.Unlock()
+			events = append(events, outcomeForJob(job, consumed))
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -46,7 +83,10 @@ func (store *Store) updateReturningOutcomes(ctx context.Context, tx *sql.Tx, que
 	return count, events, nil
 }
 
-func outcomeForJob(job Job) reviewlog.Event {
+// outcomeForJob derives the journaled outcome from the committed row. consumed
+// is the noted operator decision ("approved", "denied" or empty); it only fills
+// in a decision the durable approval record does not hold.
+func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	var approval struct {
 		Kind     string `json:"kind"`
 		Decision string `json:"decision"`
@@ -64,6 +104,9 @@ func outcomeForJob(job Job) reviewlog.Event {
 		decision = "approved"
 	}
 	hasDecision := (approval.Kind == "human" || approval.Kind == "auto") && (decision == "approved" || decision == "denied")
+	if !hasDecision && consumed != "" {
+		approval.Kind, decision, hasDecision = "human", consumed, true
+	}
 	switch job.State {
 	case StateDenied:
 		decision = "denied"
@@ -103,6 +146,11 @@ func (store *Store) appendOutcomes(events []reviewlog.Event) {
 	if len(events) == 0 {
 		return
 	}
+	store.consumedMu.Lock()
+	for _, e := range events {
+		delete(store.consumed, journalKey{e.SubmitterUID, e.JobID})
+	}
+	store.consumedMu.Unlock()
 	if store.beforeReviewLogAppend != nil {
 		store.beforeReviewLogAppend()
 	}

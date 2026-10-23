@@ -2,13 +2,16 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -287,5 +290,149 @@ func TestReviewLogBulkTerminalOutcomes(t *testing.T) {
 				t.Fatalf("records=%v", records)
 			}
 		})
+	}
+}
+
+// gatedWaitSession holds pre-launch validation inside its wait for the reviewer
+// worker to exit: after the one-use decision was consumed, before any dispatch
+// commit. It lets a test decide which terminal mutation wins, without sleeping.
+type gatedWaitSession struct {
+	WorkerSession
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *gatedWaitSession) Wait() error {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return s.WorkerSession.Wait()
+}
+
+// awaitingApprovalJob returns a reviewed job awaiting a human, with a pending
+// one-use approval and the valid approve callback for it. A non-nil deadline
+// binds that client wait deadline to the durable row and the runtime.
+func awaitingApprovalJob(t *testing.T, h *brokerHarness, deadline *time.Time) (*jobRuntime, context.Context, *proto.Decision) {
+	t.Helper()
+	job, ctx := newFreezeTestJobWithDeadline(t, h, deadline)
+	if changed, err := job.transition(ctx, store.StateQueued, store.StateReviewing); err != nil || !changed {
+		t.Fatalf("review transition: %v %v", changed, err)
+	}
+	_, digest, err := job.freezeReview(ctx, validWorkerReview(proto.WorkerOperation{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := job.transition(ctx, store.StateReviewing, store.StateAwaitingHuman); err != nil || !changed {
+		t.Fatalf("awaiting transition: %v %v", changed, err)
+	}
+	job.pendingApproval = &approvalBinding{digest: digest, cardID: 1, operatorUserID: 1, expiry: time.Now().Add(time.Minute)}
+	return job, ctx, &proto.Decision{Digest: digest, OperatorUserID: 1, MessageID: 1, Action: "approve", TimeUnixMS: time.Now().UnixMilli()}
+}
+
+// lastOutcome returns the final record, which must be the job's only outcome.
+func lastOutcome(t *testing.T, h *brokerHarness) map[string]json.RawMessage {
+	t.Helper()
+	records := readReviewRecords(t, h)
+	outcome := records[len(records)-1]
+	if len(records) != 2 || string(records[0]["event"]) != `"review"` || string(outcome["event"]) != `"outcome"` {
+		t.Fatalf("want one review and one outcome, got %d records: %v", len(records), records)
+	}
+	return outcome
+}
+
+func TestReviewLogConsumedApprovalSurvivesTerminalRaces(t *testing.T) {
+	lapsed := func() *time.Time { at := time.Now().Add(-time.Hour); return &at }
+	for _, tc := range []struct {
+		name  string
+		state store.State
+		win   func(*testing.T, *brokerHarness, *jobRuntime, context.Context)
+	}{
+		{"deadline timer", store.StateExpired, func(t *testing.T, _ *brokerHarness, j *jobRuntime, ctx context.Context) {
+			if !j.checkDeadline(ctx) {
+				t.Fatal("deadline timer did not win")
+			}
+		}},
+		{"expiry sweep", store.StateExpired, func(t *testing.T, h *brokerHarness, _ *jobRuntime, ctx context.Context) {
+			if n, err := h.daemon.store.SweepExpired(ctx, time.Now()); err != nil || n != 1 {
+				t.Fatalf("sweep %d %v", n, err)
+			}
+		}},
+		{"cancellation", store.StateCancelled, func(t *testing.T, _ *brokerHarness, j *jobRuntime, _ context.Context) {
+			if _, cancelled, err := j.cancel("client"); err != nil || !cancelled {
+				t.Fatalf("cancel %v %v", cancelled, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given a valid approve callback, consumed while pre-launch validation is blocked.
+			h := newBrokerHarness(t, nil, nil)
+			job, ctx, decision := awaitingApprovalJob(t, h, lapsed())
+			session, err := (protocolWorker{run: func(context.Context, net.Conn) error { return nil }}).Start(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate := &gatedWaitSession{WorkerSession: session, entered: make(chan struct{}), release: make(chan struct{})}
+			job.worker = gate
+			handled := make(chan struct{})
+			go func() { defer close(handled); job.consumeDecision(ctx, decision) }()
+			waitSignal(t, gate.entered, "pre-launch validation")
+			// When the deadline, sweep or cancellation commits before dispatch.
+			tc.win(t, h, job, ctx)
+			close(gate.release)
+			waitSignal(t, handled, "decision handling")
+			// Then nothing runs, and the journal keeps the human decision beside the final state.
+			stored, err := h.daemon.store.GetJob(ctx, job.uid, job.req.RequestID)
+			if err != nil || stored.State != tc.state || len(h.executor.Snapshot()) != 0 {
+				t.Fatalf("state=%s executions=%d err=%v", stored.State, len(h.executor.Snapshot()), err)
+			}
+			outcome := lastOutcome(t, h)
+			if string(outcome["state"]) != `"`+string(tc.state)+`"` || string(outcome["approval_kind"]) != `"human"` || string(outcome["decision"]) != `"approved"` {
+				t.Fatalf("lost consumed approval: %s", mustJSON(t, outcome))
+			}
+		})
+	}
+}
+
+func TestReviewLogUnapprovedTerminalRacesStayUndecided(t *testing.T) {
+	for _, tc := range []struct {
+		name, decision string
+		win            func(*jobRuntime, context.Context)
+	}{
+		{"deadline timer", "expired", func(j *jobRuntime, ctx context.Context) { j.checkDeadline(ctx) }},
+		{"cancellation", "cancelled", func(j *jobRuntime, _ context.Context) { _, _, _ = j.cancel("client") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given a pending approval that no one has decided.
+			h := newBrokerHarness(t, nil, nil)
+			lapsed := time.Now().Add(-time.Hour)
+			job, ctx, _ := awaitingApprovalJob(t, h, &lapsed)
+			// When the deadline or cancellation ends the job.
+			tc.win(job, ctx)
+			// Then no approval is invented.
+			outcome := lastOutcome(t, h)
+			if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"`+tc.decision+`"` {
+				t.Fatalf("invented a decision: %s", mustJSON(t, outcome))
+			}
+		})
+	}
+}
+
+func TestReviewLogLapsedWrongUserReplayDoesNotInventApproval(t *testing.T) {
+	// Given an approval that lapsed, then a callback from someone else.
+	h := newBrokerHarness(t, nil, nil)
+	job, ctx, decision := awaitingApprovalJob(t, h, nil)
+	job.pendingApproval.expiry = time.Now().Add(-time.Second)
+	decision.OperatorUserID = 2
+	// When it is delivered, and replayed.
+	job.consumeDecision(ctx, decision)
+	job.consumeDecision(ctx, decision)
+	// Then expiry consumed the authorization without recording a decision.
+	stored, err := h.daemon.store.GetJob(ctx, job.uid, job.req.RequestID)
+	if err != nil || stored.State != store.StateExpired || len(h.executor.Snapshot()) != 0 {
+		t.Fatalf("state=%s executions=%d err=%v", stored.State, len(h.executor.Snapshot()), err)
+	}
+	outcome := lastOutcome(t, h)
+	if string(outcome["approval_kind"]) != `"none"` || string(outcome["decision"]) != `"expired"` {
+		t.Fatalf("invented a decision: %s", mustJSON(t, outcome))
 	}
 }

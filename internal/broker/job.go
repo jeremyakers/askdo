@@ -120,8 +120,6 @@ type approvalBinding struct {
 	operatorUserID int64
 	expiry         time.Time
 	consumed       bool
-	// Audit-only copy, never consulted to authorize dispatch.
-	consumedDecision proto.Decision
 }
 
 // approvalRecord is the durable approval metadata persisted via
@@ -241,16 +239,12 @@ func (j *jobRuntime) transition(ctx context.Context, from, to store.State, resul
 	if j.state != from {
 		return false, nil
 	}
-	var journalDecision []proto.Decision
-	if to == store.StateFailed && j.pendingApproval != nil && j.pendingApproval.consumed {
-		journalDecision = []proto.Decision{j.pendingApproval.consumedDecision}
-	}
 	var changed bool
 	var err error
 	if len(result) > 0 {
-		changed, err = j.daemon.store.TransitionWithResult(ctx, j.uid, j.req.RequestID, from, to, result[0], journalDecision...)
+		changed, err = j.daemon.store.TransitionWithResult(ctx, j.uid, j.req.RequestID, from, to, result[0])
 	} else {
-		changed, err = j.daemon.store.Transition(ctx, j.uid, j.req.RequestID, from, to, journalDecision...)
+		changed, err = j.daemon.store.Transition(ctx, j.uid, j.req.RequestID, from, to)
 	}
 	if err != nil || !changed {
 		return changed, err
@@ -809,9 +803,11 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 		return
 	}
 	// Consume exactly once, before any commit: a losing cancel/expiry race or
-	// a replayed decision can never authorize again.
+	// a replayed decision can never authorize again. The store journals this
+	// decision with whichever terminal outcome commits next, including a
+	// deadline, cancellation or sweep that wins before dispatch.
 	pending.consumed = true
-	pending.consumedDecision = *decision
+	j.daemon.store.NoteConsumedDecision(j.uid, j.req.RequestID, *decision)
 	action := decision.Action
 	j.mu.Unlock()
 

@@ -42,17 +42,30 @@ func TestManifestTrustAssumptionsBindAccessOnly(t *testing.T) {
 // No worker, Telegram, or executor stage is ever started.
 func newFreezeTestJob(t *testing.T, h *brokerHarness) (*jobRuntime, context.Context) {
 	t.Helper()
+	return newFreezeTestJobWithDeadline(t, h, nil)
+}
+
+// newFreezeTestJobWithDeadline additionally binds a client wait deadline to the
+// durable row and the runtime, so deadline timers and sweeps can be exercised
+// without sleeping.
+func newFreezeTestJobWithDeadline(t *testing.T, h *brokerHarness, deadline *time.Time) (*jobRuntime, context.Context) {
+	t.Helper()
 	requestID := reserveForTest(t, h.socket, h.peerUID.Load())
 	spool, err := createSpool(t.TempDir(), []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := newTestJobRuntime(t, h.daemon, proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/true"}, RequestID: requestID}, spool)
+	request := proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/true"}, RequestID: requestID}
+	if deadline != nil {
+		wait := int64(1)
+		request.WaitTimeoutMS = &wait
+	}
+	job := newTestJobRuntime(t, h.daemon, request, spool)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	if _, err := h.daemon.store.SubmitReservedJob(ctx, store.Job{
 		UID: job.uid, RequestID: job.req.RequestID, SubmitBody: []byte(`{}`), OperationJSON: []byte(`{}`),
-		Mode: "argv", SpoolDir: spool.dir, AttemptsJSON: []byte(`[]`),
+		Mode: "argv", SpoolDir: spool.dir, DeadlineAt: deadline, AttemptsJSON: []byte(`[]`),
 	}); err != nil {
 		t.Fatal(err)
 	}

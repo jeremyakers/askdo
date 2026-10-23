@@ -50,14 +50,21 @@ Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
   tracking honestly; it does not invent an exit code. Older version-1 records may
   lack `result_kind`/`signal`. Outcome fields are captured atomically with the
   terminal state mutation before retention can compact the row, then appended
-  after commit. A consumed human approval followed by a pre-launch failure is
-  recorded as `human`/`approved` with state `failed`: approval did not imply
-  execution, and no dispatch/authorization checks are bypassed. Broker wrapper
-  failures atomically store and journal `result_kind: "wrapper"`. If an approved
-  foreground handoff later expires, is cancelled, or is invalidated by restart,
-  its decision remains `human`/`approved`; the final state conveys what happened
-  to the handoff. `expired`/`cancelled` decisions are synthesized only when no
-  human or auto decision has been recorded.
+  after commit. A human decision the broker consumed stays recorded as `human`
+  with `approved` (or `denied`) whichever terminal state the job reaches before
+  dispatch commits: a pre-launch failure, a client deadline that lapses during
+  pre-launch checks, cancellation, or an expiry sweep yields `failed`, `expired`
+  or `cancelled` beside that decision. Approval did not imply execution, and no
+  dispatch/authorization checks are bypassed. This record of a consumed decision
+  is held in broker memory only until the outcome is appended, and is never
+  written early to the approval record. If the broker dies after consuming a
+  decision and before dispatch (or foreground handoff) commits, restart recovery
+  can only report `expired` with `approval_kind: "none"`.
+  Broker wrapper failures atomically store and journal `result_kind: "wrapper"`.
+  If an approved foreground handoff later expires, is cancelled, or is
+  invalidated by restart, its decision remains `human`/`approved`; the final
+  state conveys what happened to the handoff. `expired`/`cancelled` decisions
+  are synthesized only when no human or auto decision has been recorded.
 
 The journal never copies captured file contents, environment values, credentials,
 provider response bodies, raw reviewer logs, or inspection selectors/payloads.
