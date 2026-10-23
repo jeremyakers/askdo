@@ -48,6 +48,8 @@ type Event struct {
 	ApprovalReason      string                      `json:"approval_reason,omitempty"`
 	State               string                      `json:"state,omitempty"`
 	ExitCode            *int                        `json:"exit_code,omitempty"`
+	ResultKind          string                      `json:"result_kind,omitempty"`
+	Signal              *int                        `json:"signal,omitempty"`
 	ApprovalKind        string                      `json:"approval_kind,omitempty"`
 	Decision            string                      `json:"decision,omitempty"`
 }

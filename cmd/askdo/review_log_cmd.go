@@ -50,7 +50,11 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 		review, outcome *reviewlog.Event
 		latest          time.Time
 	}
-	jobs := make(map[string]*joined)
+	type jobKey struct {
+		id  string
+		uid uint32
+	}
+	jobs := make(map[jobKey]*joined)
 	reader := bufio.NewReader(file)
 	for line := 1; ; line++ {
 		data, readErr := reader.ReadBytes('\n')
@@ -67,10 +71,11 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 						}
 					}
 				} else {
-					j := jobs[event.JobID]
+					key := jobKey{event.JobID, event.SubmitterUID}
+					j := jobs[key]
 					if j == nil {
 						j = &joined{}
-						jobs[event.JobID] = j
+						jobs[key] = j
 					}
 					if event.Time.After(j.latest) {
 						j.latest = event.Time
@@ -92,7 +97,7 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	ids := make([]string, 0, len(jobs))
+	ids := make([]jobKey, 0, len(jobs))
 	for id, j := range jobs {
 		if !j.latest.Before(cutoff) {
 			ids = append(ids, id)
@@ -101,13 +106,19 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	sort.Slice(ids, func(a, b int) bool {
 		x, y := jobs[ids[a]].latest, jobs[ids[b]].latest
 		if x.Equal(y) {
-			return ids[a] < ids[b]
+			if ids[a].id != ids[b].id {
+				return ids[a].id < ids[b].id
+			}
+			return ids[a].uid < ids[b].uid
 		}
 		return x.After(y)
 	})
+	// bufio.Writer retains the first write/short-write failure, including any
+	// implicit flush while formatting; the final Flush reports it once.
+	out := bufio.NewWriter(stdout)
 	for _, id := range ids {
 		j := jobs[id]
-		fmt.Fprintf(stdout, "%s job=%q", j.latest.UTC().Format(time.RFC3339Nano), id)
+		fmt.Fprintf(out, "%s job=%q uid=%d", j.latest.UTC().Format(time.RFC3339Nano), id.id, id.uid)
 		if r := j.review; r != nil {
 			risk := "NO AI"
 			if r.Report != nil {
@@ -121,26 +132,36 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 			for i, arg := range command {
 				quoted[i] = fmt.Sprintf("%q", arg)
 			}
-			fmt.Fprintf(stdout, " host=%q submitter=%q(%d) risk=%q command=%s", r.Host, r.SubmitterName, r.SubmitterUID, risk, strings.Join(quoted, " "))
+			fmt.Fprintf(out, " host=%q submitter=%q(%d) risk=%q command=%s", r.Host, r.SubmitterName, r.SubmitterUID, risk, strings.Join(quoted, " "))
 		}
 		if o := j.outcome; o != nil {
-			fmt.Fprintf(stdout, " state=%q decision=%q approval=%q", o.State, o.Decision, o.ApprovalKind)
+			fmt.Fprintf(out, " state=%q decision=%q approval=%q", o.State, o.Decision, o.ApprovalKind)
+			if o.ResultKind != "" {
+				fmt.Fprintf(out, " result=%q", o.ResultKind)
+			}
+			if o.Signal != nil {
+				fmt.Fprintf(out, " signal=%d", *o.Signal)
+			}
 			if o.ExitCode != nil {
-				fmt.Fprintf(stdout, " exit=%d", *o.ExitCode)
+				fmt.Fprintf(out, " exit=%d", *o.ExitCode)
 			}
 		} else {
-			fmt.Fprint(stdout, " outcome=not-recorded")
+			fmt.Fprint(out, " outcome=not-recorded")
 		}
-		fmt.Fprintln(stdout)
+		fmt.Fprintln(out)
 		if r := j.review; r != nil && r.Report != nil {
-			fmt.Fprintf(stdout, "  summary: %q\n", r.Report.Summary)
+			fmt.Fprintf(out, "  summary: %q\n", r.Report.Summary)
 			for _, w := range r.Report.Warnings {
-				fmt.Fprintf(stdout, "  warning: %q evidence=%q\n", w.Message, w.Evidence)
+				fmt.Fprintf(out, "  warning: %q evidence=%q\n", w.Message, w.Evidence)
 			}
 			for _, u := range r.Report.MissingContext {
-				fmt.Fprintf(stdout, "  uncertainty: %q\n", u)
+				fmt.Fprintf(out, "  uncertainty: %q\n", u)
 			}
 		}
+	}
+	if err := out.Flush(); err != nil {
+		fmt.Fprintln(stderr, "review log:", err)
+		return 1
 	}
 	return 0
 }

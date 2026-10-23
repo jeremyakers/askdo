@@ -15,18 +15,20 @@ askdo review log --job '2026-10-22_#1' --since 0
 askdo review log --since 0 --json         # all original JSONL records
 ```
 
-The compact view joins by `job_id`, sorts newest activity first (job ID breaks
-ties), and includes the command, identity, risk or `NO AI`, final decision/exit,
+The compact view joins by (`job_id`, `submitter_uid`), sorts newest activity first
+(job ID, then UID, breaks ties), and includes the command, identity, risk or `NO AI`,
+final decision, result kind, exit code or signal,
 summary, warnings, and uncertainties. `--since` selects jobs with any recent
 activity, retaining older review context for their outcomes. With `--json`, it
 filters individual records instead and preserves their original bytes and file
-order. `--job` matches exactly; `--since 0` disables the time filter. Malformed
+order. `--job` matches the ID exactly and shows each submitting UID separately;
+`--since 0` disables the time filter. Output write failures return nonzero. Malformed
 lines are reported by line number on stderr and skipped. A missing journal is
 empty history. A missing outcome means **not recorded**, not necessarily pending.
 
 ## JSONL schema (version 1)
 
-Every record has `version`, `event`, UTC `time`, and `job_id`.
+Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
 
 * `review`: emitted once after the AI approval manifest successfully freezes.
   Contains host, submitter UID/name, target UID, mode, approval-display `argv`
@@ -37,11 +39,17 @@ Every record has `version`, `event`, UTC `time`, and `job_id`.
   counts grouped by operation/status/reason, and `manifest_digest`.
 * `unreviewed`: the same operation metadata without an AI report, plus
   `approval_reason` and typed `availability_history` failures when applicable.
-* `outcome`: final `state`, optional `exit_code`, `approval_kind`
+* `outcome`: final `state`, optional `result_kind` (the stored result kind),
+  `exit_code` for an exit result or `signal` for a signal result, `approval_kind`
   (`human`/`auto`/`none`), and `decision` (`approved`, `denied`, `expired`,
   `cancelled`, or `none` when no decision occurred). Covers terminal transitions,
   expiry sweeps, and restart invalidation. `unknown` records lost execution
-  tracking honestly; it does not invent an exit code.
+  tracking honestly; it does not invent an exit code. Older version-1 records may
+  lack `result_kind`/`signal`. Outcome fields are captured atomically with the
+  terminal state mutation before retention can compact the row, then appended
+  after commit. A consumed human approval followed by a pre-launch failure is
+  recorded as `human`/`approved` with state `failed`: approval did not imply
+  execution, and no dispatch/authorization checks are bypassed.
 
 The journal never copies captured file contents, environment values, credentials,
 provider response bodies, raw reviewer logs, or inspection selectors/payloads.

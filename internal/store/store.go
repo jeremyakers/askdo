@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/reviewlog"
 	_ "modernc.org/sqlite"
 )
 
@@ -155,6 +156,8 @@ func (err *ErrInvalidState) Error() string {
 type Store struct {
 	db            *sql.DB
 	reviewLogPath string
+	// Test-only interleaving seam: after terminal commit, before journaling.
+	beforeReviewLogAppend func()
 }
 
 // Open opens path, configures SQLite durability, and performs the schema
@@ -505,20 +508,17 @@ func (store *Store) CommitNamedDecision(ctx context.Context, uid uint32, request
 	if decision.Action == "deny" {
 		state = StateDenied
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
+	n, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = ? AND approval_json = ? AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, state, encoded, now.UnixNano(), uid, requestID, StateAwaitingHuman, raw, decision.Digest, now.UnixNano())
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	if err != nil || n != 1 {
+	if n != 1 {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	if state.IsTerminal() {
-		store.logOutcome(ctx, uid, requestID)
-	}
+	store.appendOutcomes(outcomes)
 	return true, nil
 }
 
@@ -835,7 +835,9 @@ func (store *Store) getJob(ctx context.Context, uid uint32, requestID string) (J
 
 // Transition atomically moves a job from from to to. It returns false when the
 // stored state differs, the transition is a no-op, or the record is terminal.
-func (store *Store) Transition(ctx context.Context, uid uint32, requestID string, from, to State) (bool, error) {
+// A consumed decision is optional journal metadata for a failed pre-launch job;
+// it does not update approval_json, change guards, or authorize dispatch.
+func (store *Store) Transition(ctx context.Context, uid uint32, requestID string, from, to State, consumedDecision ...proto.Decision) (bool, error) {
 	if !from.Valid() {
 		return false, &ErrInvalidState{State: from}
 	}
@@ -850,20 +852,27 @@ func (store *Store) Transition(ctx context.Context, uid uint32, requestID string
 		return false, nil
 	}
 
-	result, err := store.db.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	changed, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?
 		WHERE uid = ? AND request_id = ? AND state = ?
 		AND state NOT IN ('finished', 'cancelled', 'expired', 'denied', 'failed', 'unknown')`,
 		string(to), time.Now().UTC().UnixNano(), uid, requestID, string(from))
 	if err != nil {
 		return false, fmt.Errorf("transition job: %w", err)
 	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("read transition result: %w", err)
+	if to == StateFailed && len(consumedDecision) > 0 && consumedDecision[0].Action == "approve" {
+		for i := range outcomes {
+			outcomes[i].ApprovalKind, outcomes[i].Decision = "human", "approved"
+		}
 	}
-	if changed == 1 && to.IsTerminal() {
-		store.logOutcome(ctx, uid, requestID)
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit transition: %w", err)
 	}
+	store.appendOutcomes(outcomes)
 	return changed == 1, nil
 }
 
@@ -914,6 +923,7 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 	cutoff := now.UTC().UnixNano()
 	updated := now.UTC().UnixNano()
 	var count int
+	var outcomes []reviewlog.Event
 	for _, transition := range []struct {
 		from State
 		to   State
@@ -922,19 +932,16 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 		{StateReviewing, StateCancelled},
 		{StateAwaitingHuman, StateExpired},
 	} {
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+		affected, events, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?
 			WHERE state = ? AND deadline_at IS NOT NULL AND deadline_at > 0 AND deadline_at < ?`,
 			string(transition.to), updated, string(transition.from), cutoff)
 		if err != nil {
 			return 0, fmt.Errorf("sweep %s jobs: %w", transition.from, err)
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("read expiry sweep result: %w", err)
-		}
-		count += int(affected)
+		count += affected
+		outcomes = append(outcomes, events...)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+	affected, events, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ?
 		WHERE state = ? AND (EXISTS (SELECT 1 FROM foreground_grants g
 		WHERE g.uid = jobs.uid AND g.request_id = jobs.request_id AND g.expires_at <= ?)
 		OR (deadline_at IS NOT NULL AND deadline_at > 0 AND deadline_at <= ?))`,
@@ -942,15 +949,12 @@ func (store *Store) SweepExpired(ctx context.Context, now time.Time) (int, error
 	if err != nil {
 		return 0, fmt.Errorf("sweep handoff jobs: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("read handoff sweep result: %w", err)
-	}
-	count += int(affected)
+	count += affected
+	outcomes = append(outcomes, events...)
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit expiry sweep: %w", err)
 	}
-	store.logTerminalUpdates(ctx, updated)
+	store.appendOutcomes(outcomes)
 	return count, nil
 }
 
@@ -968,6 +972,7 @@ func (store *Store) MarkRestartAmbiguous(ctx context.Context) (int, error) {
 
 	updated := time.Now().UTC().UnixNano()
 	var count int
+	var outcomes []reviewlog.Event
 	for _, transition := range []struct {
 		from State
 		to   State
@@ -979,21 +984,18 @@ func (store *Store) MarkRestartAmbiguous(ctx context.Context) (int, error) {
 		{StateQueued, StateCancelled},
 		{StateReviewing, StateCancelled},
 	} {
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ? WHERE state = ?`,
+		affected, events, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = ?, updated_at = ? WHERE state = ?`,
 			string(transition.to), updated, string(transition.from))
 		if err != nil {
 			return 0, fmt.Errorf("mark restart %s jobs: %w", transition.from, err)
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("read restart mark result: %w", err)
-		}
-		count += int(affected)
+		count += affected
+		outcomes = append(outcomes, events...)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit restart marking: %w", err)
 	}
-	store.logTerminalUpdates(ctx, updated)
+	store.appendOutcomes(outcomes)
 	return count, nil
 }
 
