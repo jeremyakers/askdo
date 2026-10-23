@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/reviewlog"
 )
 
 func TestReviewLogCLI(t *testing.T) {
@@ -165,6 +168,39 @@ func TestReviewLogCompactKeepsUIDsSeparate(t *testing.T) {
 }
 
 type reviewLogFailWriter struct{}
+
+func TestReviewLogCompactEscapesBidiControls(t *testing.T) {
+	// Given accepted review text containing bidi format controls and ordinary CJK.
+	oldPath, oldEUID := reviewLogPath, getEUID
+	t.Cleanup(func() { reviewLogPath, getEUID = oldPath, oldEUID })
+	getEUID = func() int { return 0 }
+	reviewLogPath = filepath.Join(t.TempDir(), "reviews.jsonl")
+	const controls = "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+	text := "审查 " + controls + " evidence"
+	event := reviewlog.Event{
+		Version: 1, Event: "review", Time: time.Now().UTC(), JobID: "bidi",
+		Host: text, SubmitterName: text, Argv: []string{"/bin/true", text},
+		Report: &proto.ReviewReport{
+			Risk: "2", Summary: text, Effects: []string{},
+			Warnings:       []proto.ReviewWarning{{Message: text, Evidence: text}},
+			MissingContext: []string{text}, Reversibility: "No changes", IntentMatch: "unverified",
+		},
+	}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewLogPath, append(data, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// When the root-only compact viewer renders the record.
+	var out, stderr bytes.Buffer
+	code := runReview([]string{"log"}, &out, &stderr)
+	// Then control runes cannot affect display order, while ordinary Unicode stays readable.
+	if code != 0 || strings.ContainsAny(out.String(), controls) || !strings.Contains(out.String(), `\u202e`) || !strings.Contains(out.String(), `\u2066`) || !strings.Contains(out.String(), "审查") {
+		t.Fatalf("code=%d output=%q err=%s", code, out.String(), &stderr)
+	}
+}
 
 func (reviewLogFailWriter) Write([]byte) (int, error) { return 0, errors.New("fixture write failure") }
 
