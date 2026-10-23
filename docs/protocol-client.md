@@ -207,7 +207,7 @@ a **detached argv submit**; captured stdin cannot be combined with `--bundle`.
 The broker validates the decoded content against the same bounds, stages it
 root-only in the job spool, and records only metadata (path `stdin`, size,
 SHA-256) in the operation description the reviewer sees. The launched process
-reads the exact frozen bytes from a sealed, immutable descriptor. Captured
+reads the exact frozen bytes from a sealed, immutable descriptor. Captured-stdin
 scripts always require human approval; auto-approval never applies. AI review
 runs when required by policy or requested with `--review=yes`; approval-only
 requests retain their **NO AI REVIEW** card.
@@ -228,8 +228,14 @@ validation reject anything else.
   "reason":"Run the prepared script","mode":"bundle",
    "cwd":"/work/project",
   "entry":"run.sh","args":["--apply"],
-  "files":[{"path":"run.sh","content_base64":"IyEvYmluL2Jhc2gK"}]}
+   "files":[{"path":"run.sh","content_base64":"IyEvYmluL2Jhc2gK"}]}
 ```
+
+The source CLI's `--script PATH [--] [ARG...]` is a convenience producer of
+this existing bundle message, not a new protocol mode or wire field. It captures
+only the selected file under its basename, uses that as `entry`, and forwards
+trailing arguments as `args`. CWD, sensitive-file rules, staging limits and
+bundle approval policy are unchanged; neighboring files are not collected.
 
 `sensitive_inclusions` lists bundle-relative paths the client deliberately
 included although they match the client's built-in default sensitive-file

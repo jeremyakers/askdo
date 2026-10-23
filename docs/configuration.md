@@ -83,6 +83,20 @@ The three capability flags accept JSON booleans, never `null`. These fields
 apply equally to direct v4 and fleet v5 hosts, not the separate gateway-server
 v1 configuration. An unchanged old host configuration keeps all three off.
 
+Inspection scope is not execution permission. A configuration allowing only
+binary directories does not let the reviewer inspect a maintenance script in
+`/tmp` or an application's configuration elsewhere, even if the submitted
+command will use those paths. Choose read-only roots for the actual context the
+administrator intends reviewers to inspect; do not infer them from a submitted
+reason or treat a risk rubric as an access grant. Existing hard denies and
+sensitive masks still apply.
+
+For a generated Bash script, `askdo --script PATH` captures only that selected
+file using the existing bundle mechanism. Its captured copy is reviewable
+without adding all of `/tmp` to host read roots. Related live host files still
+need their own configured inspection access. This source feature does not alter
+an installed host's configuration or remove genuine missing context.
+
 A mask is a slash-separated glob over Linux path components, matched purely
 lexically and **case-sensitively** (Linux semantics):
 

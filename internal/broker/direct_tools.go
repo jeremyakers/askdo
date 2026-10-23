@@ -49,7 +49,7 @@ func (j *jobRuntime) readPath(seq uint32, req proto.ReadPathRequest) (proto.Insp
 			j.recordWithheldPath(req.Path)
 		}
 		if r.Status != inspection.StatusOK {
-			return failedInspect(seq, r.Status), nil
+			return failedInspectReason(seq, r.Status, r.Reason), nil
 		}
 		data, next, eof = r.Content, r.NextOffset, r.EOF
 	} else {
@@ -171,7 +171,7 @@ func (j *jobRuntime) listPath(seq uint32, req proto.ListPathRequest) (proto.Insp
 			if r.Status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
 			}
-			return failedInspect(seq, r.Status), nil
+			return failedInspectReason(seq, r.Status, r.Reason), nil
 		}
 		entries = make([]proto.DirectoryEntry, 0, len(r.Entries))
 		for _, e := range r.Entries {
@@ -309,12 +309,12 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 		budget = 1 << 20
 	}
 	if req.Base == "host" {
-		meta, status := j.daemon.policy.StatPath(req.Path, false)
+		meta, status, reason := j.daemon.policy.StatPathReason(req.Path, false)
 		if status != inspection.StatusOK {
 			if status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
 			}
-			return failedInspect(seq, status), nil
+			return failedInspectReason(seq, status, reason), nil
 		}
 		if meta.Type == "dir" {
 			return j.searchHostTree(seq, req, re, budget)
@@ -445,12 +445,12 @@ func observationOffset(cursor string, digest [32]byte) (int, bool) {
 
 func (j *jobRuntime) statPath(seq uint32, req proto.StatPathRequest) (proto.InspectResult, error) {
 	if req.Base == "host" {
-		m, status := j.daemon.policy.StatPath(req.Path, req.Resolve)
+		m, status, reason := j.daemon.policy.StatPathReason(req.Path, req.Resolve)
 		if status != inspection.StatusOK {
 			if status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
 			}
-			return failedInspect(seq, status), nil
+			return failedInspectReason(seq, status, reason), nil
 		}
 		return directOK(seq, proto.StatPathResult{Source: "host", Type: m.Type, Mode: m.Mode, UID: m.UID, GID: m.GID, Nlink: m.Nlink, Size: m.Size, AtimeUnixNS: m.AtimeUnixNS, MtimeUnixNS: m.MtimeUnixNS, CtimeUnixNS: m.CtimeUnixNS, Device: m.Device, Inode: m.Inode, Target: m.Target, ResolvedPath: m.ResolvedPath})
 	}
@@ -516,12 +516,12 @@ func (j *jobRuntime) statPath(seq uint32, req proto.StatPathRequest) (proto.Insp
 }
 
 func (j *jobRuntime) mountInfo(seq uint32, req proto.MountInfoRequest) (proto.InspectResult, error) {
-	m, status := j.daemon.policy.MountPath(req.Path)
+	m, status, reason := j.daemon.policy.MountPathReason(req.Path)
 	if status != inspection.StatusOK {
 		if status == inspection.StatusWithheld {
 			j.recordWithheldPath(req.Path)
 		}
-		return failedInspect(seq, status), nil
+		return failedInspectReason(seq, status, reason), nil
 	}
 	return directOK(seq, proto.MountInfoResult{MountID: m.ID, MountPoint: m.Point, FSType: m.FSType, ReadOnly: m.ReadOnly})
 }
@@ -530,15 +530,15 @@ func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.Insp
 	var names []string
 	skipped := 0
 	if req.Base == "host" {
-		meta, status := j.daemon.policy.StatPath(req.Path, false)
+		meta, status, reason := j.daemon.policy.StatPathReason(req.Path, false)
 		if status != inspection.StatusOK {
 			if status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
 			}
-			return failedInspect(seq, status), nil
+			return failedInspectReason(seq, status, reason), nil
 		}
 		if meta.Type != "dir" {
-			return failedInspect(seq, inspection.StatusInspectionDenied), nil
+			return failedInspectReason(seq, inspection.StatusInspectionDenied, inspection.ReasonUnsupportedObject), nil
 		}
 		names, skipped, status = j.walkHost(req.Path)
 		if status != inspection.StatusOK {

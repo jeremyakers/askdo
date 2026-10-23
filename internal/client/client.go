@@ -122,7 +122,7 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	flags := flag.NewFlagSet("askdo", flag.ContinueOnError)
 	flags.SetOutput(options.Stderr)
 	var timeout time.Duration
-	var reason, bundle, entry string
+	var reason, bundle, entry, script string
 	var sensitive stringList
 	var review forceReviewFlag
 	var detach bool
@@ -131,10 +131,31 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	flags.BoolVar(&detach, "detach", false, "run detached without a terminal")
 	flags.StringVar(&bundle, "bundle", "", "bundle directory")
 	flags.StringVar(&entry, "entry", "", "bundle entry point")
+	flags.Func("script", "capture one Bash script as a bundle; remaining arguments go to the script", func(path string) error {
+		if script != "" {
+			return errors.New("--script accepts only one file")
+		}
+		if path == "" {
+			return errors.New("--script requires a file path")
+		}
+		script = path
+		return nil
+	})
 	flags.Var(&sensitive, "bundle-include-sensitive", "include one default-excluded bundle file")
 	flags.Var(&review, "review", "force AI review (yes only)")
 	if err := flags.Parse(args); err != nil {
 		return 125
+	}
+	if script != "" {
+		var conflictingFlag string
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "bundle" || f.Name == "entry" {
+				conflictingFlag = f.Name
+			}
+		})
+		if conflictingFlag != "" {
+			return usageError(options, "--script cannot be combined with --"+conflictingFlag)
+		}
 	}
 	if timeout < 0 || strings.TrimSpace(reason) == "" {
 		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
@@ -171,8 +192,11 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	if len(captured) > 0 && bundle != "" {
 		return usageError(options, "askdo: captured stdin cannot be combined with --bundle")
 	}
+	if len(captured) > 0 && script != "" {
+		return usageError(options, "askdo: captured stdin cannot be combined with --script")
+	}
 	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.CanonicalProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review)}
-	if bundle == "" {
+	if bundle == "" && script == "" {
 		if entry != "" || len(rest) == 0 {
 			fmt.Fprintln(options.Stderr, "argv mode requires a command (use -- before command flags)")
 			return 125
@@ -184,13 +208,23 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 			}
 		}
 	} else {
+		if script != "" {
+			entry = filepath.Base(script)
+		}
 		if entry == "" {
 			fmt.Fprintln(options.Stderr, "--entry is required with --bundle")
 			return 125
 		}
-		files, sensitiveInclusions, err := captureBundle(bundle, entry, sensitive, func(format string, args ...any) {
+		warn := func(format string, args ...any) {
 			fmt.Fprintf(options.Stderr, format, args...)
-		})
+		}
+		var files []proto.BundleFile
+		var sensitiveInclusions []string
+		if script != "" {
+			files, sensitiveInclusions, err = captureBundleSource(script, entry, sensitive, warn, true)
+		} else {
+			files, sensitiveInclusions, err = captureBundle(bundle, entry, sensitive, warn)
+		}
 		if err != nil {
 			fmt.Fprintln(options.Stderr, err)
 			return 125

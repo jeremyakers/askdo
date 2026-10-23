@@ -266,6 +266,28 @@ not malicious processes sharing your Unix UID and file/memory access.
 
 ## Review a script before you run it
 
+For a self-contained local Bash script, including one under `/tmp`, capture
+just that file before requesting privilege:
+
+```sh
+askdo --review=yes --reason 'Review this maintenance script' \
+  --script /tmp/maintenance.sh -- 'one script argument'
+```
+
+`--script` is a source feature; older installed CLIs do not recognize it. It
+submits a one-file bundle, not the script's containing directory, so unrelated
+temporary files are not collected. The reviewer can read the captured copy even
+when the original host path is outside `inspection.read_roots`, and dispatch
+uses those captured bytes. Existing bundle approval and credential-masking
+rules apply; this option does not grant broader host inspection or root access.
+
+This explicitly selects bundle Bash execution: the calling working directory
+and trailing arguments are preserved, but the script runs from the job's staged
+bundle rather than its original pathname. Use a full bundle for sibling files;
+use ordinary argv if original-path or different-interpreter semantics are
+required. Plain `askdo -- /usr/bin/bash /tmp/file.sh` remains a live-path command:
+askdo does not silently rewrite it or snapshot its script argument.
+
 Lots of projects start with `curl … | sh`. Convenient, but what does that
 script actually do?
 
@@ -285,9 +307,10 @@ the askdo side of the pipe. A downloaded file works the same way:
 askdo --review=yes --reason 'Review this installer' -- bash < installer.sh
 ```
 
-Captured scripts can be up to 1 MiB; use a bundle for larger installers.
-Every captured script needs a human tap in Telegram; askdo never auto-approves
-one. The reviewer reports on the script itself; if it mentions an installer
+Captured stdin can be up to 1 MiB; use a bundle for larger installers.
+Every captured-stdin script needs a human tap in Telegram; askdo never auto-approves
+one. This stdin rule is separate from the existing bundle rules used by
+`--script`. The reviewer reports on the script itself; if it mentions an installer
 URL it didn't inspect, you can let it fetch and read those pages too with the
 reviewer's separate `webfetch` tool (off by default; see
 [configuration](docs/configuration.md)). If the approved script downloads more

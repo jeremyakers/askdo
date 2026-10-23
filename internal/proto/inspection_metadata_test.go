@@ -122,10 +122,71 @@ func TestMetadataReasonsPayloadFreeAndOperationBound(t *testing.T) {
 			t.Fatal("failure payload accepted")
 		}
 	}
-	req.Op = "mount_info"
-	res := InspectResult{Type: "inspect_result", Status: "inspection_denied", ReasonCode: "outside_scope"}
-	if err := ValidateInspectResultFor(req, res); err == nil {
-		t.Fatal("legacy op reason accepted")
+	// Direct-only denial classes are not metadata reasons.
+	for _, reason := range []string{"protected_path", "unverified_identity", "unsupported_object"} {
+		res := InspectResult{Type: "inspect_result", Status: "inspection_denied", ReasonCode: reason}
+		if err := ValidateInspectResultFor(req, res); err == nil {
+			t.Fatalf("direct denial reason %s accepted for hash_path", reason)
+		}
+	}
+}
+
+// Direct path operations classify exactly one status: a policy denial. Every
+// existing reason-free result (including the old golden failure shapes) stays
+// valid, metadata-only reasons stay bound to their operations, and no other
+// status may carry a reason on a direct operation.
+func TestDirectOperationDenialReasons(t *testing.T) {
+	requests := map[string]InspectRequest{
+		"read_path":   {Type: "inspect_request", Op: "read_path", Payload: json.RawMessage(`{"base":"host","path":"/tmp/script.sh","offset":0,"max_bytes":64}`)},
+		"list_path":   {Type: "inspect_request", Op: "list_path", Payload: json.RawMessage(`{"base":"host","path":"/tmp","cursor":""}`)},
+		"search_path": {Type: "inspect_request", Op: "search_path", Payload: json.RawMessage(`{"base":"host","path":"/tmp","pattern":"x","cursor":""}`)},
+		"stat_path":   {Type: "inspect_request", Op: "stat_path", Payload: json.RawMessage(`{"base":"host","path":"/tmp/script.sh","resolve":false}`)},
+		"find_path":   {Type: "inspect_request", Op: "find_path", Payload: json.RawMessage(`{"base":"host","path":"/tmp","glob":"*.sh","cursor":""}`)},
+		"mount_info":  {Type: "inspect_request", Op: "mount_info", Payload: json.RawMessage(`{"path":"/tmp"}`)},
+	}
+	for op, req := range requests {
+		t.Run(op, func(t *testing.T) {
+			for _, tc := range []struct {
+				status, reason string
+				valid          bool
+			}{
+				{"inspection_denied", "", true}, {"withheld", "", true}, {"not_found", "", true}, {"unknown", "", true},
+				{"inspection_denied", "outside_scope", true}, {"inspection_denied", "protected_path", true},
+				{"inspection_denied", "unverified_identity", true}, {"inspection_denied", "unsupported_object", true},
+				{"inspection_denied", "disabled", false}, {"inspection_denied", "unauthorized_uid", false}, {"inspection_denied", "not_executable", false},
+				{"inspection_denied", "deny_paths /srv/private", false}, {"inspection_denied", "default deny", false},
+				{"withheld", "policy_withheld", false}, {"not_found", "object_not_found", false}, {"not_found", "outside_scope", false},
+				{"unknown", "inspection_failed", false}, {"limit_exceeded", "output_limit", false},
+			} {
+				res := InspectResult{Type: "inspect_result", RequestSeq: req.RequestSeq, Status: tc.status, ReasonCode: tc.reason}
+				if err := ValidateInspectResultFor(req, res); (err == nil) != tc.valid {
+					t.Errorf("%s/%q: valid=%v err=%v", tc.status, tc.reason, tc.valid, err)
+				}
+			}
+			// Without the request, the frame validator accepts the union of the
+			// closed codes for the status but still rejects free text and
+			// mismatched pairs.
+			for _, tc := range []struct {
+				status, reason string
+				valid          bool
+			}{
+				{"inspection_denied", "protected_path", true}, {"inspection_denied", "unverified_identity", true}, {"inspection_denied", "unsupported_object", true},
+				{"inspection_denied", "deny_paths /srv/private", false}, {"not_found", "protected_path", false}, {"withheld", "outside_scope", false},
+			} {
+				res := InspectResult{Type: "inspect_result", RequestSeq: req.RequestSeq, Status: tc.status, ReasonCode: tc.reason}
+				if err := ValidateWorkerMessage(res, BrokerToWorker); (err == nil) != tc.valid {
+					t.Errorf("frame %s/%q: valid=%v err=%v", tc.status, tc.reason, tc.valid, err)
+				}
+			}
+			ok := InspectResult{Type: "inspect_result", RequestSeq: req.RequestSeq, Status: "ok", ReasonCode: "outside_scope", Payload: json.RawMessage(`{}`)}
+			if err := ValidateInspectResultFor(req, ok); err == nil {
+				t.Error("success with reason accepted")
+			}
+			denied := InspectResult{Type: "inspect_result", RequestSeq: req.RequestSeq, Status: "inspection_denied", ReasonCode: "outside_scope", Payload: json.RawMessage(`{}`)}
+			if err := ValidateInspectResultFor(req, denied); err == nil {
+				t.Error("denied payload accepted")
+			}
+		})
 	}
 }
 

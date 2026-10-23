@@ -19,6 +19,7 @@ func isHelpWord(arg string) bool {
 func writeTopHelp(w io.Writer) {
 	fmt.Fprint(w, `usage: askdo [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] -- COMMAND [ARG...]
        askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
+       askdo [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
        askdo status|attach JOB_ID
        askdo cancel --handle-file PATH [--force]
        askdo cancel JOB_ID                 legacy jobs, before dispatch only
@@ -26,6 +27,13 @@ func writeTopHelp(w io.Writer) {
 
 Run COMMAND with privilege after approval. Put -- before COMMAND so its own
 flags are passed to it unchanged.
+
+--script captures only PATH, preserving its basename and bytes, as a one-file
+bundle. Like --bundle, it runs with /bin/bash from the invocation directory;
+ARGs go to the script. No executable bit is required. Sensitive basenames need
+--bundle-include-sensitive BASENAME. Use --bundle with --entry for sidecars or
+dependencies. --script cannot be combined with --bundle, --entry, or captured
+stdin. Ordinary COMMAND argv stays raw/live; scripts there are not snapshotted.
 
 Submission prints JOB_ID and a private CANCEL_HANDLE_FILE path. Keep that file
 to interrupt your own running command; --force requests SIGKILL explicitly.

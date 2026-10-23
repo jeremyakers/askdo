@@ -274,17 +274,33 @@ func DecodeInspectionMetadataResult(request InspectRequest, result InspectResult
 	return nil, errors.New("unknown metadata result")
 }
 
+// directDenialReason reports the closed classes a direct path operation may
+// attach to an inspection_denied result. They mirror the broker policy's
+// denial reasons: configured scope, the hard-protected set, an unverifiable
+// object identity, or an object kind the operation cannot inspect.
+func directDenialReason(code string) bool {
+	return oneOf(code, "outside_scope", "protected_path", "unverified_identity", "unsupported_object")
+}
+
 func validateInspectionReason(op string, r InspectResult) error {
 	if r.ReasonCode == "" {
 		return nil
 	}
-	if (op != "" && !isMetadataOp(op)) || r.Status == "ok" {
-		return errors.New("reason_code forbidden for operation or success")
+	if r.Status == "ok" {
+		return errors.New("reason_code forbidden for success")
+	}
+	if op != "" && !isMetadataOp(op) {
+		// Direct operations classify only a policy denial; every other
+		// status stays the bare legacy word.
+		if r.Status != "inspection_denied" || !directDenialReason(r.ReasonCode) {
+			return errors.New("reason_code invalid for direct operation")
+		}
+		return nil
 	}
 	var valid bool
 	switch r.Status {
 	case "inspection_denied":
-		valid = oneOf(r.ReasonCode, "disabled", "outside_scope", "unauthorized_uid", "not_executable")
+		valid = oneOf(r.ReasonCode, "disabled", "outside_scope", "unauthorized_uid", "not_executable") || (op == "" && directDenialReason(r.ReasonCode))
 	case "withheld":
 		valid = r.ReasonCode == "policy_withheld"
 	case "not_found":

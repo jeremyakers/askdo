@@ -141,6 +141,48 @@ func TestSameBatchReadCompletes(t *testing.T) {
 	}
 }
 
+// deniedBroker answers every host inspection with the broker's classified
+// denial, exactly as the root policy reports a configured-scope rejection.
+type deniedBroker struct{ reason string }
+
+func (b deniedBroker) Inspect(_ context.Context, req proto.InspectRequest) (proto.InspectResult, error) {
+	return proto.InspectResult{Type: "inspect_result", RequestSeq: req.RequestSeq, Status: "inspection_denied", ReasonCode: b.reason}, nil
+}
+
+// The model sees the broker's closed denial reason in its next turn's tool
+// message — through the real loop, not only the executor's return value — so a
+// configured-scope rejection is not mistaken for a missing file. A reason
+// that is not a closed code never reaches the model, and a reason-free legacy
+// denial renders exactly as before.
+func TestModelReceivesClosedDenialReasonInToolResult(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   string
+	}{
+		{"outside_scope", `{"reason_code":"outside_scope","status":"inspection_denied"}`},
+		{"protected_path", `{"reason_code":"protected_path","status":"inspection_denied"}`},
+		{"", `{"status":"inspection_denied"}`},
+		{"deny_paths /srv/private-share", `{"error":"invalid inspection reason_code","status":"error"}`},
+	} {
+		b := bootstrap(2, time.Now().Add(time.Minute))
+		m := &fakemodel.Model{Steps: []fakemodel.Step{
+			{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("1", "read_path", `{"base":"host","path":"/tmp/authelia-nas-repair.sh","offset":0,"max_bytes":128}`)}}},
+			{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("2", "submit_review", reviewerTestReport("unknown"))}}},
+		}}
+		review, err := (&reviewer.Loop{Model: m, Tools: reviewer.NewToolExecutor(b, deniedBroker{reason: tc.reason}), Bootstrap: b}).Run(context.Background())
+		if err != nil || review.Report.Risk != "unknown" || len(m.Requests) != 2 {
+			t.Fatalf("%q: review=%+v err=%v requests=%d", tc.reason, review.Report, err, len(m.Requests))
+		}
+		result := m.Requests[1].Messages[len(m.Requests[1].Messages)-1]
+		if result.Role != "tool" || result.ToolCallID != "1" || result.Content != tc.want {
+			t.Fatalf("%q: model-visible tool result=%+v, want %s", tc.reason, result, tc.want)
+		}
+		if strings.Contains(result.Content, "private-share") {
+			t.Fatalf("%q: raw broker reason leaked to the model: %s", tc.reason, result.Content)
+		}
+	}
+}
+
 func TestCapturedStdinSameBatchRequiresSuccessfulNextModelTurn(t *testing.T) {
 	for _, continuation := range []bool{true, false} {
 		b := bootstrap(3, time.Now().Add(time.Minute))

@@ -19,13 +19,36 @@ type authorization struct {
 	sensitive bool
 }
 
-func denied(reason string) error { return fmt.Errorf("%s: %w", reason, unix.EXDEV) }
+// denialError is the one policy-denial error. Its text is an operator
+// diagnostic that may name private rule spellings and must never leave the
+// broker; Reason is the closed classification callers may surface. It still
+// matches unix.EXDEV so every existing status mapping is unchanged.
+type denialError struct {
+	text   string
+	reason Reason
+}
+
+func (e *denialError) Error() string { return e.text + ": " + unix.EXDEV.Error() }
+func (e *denialError) Unwrap() error { return unix.EXDEV }
+
+func denied(reason Reason, text string) error { return &denialError{text: text, reason: reason} }
+
+// denialReason extracts the closed Reason decided where err was raised. Errors
+// that are not this package's policy denials carry no classification.
+func denialReason(err error) Reason {
+	var d *denialError
+	if errors.As(err, &d) {
+		return d.reason
+	}
+	return ""
+}
+
 func mountID(fd int) (uint64, error) {
 	var st unix.Statx_t
 	err := descriptorStatx(fd, "", unix.AT_EMPTY_PATH|unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &st)
 	if err == nil && st.Mask&unix.STATX_MNT_ID != 0 {
 		if st.Mnt_id == 0 {
-			return 0, denied("mount ID unavailable")
+			return 0, denied(ReasonUnverifiedIdentity, "mount ID unavailable")
 		}
 		return st.Mnt_id, nil
 	}
@@ -42,7 +65,7 @@ func mountID(fd int) (uint64, error) {
 		return 0, err
 	}
 	if id <= 0 || handle.Size() > 128 {
-		return 0, denied("mount ID unavailable")
+		return 0, denied(ReasonUnverifiedIdentity, "mount ID unavailable")
 	}
 	return uint64(id), nil
 }
@@ -55,33 +78,33 @@ func (p *Policy) authorizeFD(fd int, requested string) (authorization, error) {
 		return a, err
 	}
 	if fileType(a.stat.Mode) == "other" && a.stat.Mode&unix.S_IFMT != unix.S_IFLNK {
-		return a, denied("special filesystem object")
+		return a, denied(ReasonUnsupportedObject, "special filesystem object")
 	}
 	var fs unix.Statfs_t
 	if err := unix.Fstatfs(fd, &fs); err != nil {
 		return a, err
 	}
 	if pseudoFilesystem(fs.Type) {
-		return a, denied("pseudo-filesystem")
+		return a, denied(ReasonUnsupportedObject, "pseudo-filesystem")
 	}
 	if _, ok := p.hardIDs[fileIdentity{dev: uint64(a.stat.Dev), ino: a.stat.Ino}]; ok {
-		return a, denied("protected exclusion identity")
+		return a, denied(ReasonProtectedPath, "protected exclusion identity")
 	}
 	if a.stat.Mode&unix.S_IFMT == unix.S_IFREG && a.stat.Nlink > 1 {
-		return a, denied("multiple hardlinks: unverified alternate names")
+		return a, denied(ReasonUnverifiedIdentity, "multiple hardlinks: unverified alternate names")
 	}
 	path, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
 	if err != nil {
 		return a, err
 	}
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.HasSuffix(path, " (deleted)") || strings.IndexByte(path, 0) >= 0 {
-		return a, denied("detached or unrepresentable path")
+		return a, denied(ReasonUnverifiedIdentity, "detached or unrepresentable path")
 	}
 	a.resolved = path
 	for _, name := range []string{requested, path} {
 		d := p.rule(name)
 		if !d.allowed {
-			return a, denied(d.rule + " at " + name)
+			return a, denied(d.reason, d.rule+" at "+name)
 		}
 		a.rule = d.rule
 		a.sensitive = a.sensitive || p.MatchesSensitive(name)
@@ -106,17 +129,17 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		m := &mounts[i]
 		if m.id == a.mountID && m.major == unix.Major(uint64(a.stat.Dev)) && m.minor == unix.Minor(uint64(a.stat.Dev)) && containsPath(m.point, a.resolved) {
 			if active != nil {
-				return denied("ambiguous mount identity")
+				return denied(ReasonUnverifiedIdentity, "ambiguous mount identity")
 			}
 			active = m
 		}
 	}
 	if active == nil {
-		return denied("unknown or changed mount mapping")
+		return denied(ReasonUnverifiedIdentity, "unknown or changed mount mapping")
 	}
 	rel, err := filepath.Rel(active.point, a.resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		return denied("mountpoint mismatch")
+		return denied(ReasonUnverifiedIdentity, "mountpoint mismatch")
 	}
 	coordinate := filepath.Join(active.root, rel)
 	// Filesystem coordinates are not namespace paths. Only mountinfo entries
@@ -127,7 +150,7 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		}
 		part, err := filepath.Rel(m.root, coordinate)
 		if err != nil {
-			return denied("unrepresentable mount alias")
+			return denied(ReasonUnverifiedIdentity, "unrepresentable mount alias")
 		}
 		alias := filepath.Join(m.point, part)
 		// Translate the filesystem source coordinate back through every mount
@@ -137,12 +160,12 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		// not source exclusion evidence; that still requires identity below.
 		for _, hard := range p.hard {
 			if containsPath(hard, alias) {
-				return denied("protected mount source " + alias)
+				return denied(ReasonProtectedPath, "protected mount source "+alias)
 			}
 		}
 		for _, exclude := range p.denies {
 			if containsPath(exclude, alias) && !p.rule(alias).allowed {
-				return denied("excluded mount source " + alias)
+				return denied(ReasonOutsideScope, "excluded mount source "+alias)
 			}
 		}
 		a.sensitive = a.sensitive || p.MatchesSensitive(alias)
@@ -167,13 +190,13 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 			return err
 		}
 		if p.legacyRoot != nil && st.Mode&unix.S_IFMT == unix.S_IFLNK && a.stat.Mode&unix.S_IFMT != unix.S_IFLNK {
-			return denied("legacy mount alias terminal symlink unproved")
+			return denied(ReasonUnverifiedIdentity, "legacy mount alias terminal symlink unproved")
 		}
 		if st.Dev != a.stat.Dev || st.Ino != a.stat.Ino {
 			continue
 		} // overmounted, not an alias
 		if d := p.rule(alias); !d.allowed {
-			return denied("mount alias " + alias + " is " + d.rule)
+			return denied(d.reason, "mount alias "+alias+" is "+d.rule)
 		}
 	}
 	return nil
@@ -183,7 +206,10 @@ func (p *Policy) authorizedOpen(path string, flags int) (int, authorization, err
 	var a authorization
 	root, rel, ok := p.selectRoot(path)
 	if !ok {
-		return -1, a, denied(p.rule(path).rule)
+		// The rule table's own decision classifies the denial; a spelling the
+		// table would allow was rejected for shape and stays unclassified.
+		d := p.rule(path)
+		return -1, a, denied(d.reason, d.rule)
 	}
 	fd, err := p.open(root, rel, unix.O_PATH|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -195,7 +221,7 @@ func (p *Policy) authorizedOpen(path string, flags int) (int, authorization, err
 		return -1, a, err
 	}
 	if p.legacyRoot != nil && a.stat.Mode&unix.S_IFMT == unix.S_IFLNK {
-		return -1, a, denied("legacy terminal symlink follow unsupported")
+		return -1, a, denied(ReasonUnsupportedObject, "legacy terminal symlink follow unsupported")
 	}
 	// Masked objects remain metadata-only: never upgrade their O_PATH FD to
 	// one capable of reading content, even when a caller requested read flags.
@@ -209,14 +235,14 @@ func (p *Policy) authorizedOpen(path string, flags int) (int, authorization, err
 	}
 	var st unix.Stat_t
 	if err = unix.Fstat(readFD, &st); err == nil && (st.Dev != a.stat.Dev || st.Ino != a.stat.Ino) {
-		err = denied("readable descriptor changed")
+		err = denied(ReasonUnverifiedIdentity, "readable descriptor changed")
 	}
 	var id uint64
 	if err == nil {
 		id, err = mountID(readFD)
 	}
 	if err == nil && id != a.mountID {
-		err = denied("readable descriptor mount changed")
+		err = denied(ReasonUnverifiedIdentity, "readable descriptor mount changed")
 	}
 	if err != nil {
 		unix.Close(readFD)
@@ -232,7 +258,7 @@ func (p *Policy) revalidate(path string, before authorization) error {
 	}
 	defer unix.Close(fd)
 	if after.stat.Dev != before.stat.Dev || after.stat.Ino != before.stat.Ino || after.mountID != before.mountID || after.resolved != before.resolved || after.sensitive != before.sensitive {
-		return denied("requested path or mount mapping changed")
+		return denied(ReasonUnverifiedIdentity, "requested path or mount mapping changed")
 	}
 	return nil
 }

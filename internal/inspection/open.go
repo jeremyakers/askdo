@@ -29,6 +29,31 @@ const (
 	StatusError                Status = "inspection_error"
 )
 
+// Reason is the closed, path-free classification of a StatusInspectionDenied
+// outcome. It is taken from the same rule decision or open attempt that
+// produced the status — never from a second check — so a configured scope
+// rejection is not confused with a missing object or a universal inability to
+// inspect. The empty Reason means the denial carries no finer classification.
+// A Reason never names a rule spelling, canonical alias or syscall message.
+type Reason string
+
+const (
+	// ReasonOutsideScope: the configured read_roots/deny_paths rules (or the
+	// default deny) rejected the requested, resolved or mount-alias spelling.
+	ReasonOutsideScope Reason = "outside_scope"
+	// ReasonProtectedPath: the hard-protected set (askdo state, /proc, /sys,
+	// /dev and configured protected paths) rejected the spelling, object
+	// identity or mount source. Configuration cannot widen it.
+	ReasonProtectedPath Reason = "protected_path"
+	// ReasonUnverifiedIdentity: the object's identity could not be proven
+	// (multiple hardlinks, ambiguous or unmapped mount, changed descriptor).
+	ReasonUnverifiedIdentity Reason = "unverified_identity"
+	// ReasonUnsupportedObject: the object kind or filesystem is not
+	// inspectable by this operation (special file, pseudo-filesystem, a
+	// directory read as content, or an unsupported legacy symlink follow).
+	ReasonUnsupportedObject Reason = "unsupported_object"
+)
+
 // Knowledge records whether a supported deterministic fact is present, absent,
 // or could not be determined.
 type Knowledge string
@@ -73,6 +98,7 @@ type SubmitterIdentity struct {
 // and directory listings only; bounded file bytes come from ReadRange.
 type Result struct {
 	Status        Status
+	Reason        Reason
 	Facts         *Facts
 	Entries       []DirectoryEntry
 	SkippedMasked int
@@ -89,6 +115,7 @@ type Result struct {
 // non-OK status Content is absent; no capture ID or evidence is created.
 type RangeResult struct {
 	Status     Status
+	Reason     Reason
 	Content    []byte
 	NextOffset int64
 	EOF        bool
@@ -113,14 +140,14 @@ func (p *Policy) ReadRange(path string, offset int64, maxBytes int, identity Sub
 	fd, auth, err := p.authorizedOpen(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC)
 	if err != nil {
 		r := resultForError(err)
-		return RangeResult{Status: r.Status, Err: r.Err}
+		return RangeResult{Status: r.Status, Reason: r.Reason, Err: r.Err}
 	}
 	defer unix.Close(fd)
 	if auth.sensitive {
 		return RangeResult{Status: StatusWithheld}
 	}
 	if auth.stat.Mode&unix.S_IFMT != unix.S_IFREG {
-		return RangeResult{Status: StatusInspectionDenied}
+		return RangeResult{Status: StatusInspectionDenied, Reason: ReasonUnsupportedObject}
 	}
 	var before unix.Stat_t
 	if err := unix.Fstat(fd, &before); err != nil {
@@ -246,7 +273,7 @@ func (p *Policy) listDir(path string, offset, maxEntries, totalCap int, identity
 		return resultForError(err)
 	}
 	if facts.Type != "dir" {
-		return Result{Status: StatusInspectionDenied, Facts: facts}
+		return Result{Status: StatusInspectionDenied, Reason: ReasonUnsupportedObject, Facts: facts}
 	}
 	// Bound total directory size before materializing the sorted page index;
 	// ReadDir(-1) on an unbounded directory would exhaust broker memory.
@@ -455,6 +482,9 @@ func xattrKnowledge(fd int, name string) Knowledge {
 	}
 }
 
+// resultForError maps an authorization or open error to its status. Only a
+// policy denial raised by this package carries a typed Reason; a bare errno
+// denial (ELOOP, EACCES, EPERM, ENXIO) is honestly unclassified.
 func resultForError(err error) Result {
 	status := StatusUnknown
 	switch {
@@ -465,5 +495,5 @@ func resultForError(err error) Result {
 	case errors.Is(err, unix.EXDEV), errors.Is(err, unix.ELOOP), errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM), errors.Is(err, unix.ENXIO):
 		status = StatusInspectionDenied
 	}
-	return Result{Status: status, Err: err}
+	return Result{Status: status, Reason: denialReason(err), Err: err}
 }
