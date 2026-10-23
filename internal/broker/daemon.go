@@ -118,6 +118,9 @@ type daemon struct {
 	// own rubric files. Neither is read at startup: files are read per review.
 	riskPolicyDefault string
 	riskPolicyTrust   riskPolicyTrust
+	// accountGroups is the narrow account-database seam; nil uses LookupId and
+	// GroupIds, never the submitting process's credentials. Looked up per review.
+	accountGroups func(uint32) ([]uint32, error)
 
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc

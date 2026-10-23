@@ -93,24 +93,31 @@ The immutable job bootstrap; the first and only message of its kind.
 | `review_deadline_unix_ms` | int64 > 0 (client-now + `review.total_timeout`) |
 | `approval_only` | optional bool (policy bypass or all broker-preflight provider failures; never a forced review) |
 | `preflight_failures` | optional array of typed broker-classified provider availability failures; omitted otherwise |
-| `risk_policy` | optional object with required `text` string: the exact administrator rubric selected and snapshotted by the root broker for this submitting UID; absent retains the embedded rubric |
+| `risk_policy` | optional object with required `text` string: exact host guidance replacing only built-in calibration; absent retains built-in calibration |
+| `account_notes` | optional array of objects with required `text` string: exact additive context in applicable group-name order, then the submitter's user note; absent/empty adds nothing |
 
-The worker neither selects policy files nor reports an authoritative policy
-revision. The root broker resolves `review.risk_policy_files` login names to
-authenticated submitting UIDs, falling back to its optional host-default file,
-and owns the exact-byte snapshot and SHA-256 audit in the frozen manifest.
-Rubric text must be valid UTF-8 without NUL and fit existing framing limits.
+The worker neither selects administrator files nor reports authoritative
+revisions. The root broker resolves `review.account_notes` login/group names at
+config load, and looks up authenticated submitting UIDs' current account-database
+groups per review. Host guidance and notes compose through one shared function;
+notes never replace calibration or compiled protocol duties. The broker owns the
+exact-byte snapshots and ordered `administrator_layers` audit in manifest v1
+(scope, name, subject UID, source, SHA-256, text), replacing the old single
+`risk_policy` audit field. See [configuration and rc.15 migration](configuration.md#reviewer-instruction-layers-and-account-notes).
+All text must be valid UTF-8 without NUL and fit the combined framing limits.
 Fleet mode additionally requires the complete resulting system message to meet
 the existing fleet message-content limit and character rules. Policy files are
 not exposed through host-inspection tools to accomplish this projection.
 
-`risk_policy` is a private bootstrap extension: older strict workers reject it.
-Upgrade a host's broker and reviewer together before selecting a custom rubric.
+This private worker protocol has no version field. `account_notes` is an optional
+extension: older strict workers reject it; new workers accept old bootstraps.
+Upgrade a host's broker and reviewer together before configuring account notes.
 The gateway model wire and display schema do not gain new fields; the selected
-rubric travels inside the existing system message. For custom-rubric jobs, the
+guidance and notes travel inside the existing system message. For jobs with any administrator layer, the
 root broker requires the worker's first system message to match its own frozen
-instructions and forbids additional system messages. Jobs without a custom
-rubric retain their existing request checks.
+instructions and forbids additional system messages. Jobs without administrator
+layers retain their existing request checks. Fleet wire versions are unchanged;
+no gateway upgrade is required for these fields.
 
 **`operation`:**
 

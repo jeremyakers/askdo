@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
@@ -218,12 +219,12 @@ func makeRiskPolicyDir(t *testing.T, dir string, mode os.FileMode) string {
 
 // loadRubric selects and reads a rubric the way the start of an AI review does,
 // for a broker whose rubric trust is the given fixture. A non-nil files map is
-// resolved like review.risk_policy_files at Load.
+// resolved like review.account_notes.users at Load.
 func loadRubric(t *testing.T, trust riskPolicyTrust, hostDefault string, uid uint32, files map[string]string) (*riskPolicySnapshot, error) {
 	t.Helper()
 	cfg := testConfig()
-	cfg.Review.RiskPolicyFiles = files
-	if err := cfg.Review.ResolveRiskPolicyFiles(); err != nil {
+	cfg.Review.AccountNotes = &config.AccountNotesConfig{Users: files}
+	if err := cfg.Review.ResolveAccountNotes(); err != nil {
 		t.Fatal(err)
 	}
 	job := &jobRuntime{daemon: &daemon{cfg: cfg, riskPolicyDefault: hostDefault, riskPolicyTrust: trust}, uid: uid, req: proto.SubmitRequest{RequestID: "2026-10-21_#1"}}
@@ -299,7 +300,7 @@ func TestPresentHostDefaultIsStillHeldToTheTrustRule(t *testing.T) {
 			path := writeRiskPolicyFile(t, filepath.Join(dir, riskPolicyFileName), []byte(rubric), 0o644)
 			snapshot, err := loadRubric(t, trust, path, uid, nil)
 			if layout.trusted {
-				if err != nil || snapshot == nil || snapshot.text != rubric || snapshot.scope != riskPolicyScopeHost || snapshot.revision != revisionOf(rubric) {
+				if err != nil || snapshot == nil || len(snapshot.layers) != 1 || snapshot.layers[0].Text != rubric || snapshot.layers[0].Scope != riskPolicyScopeHost || snapshot.layers[0].SHA256 != revisionOf(rubric) {
 					t.Fatalf("trusted layout: snapshot=%+v err=%v", snapshot, err)
 				}
 				return
@@ -380,7 +381,7 @@ func TestAbsentHostDefaultUnderUntrustedAncestorDoesNotFailAIReviews(t *testing.
 	if result.State != "finished" || boot.RiskPolicy != nil {
 		t.Fatalf("state=%s message=%q rubric=%+v, want a finished review with no rubric", result.State, result.Message, boot.RiskPolicy)
 	}
-	if manifest := frozenManifestBytes(t, h, env.b.uid, id); bytes.Contains(manifest, []byte("risk_policy")) {
+	if manifest := frozenManifestBytes(t, h, env.b.uid, id); bytes.Contains(manifest, []byte("administrator_layers")) {
 		t.Fatalf("default review manifest gained a rubric record: %s", manifest)
 	}
 }

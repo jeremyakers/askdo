@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,22 +24,23 @@ import (
 	"github.com/jeremyakers/askdo/internal/store"
 )
 
-// This suite chains what the other rubric tests cover only in pairs: a real
+// This suite chains what the other instruction tests cover only in pairs: a real
 // root broker and real reviewer child, root-mediated fleet turns across the
 // real TLS gateway, the loopback provider fixture, and the fake-human
-// approval gate, with a different administrator rubric assigned to each of
-// two kernel-authenticated submitting accounts. It runs only in the
+// approval gate, with user notes for two authenticated accounts and a group
+// note selected from the grantee's account-database membership. It runs only in the
 // disposable root container (ASKDO_ROOT_TEST=1 as euid 0 with the provisioned
 // askdo-grantee account), and it needs TMPDIR to sit in a root-owned,
 // non-group/world-writable tree because the production rubric trust rule
 // verifies every ancestor from "/". The standard root runner provides it.
 const (
-	fleetRubricRoot = "# Root account rubric\n" +
+	fleetRubricRoot = "# Root account notes\n" +
 		"FLEET-RUBRIC-CANARY-ROOT-ACCOUNT-91c2e7\n" +
 		"Routine identity probes are expected work for this account.\n"
-	fleetRubricGrantee = "# Grantee account rubric\n" +
+	fleetRubricGrantee = "# Grantee account notes\n" +
 		"FLEET-RUBRIC-CANARY-GRANTEE-ACCOUNT-53af08\n" +
 		"Only the declared batch jobs are routine for this account; anything else is unusual.\n"
+	fleetGroupNote = "# Group notes\nFLEET-GROUP-NOTE-CANARY-2c735e\nThis group maintains the fixture host.\n"
 )
 
 // fleetRiskPolicyDir returns a root-owned rubric directory the production
@@ -47,11 +49,7 @@ const (
 // TMPDIR at a trusted tree; real job execution below verifies that provenance.
 func fleetRiskPolicyDir(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "askdo-risk-policy-fleet-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -122,12 +120,12 @@ func awaitRiskPolicyFleetJob(t *testing.T, jobs *store.Store, uid uint32, id str
 	return store.Job{}
 }
 
-// assertFleetProviderSystemRubric checks one actual provider-bound request:
+// assertFleetProviderAccountNotes checks one actual provider-bound request:
 // its first message must be exactly the trusted instructions derived from the
 // submitting account's rubric bytes, carry none of the other account's
 // canary, and contain no later system message (root's fleet pin).
 // Instruction text is compared, never logged.
-func assertFleetProviderSystemRubric(t *testing.T, raw []byte, rubric, foreignCanary string) {
+func assertFleetProviderAccountNotes(t *testing.T, raw []byte, notes []proto.AccountNote, foreignCanary string) {
 	t.Helper()
 	var request struct {
 		Messages []struct {
@@ -141,8 +139,8 @@ func assertFleetProviderSystemRubric(t *testing.T, raw []byte, rubric, foreignCa
 	if len(request.Messages) == 0 || request.Messages[0].Role != "system" {
 		t.Fatal("the first provider-bound message is not the system instructions")
 	}
-	if want := reviewer.SystemInstructions(&proto.RiskPolicy{Text: rubric}); request.Messages[0].Content != want {
-		t.Fatal("provider system message is not the exact rubric root selected for the submitting account")
+	if want := reviewer.SystemInstructions(nil, notes...); request.Messages[0].Content != want {
+		t.Fatal("provider system message is not the exact account context root selected")
 	}
 	if strings.Contains(request.Messages[0].Content, foreignCanary) {
 		t.Fatal("provider system message carries another account's rubric canary")
@@ -154,22 +152,17 @@ func assertFleetProviderSystemRubric(t *testing.T, raw []byte, rubric, foreignCa
 	}
 }
 
-// assertFleetManifestRubric checks the frozen manifest's rubric audit record:
+// assertFleetManifestLayers checks the frozen manifest's ordered audit records:
 // the exact bytes and hash root read, the configured source, and the
 // kernel-authenticated submitter UID it was selected for.
-func assertFleetManifestRubric(t *testing.T, f *rootFleetFixture, uid uint32, id, source, rubric string) {
+func assertFleetManifestLayers(t *testing.T, f *rootFleetFixture, uid uint32, id string, want []manifestAdministratorLayer) {
 	t.Helper()
 	var manifest approvalManifest
 	if err := json.Unmarshal(frozenManifestBytes(t, f.broker, uid, id), &manifest); err != nil {
 		t.Fatal(err)
 	}
-	got := manifest.RiskPolicy
-	if got == nil {
-		t.Fatalf("frozen manifest for uid %d records no rubric", uid)
-	}
-	if got.SubjectUID != uid || got.Scope != riskPolicyScopeUser || got.Source != source || got.SHA256 != revisionOf(rubric) || got.Text != rubric {
-		t.Fatalf("frozen manifest rubric for uid %d: subject=%d scope=%q source_match=%t sha_match=%t text_match=%t",
-			uid, got.SubjectUID, got.Scope, got.Source == source, got.SHA256 == revisionOf(rubric), got.Text == rubric)
+	if !reflect.DeepEqual(manifest.AdministratorLayers, want) {
+		t.Fatalf("frozen manifest layers for uid %d differ from the selected account notes", uid)
 	}
 }
 
@@ -190,11 +183,14 @@ type riskPolicyClient struct {
 
 func startRiskPolicyClient(t *testing.T, binary, reason string, uid, gid uint32) *riskPolicyClient {
 	t.Helper()
-	home, err := os.MkdirTemp("", "askdo-client-state-")
-	if err != nil {
-		t.Fatal(err)
+	home := t.TempDir()
+	// t.TempDir's per-test parent is root-only. Make only this fixture's
+	// ancestors traversable for the dropped-credential client, not shared temp.
+	for parent := filepath.Dir(home); parent != "/" && parent != os.TempDir() && strings.HasPrefix(parent, os.TempDir()+string(os.PathSeparator)); parent = filepath.Dir(parent) {
+		if err := os.Chmod(parent, 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	if err := os.Chown(home, int(uid), int(gid)); err != nil {
 		t.Fatal(err)
 	}
@@ -234,29 +230,35 @@ func awaitRiskPolicyClientExit(t *testing.T, client *riskPolicyClient) {
 	}
 }
 
-// Two accounts, two different administrator rubrics, one full privileged
+// Two accounts, group plus user context, one full privileged
 // chain each: the provider must see exactly the rubric root selected for the
 // kernel-authenticated submitter, the frozen manifest must record those exact
 // bytes/hash/binding, nothing may execute before the fake human approves, and
 // each approved job must run its command exactly once.
-func TestRootFleetPerUserRiskPolicyEndToEnd(t *testing.T) {
+func TestRootFleetAccountNotesEndToEnd(t *testing.T) {
+	// Given
 	requireRootTest(t)
 	dir := fleetRiskPolicyDir(t)
 	rootPath := writeRiskPolicyFile(t, filepath.Join(dir, "root.md"), []byte(fleetRubricRoot), 0o644)
 	granteePath := writeRiskPolicyFile(t, filepath.Join(dir, "grantee.md"), []byte(fleetRubricGrantee), 0o644)
+	groupPath := writeRiskPolicyFile(t, filepath.Join(dir, "group.md"), []byte(fleetGroupNote), 0o644)
 	granteeUID, granteeGID := fleetGranteeIdentity(t)
+	group, err := user.LookupGroupId(strconv.FormatUint(uint64(granteeGID), 10))
+	if err != nil {
+		t.Fatal(err)
+	}
 	binary := buildFleetReviewer(t)
 	f := newRootFleetFixture(t, binary, "1", false, false, false, rootFleetOptions{
 		foreground: true, // production socket path and root:askdo gate, so the grantee client authenticates for real
 		configure: func(cfg *config.Config) {
-			cfg.Review.RiskPolicyFiles = map[string]string{"root": rootPath, "askdo-grantee": granteePath}
-			if err := cfg.Review.ResolveRiskPolicyFiles(); err != nil {
+			cfg.Review.AccountNotes = &config.AccountNotesConfig{Users: map[string]string{"root": rootPath, "askdo-grantee": granteePath}, Groups: map[string]string{group.Name: groupPath}}
+			if err := cfg.Review.ResolveAccountNotes(); err != nil {
 				t.Fatal(err)
 			}
 		},
 	})
 
-	// Job A: the root submitter, over the fixture's in-process frames.
+	// When: the root submitter reviews over the fixture's in-process frames.
 	idA := reserveForTest(t, f.broker.socket, 0)
 	requestA := submitRequest(idA, "per-user rubric QA: root account")
 	requestA.Argv = []string{"/usr/bin/id", "-u"}
@@ -275,14 +277,15 @@ func TestRootFleetPerUserRiskPolicyEndToEnd(t *testing.T) {
 	if output, err := os.ReadFile(filepath.Join(jobA.SpoolDir, "stdout.log")); err == nil && len(output) != 0 {
 		t.Fatal("root-account job executed before the human approved")
 	}
+	// Then: root's user context is isolated from the grantee's group and user.
 	requests := fleetProviderRequests(f)
 	if len(requests) != 2 {
 		t.Fatalf("provider requests=%d, wanted exactly the 2 turns of the first review", len(requests))
 	}
 	for _, raw := range requests {
-		assertFleetProviderSystemRubric(t, raw, fleetRubricRoot, "FLEET-RUBRIC-CANARY-GRANTEE-ACCOUNT-53af08")
+		assertFleetProviderAccountNotes(t, raw, []proto.AccountNote{{Text: fleetRubricRoot}}, "FLEET-RUBRIC-CANARY-GRANTEE-ACCOUNT-53af08")
 	}
-	assertFleetManifestRubric(t, f, 0, idA, rootPath, fleetRubricRoot)
+	assertFleetManifestLayers(t, f, 0, idA, []manifestAdministratorLayer{{SubjectUID: 0, Scope: riskPolicyScopeUser, Name: "root", Source: rootPath, SHA256: revisionOf(fleetRubricRoot), Text: fleetRubricRoot}})
 	card, ok := f.bot.Card()
 	if !ok {
 		t.Fatal("human card missing for the root-account job")
@@ -296,8 +299,8 @@ func TestRootFleetPerUserRiskPolicyEndToEnd(t *testing.T) {
 		t.Fatalf("approved root-account job did not execute its command exactly once: %q %v", output, err)
 	}
 
-	// Job B: the grantee submits through the real client binary with real
-	// kernel credentials and gets its own, different rubric.
+	// When: the grantee submits with real kernel credentials. Group membership
+	// still comes from the account database, not that client's credential set.
 	client := startRiskPolicyClient(t, binary, "per-user rubric QA: grantee account", granteeUID, granteeGID)
 	idB := awaitRiskPolicyFleetSubmit(t, f.broker.daemon, granteeUID)
 	jobB := awaitRiskPolicyFleetJob(t, f.broker.daemon.store, granteeUID, idB, store.StateAwaitingHuman, store.StateFailed)
@@ -308,14 +311,18 @@ func TestRootFleetPerUserRiskPolicyEndToEnd(t *testing.T) {
 	if output, err := os.ReadFile(filepath.Join(jobB.SpoolDir, "stdout.log")); err == nil && len(output) != 0 {
 		t.Fatal("grantee job executed before the human approved")
 	}
+	// Then: group context precedes user context, and the human gate still holds.
 	requests = fleetProviderRequests(f)
 	if len(requests) != 4 {
 		t.Fatalf("provider requests=%d, wanted exactly 2 turns for each of the two reviews", len(requests))
 	}
 	for _, raw := range requests[2:] {
-		assertFleetProviderSystemRubric(t, raw, fleetRubricGrantee, "FLEET-RUBRIC-CANARY-ROOT-ACCOUNT-91c2e7")
+		assertFleetProviderAccountNotes(t, raw, []proto.AccountNote{{Text: fleetGroupNote}, {Text: fleetRubricGrantee}}, "FLEET-RUBRIC-CANARY-ROOT-ACCOUNT-91c2e7")
 	}
-	assertFleetManifestRubric(t, f, granteeUID, idB, granteePath, fleetRubricGrantee)
+	assertFleetManifestLayers(t, f, granteeUID, idB, []manifestAdministratorLayer{
+		{SubjectUID: granteeUID, Scope: riskPolicyScopeGroup, Name: group.Name, Source: groupPath, SHA256: revisionOf(fleetGroupNote), Text: fleetGroupNote},
+		{SubjectUID: granteeUID, Scope: riskPolicyScopeUser, Name: "askdo-grantee", Source: granteePath, SHA256: revisionOf(fleetRubricGrantee), Text: fleetRubricGrantee},
+	})
 	card, ok = f.bot.Card()
 	if !ok {
 		t.Fatal("human card missing for the grantee job")
@@ -332,5 +339,5 @@ func TestRootFleetPerUserRiskPolicyEndToEnd(t *testing.T) {
 	if got := len(fleetProviderRequests(f)); got != 4 {
 		t.Fatalf("provider requests=%d after both approvals, wanted 4", got)
 	}
-	t.Logf("full chain per-user rubrics: root uid 0 and grantee uid %d each reviewed with their own canary rubric (manifest hash/source/subject bound), human approval required, each command executed once", granteeUID)
+	t.Logf("full chain account notes: root uid 0 and grantee uid %d reviewed with isolated user/group context (ordered manifest hash/source/subject bound), human approval required, each command executed once", granteeUID)
 }

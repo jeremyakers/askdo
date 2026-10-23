@@ -100,7 +100,7 @@ type jobRuntime struct {
 	// with the store. Called under mu.
 	beforeDecisionNote func()
 	fleet              *fleetJob // owned by the root review/ticket lifecycle, never the worker
-	// riskPolicy is the administrator rubric snapshot of this AI review, read
+	// riskPolicy is the ordered administrator-layer snapshot of this AI review, read
 	// once before the worker starts and never replaced. Retries, fallback models
 	// and manifest rebuilds all use it; nil means the embedded default.
 	riskPolicy *riskPolicySnapshot
@@ -1449,10 +1449,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	models := j.models
 	snapshot := j.riskPolicy
 	j.mu.Unlock()
-	var riskPolicy *proto.RiskPolicy
-	if snapshot != nil {
-		riskPolicy = &proto.RiskPolicy{Text: snapshot.text}
-	}
+	riskPolicy, accountNotes := snapshot.projection()
 	if models == nil {
 		// Defensive: run() always installs the refresh-prepared projection
 		// before bootstrap(); a directly-constructed job (tests) falls back
@@ -1493,7 +1490,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
-		RiskPolicy: riskPolicy,
+		RiskPolicy: riskPolicy, AccountNotes: accountNotes,
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
 			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled, InspectionCaps: j.inspectionCapabilities()},

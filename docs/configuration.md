@@ -223,7 +223,7 @@ for the distinction between fixture checks and deployment evidence.
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
 | `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. A human Telegram decision remains mandatory for **NO AI REVIEW**; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
 | `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. |
-| `risk_policy_files` | no | `{}` | Administrator Markdown rubrics keyed by OS login name, with absolute file paths as values. Names resolve to submitting UIDs; the root broker selects the file, never the client or reviewer. See [per-user risk rubrics](#per-user-risk-rubrics). |
+| `account_notes` | no | absent | Additive administrator Markdown context: optional `users` and `groups` maps from OS login / Unix group names to absolute clean file paths. Names resolve at config load; files and membership are read per review. See [reviewer instruction layers and account notes](#reviewer-instruction-layers-and-account-notes). |
 | `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
 | `webfetch_enabled` | no | `false` | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. See [review tools](review-tools.md#optional-webfetch). |
 | `models` | yes | — | Ordered fallback list. May be empty only with explicit `approval_only` or `required` plus nonempty `approval_only_users`; non-exempt/forced-review submitters then fail closed. Adding a model does not itself change `approval_only` policy. |
@@ -232,84 +232,111 @@ for the distinction between fixture checks and deployment evidence.
 | `max_model_calls_per_attempt` | no | `32` | 1–128; bound on physical model calls per choice, including failed calls and retries, not just successful conversation turns. |
 | `max_output_tokens` | no | `8192` | 1–200000; bound on tokens per model response. |
 
-#### Per-user risk rubrics
+#### Reviewer instruction layers and account notes
 
-Different accounts can have different expected work and risk calibration. Add
-`risk_policy_files` inside the existing `review` object, retaining its other
-settings. For example, after creating the actual OS accounts:
+Each review has three layers, in this order:
+
+1. **Built-in protocol:** compiled role, rating scale, effects guidance,
+   reviewer duties, report schema and tool contract. Administrators cannot edit it.
+2. **Host risk guidance:** the compiled calibration paragraph and resource clause,
+   unless `risk-policy.md` beside the selected daemon config exists
+   (`/etc/askdo/risk-policy.md` by default). That file replaces **only** this
+   calibration, not layer 1. An absent file keeps the built-in calibration; a
+   present empty file is an empty replacement, not an absent file.
+3. **Account notes:** additive Markdown context describing normal work. All
+   applicable group notes are appended in **group-name order**, followed by the
+   submitter's own user note. They never replace or remove layer 2. With no host
+   file and no applicable notes, the compiled instructions are byte-for-byte unchanged.
+
+Add `account_notes` inside the existing `review` object, keeping other settings:
 
 ```json
-"risk_policy_files": {
-  "db-agent": "/etc/askdo/policies/database-operator.md",
-  "web-agent": "/etc/askdo/policies/web-deployer.md"
+"account_notes": {
+  "groups": {
+    "database-operators": "/etc/askdo/notes/database-operator.md",
+    "web-deployers": "/etc/askdo/notes/web-deployer.md"
+  },
+  "users": {
+    "db-agent": "/etc/askdo/notes/db-agent.md"
+  }
 }
 ```
 
-These names are examples, not accounts askdo creates. The broker resolves the
-administrator's login names to UIDs and selects by the **kernel-authenticated
-submitting UID**, not the requested target UID (usually root), submitted reason,
-display name or an agent-selected filename. Processes sharing a Unix UID share
-its rubric; use separate OS accounts when they need different policies.
+Both maps are optional. These names are examples, not accounts or groups askdo
+creates. Unknown logins/groups, two names resolving to the same UID/GID, and
+non-absolute or unclean paths fail configuration validation. Operator saves
+preserve both maps. Changing mappings follows the existing config-load lifecycle.
 
-Selection is deliberately simple:
+The broker selects from the **kernel-authenticated submitting UID**, not the
+target UID (usually root), reason, display name or client-supplied group list.
+At each AI review start, when group notes are configured, it looks up that UID's
+primary and supplementary groups in the account database, never the submitting
+process's credentials. Membership changes take effect on later reviews without
+a restart. Processes sharing a UID share user notes; group-only members receive
+their group notes too. A submitting UID with no account entry has no groups: it
+is still reviewed, without group notes. Release binaries are static, so the
+account database is `/etc/passwd` and `/etc/group` (not LDAP/SSSD via NSS), and
+the broker's own account (root) has its primary group read once per start.
 
-1. A configured per-user rubric replaces the built-in risk-scoring guidance.
-2. Otherwise, `risk-policy.md` beside the selected daemon configuration supplies
-   an optional host-wide rubric (`/etc/askdo/risk-policy.md` by default).
-3. With neither, the existing embedded rubric is unchanged.
+Notes are **account context only**, not risk calibration, a command allowlist,
+or approval/denial. Expected work is not proof that a command is that work:
+the reviewer must assess actual effects and rate departures accordingly. Notes
+do not change the rating scale, schema or tools. See the short
+[database-operator](../examples/risk-policies/database-operator.md) and
+[web-deployer](../examples/risk-policies/web-deployer.md) examples; adapt them to
+the machine. They are not installed automatically.
 
-A present empty file is an empty custom rubric, not an absent policy file.
+All administrator files use the same trust rules: root-owned regular files,
+no symlink components, and no group/other write permission on the file or any
+ancestor from `/`. Modes such as `0644` and `0600` are accepted. Keep files in a
+root-controlled directory, not a submitter's home or checkout. A missing,
+unreadable, unsafe or invalid configured note, an unusable present host file,
+or a membership lookup failure fails **only that AI review**, with the existing
+classified risk-policy failure; there is no fallback to fewer notes. An absent
+optional host file still imposes no trust requirement on its ancestors. Files
+and membership are not new startup dependencies; approval-only jobs consult neither.
 
-The per-user and host-default rubrics are alternatives, not concatenated sets of
-potentially contradictory scoring instructions. Fixed reviewer duties and the
-report schema remain in place. A rubric can describe expected commands, normal
-maintenance, out-of-scope work, and what each risk level means for that account.
-See the [database-operator](../examples/risk-policies/database-operator.md) and
-[web-deployer](../examples/risk-policies/web-deployer.md) examples. Review and
-adapt them to the machine; they are not installed automatically.
+Before starting the worker, the broker freezes the applied layers. Retries,
+fallback models and pending approvals keep that snapshot; file edits affect only
+later reviews. The digest-bound approval manifest has an ordered
+`administrator_layers` list: `scope` (`host_default`, `group`, `user`), `name`
+(empty for the host default), authenticated `subject_uid`, `source` path,
+`sha256`, and exact `text`. It replaces rc.15's single `risk_policy` record.
+The review journal is unchanged. The worker receives text only, not source paths
+or authority to select files.
 
-Policy files must remain administrator-controlled: root-owned regular files,
-with nonsymlink paths and no untrusted write access to the file or its ancestors.
-Normal root-writable modes such as `0644` and `0600` are accepted. Keep them under a
-root-controlled directory, not a submitter's home or checkout. A deliberately
-configured user policy that is missing, unreadable or unsafe fails that AI review
-rather than silently selecting a more permissive fallback. An absent optional
-host-default file preserves the old behavior. Policy loading is per review, not
-a new daemon-startup dependency; approval-only jobs do not need a risk rubric.
+In fleet mode the host composes and pins the exact first system message, refusing
+substitution, reordered notes or extra system messages. The gateway relays the
+existing model-message shape, with conversation isolation; it does not select
+account context. Administrator text is visible to reviewer providers: do not
+put credentials in it.
 
-Each AI review takes one snapshot before contacting its models. Retries and
-fallback models use those same bytes. Editing a file affects later reviews
-without restarting the broker; it does not rewrite an in-progress review or a
-pending approval. The root-owned frozen manifest retains the selected policy,
-its submitting UID and the SHA-256 revision of its exact bytes for audit.
-The login-to-file mapping itself is resolved when the daemon loads its
-configuration; changing that mapping follows the existing configuration lifecycle.
+Files must be UTF-8 without NUL. **Combined** host guidance and notes must fit the
+existing 64 MiB encoded bootstrap frame limit (checked before worker start) and
+the 1 MiB foreground manifest handoff limit (checked before approval). Detached
+manifests have no handoff-size limit. The complete fleet system message must
+also fit 262144 bytes, allowing only newline and tab among control characters;
+use LF, not CRLF. Direct providers retain their own request/context limits.
 
-In fleet mode, selection still happens on the submitting host. Its rubric travels
-with that review to the gateway/model; a different host or account does not inherit
-it. Rubric text is visible to the configured reviewer providers, so do not place
-credentials in it.
+Existing human approval, explicit risk auto-approval grants/preferences,
+inspection permissions and dispatch checks remain authoritative. Because model
+scores can qualify for opt-in auto-approval, review guidance and note edits with
+the same care as those grants; prose does not create or raise a grant.
 
-Files must be UTF-8 without NUL. In fleet mode the complete system message must
-also fit the existing 262144-byte content limit and permit only newline and tab
-among control characters; use LF line endings, not CRLF. These are existing
-transport rules, not a new policy grammar.
-The broker rejects rubric-bearing bootstraps that exceed the existing 64 MiB encoded frame limit before starting a reviewer, and foreground review manifests that exceed the existing 1 MiB handoff limit before requesting approval; detached manifests are unaffected by the handoff limit.
-Direct providers retain their own request and context limits; fitting the local
-worker frame does not guarantee that a provider can accept a large rubric.
+**Migrating from v1.0.0-rc.15:** `review.risk_policy_files` was prerelease-only
+and is removed, not aliased. Move descriptions of normal work to
+`review.account_notes.users` (and/or `.groups`); move actual replacement scoring
+calibration to `/etc/askdo/risk-policy.md`. Do not copy an old replacement rubric
+unchanged into additive notes. Strict decoding explains this migration when the
+old key is encountered. Configs without either mapping continue to load unchanged.
 
-**Rubrics guide assessment; they are not sudoers execution grants.** Expected
-commands are not automatically allowed, unexpected commands are not automatically
-denied, and prose does not guarantee a particular model score. Existing tool
-permissions, report validation, human approval and execution checks still apply.
-Because a score can qualify for existing opt-in auto-approval, review rubric
-changes with the same care as those grants; the rubric does not create or raise
-the grants or the submitter's preference.
-
-This is a source feature, not an installed-runtime change. Older strict config
-parsers reject the new `risk_policy_files` key. Upgrade the host broker and
-reviewer together before configuring it; publication alone does not authorize
-installation, policy changes or service restarts.
+Upgrade the host broker and reviewer **together**, then migrate/add the config
+key. The private bootstrap is unversioned; the new optional `account_notes` array
+is rejected by older strict workers, while old bootstraps remain accepted by
+new workers. Client protocol versions, manifest version 1, and fleet/gateway
+wire versions are unchanged. A gateway upgrade is not required for these layers;
+update external manifest readers if they need the new audit list. Publication
+does not authorize installation, policy edits or service restarts.
 
 Auto-approval requires an administrator grant and a submitter preference. The
 submitter can inspect/set/disable their preference without root via

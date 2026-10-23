@@ -35,9 +35,9 @@ type approvalManifest struct {
 	TelegramRoute    *manifestTelegramRoute      `json:"telegram_route,omitempty"`
 	Fleet            *fleetManifest              `json:"fleet,omitempty"`
 	Inspection       *manifestInspectionEvidence `json:"inspection,omitempty"`
-	// RiskPolicy records the administrator rubric this review was scored with.
-	// Absent for the embedded default, so historical manifests are unchanged.
-	RiskPolicy *manifestRiskPolicy `json:"risk_policy,omitempty"`
+	// AdministratorLayers records exact ordered host/group/user snapshots.
+	// Absent when only compiled instructions apply; bound by the manifest digest.
+	AdministratorLayers []manifestAdministratorLayer `json:"administrator_layers,omitempty"`
 }
 
 // operationOnlyManifest deliberately has no review/report/coverage fields.
@@ -218,12 +218,12 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 			SensitiveMasks: effectiveSensitiveMasks(j.daemon.cfg.Inspection.SensitiveMasks),
 		},
 		Report: review.Report, AutoApproval: plan, WithheldRefs: refs, WithheldCount: count, SuccessfulModel: model,
-		ModelHistory:  append([]proto.ModelHistoryEntry(nil), review.ModelHistory...),
-		Settings:      manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
-		TelegramRoute: j.manifestTelegramRoute(),
-		Fleet:         fleet,
-		Inspection:    j.inspectionEvidence(),
-		RiskPolicy:    j.frozenRiskPolicy().audit(),
+		ModelHistory:        append([]proto.ModelHistoryEntry(nil), review.ModelHistory...),
+		Settings:            manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
+		TelegramRoute:       j.manifestTelegramRoute(),
+		Fleet:               fleet,
+		Inspection:          j.inspectionEvidence(),
+		AdministratorLayers: j.frozenRiskPolicy().audit(),
 	}
 	encoded, err := json.Marshal(manifest)
 	if err != nil {

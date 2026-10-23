@@ -5,7 +5,7 @@ import (
 	"unicode/utf8"
 )
 
-// RiskPolicy is the exact administrator rubric text the root broker selected
+// RiskPolicy is the exact host risk-guidance text the root broker selected
 // for one review. It is trusted broker input projected in the bootstrap: the
 // reviewer never reads policy files, selects a policy, or reports a revision.
 //
@@ -17,12 +17,24 @@ type RiskPolicy struct {
 	Text string `json:"text"`
 }
 
+// AccountNote is additive account context, in broker-selected group/user order.
+// The worker receives text only; provenance stays in the approval manifest.
+type AccountNote struct {
+	Text string `json:"text"`
+}
+
+func (n AccountNote) Validate() error { return validateAdministratorText(n.Text) }
+
 // Validate reports whether Text can cross the strict bootstrap unchanged.
 func (p RiskPolicy) Validate() error {
-	if !utf8.ValidString(p.Text) {
+	return validateAdministratorText(p.Text)
+}
+
+func validateAdministratorText(text string) error {
+	if !utf8.ValidString(text) {
 		return errors.New("risk policy is not valid UTF-8")
 	}
-	if containsNUL(p.Text) {
+	if containsNUL(text) {
 		return errors.New("risk policy contains NUL")
 	}
 	return nil

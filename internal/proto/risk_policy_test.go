@@ -2,6 +2,7 @@ package proto
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,59 @@ func riskPolicyBootstrap(policy *RiskPolicy) Bootstrap {
 			Limits:   WorkerLimits{MaxModelCallsPerAttempt: 1, MaxOutputTokens: 1},
 			Telegram: WorkerTelegram{TokenFile: "/key", OperatorUserID: 1, ChatID: 1, ApprovalTTLMS: 1},
 		},
+	}
+}
+
+func TestBootstrapAccountNotesRoundTripDirectAndFleet(t *testing.T) {
+	for _, fleet := range []bool{false, true} {
+		// Given: exact, ordered text; no paths or claims supplied by the worker.
+		boot := riskPolicyBootstrap(&RiskPolicy{Text: "HOST-CANARY\n"})
+		boot.AccountNotes = []AccountNote{{Text: "GROUP-CANARY\n"}, {Text: "USER-CANARY 日本語\n"}}
+		if fleet {
+			boot.FleetMode = true
+			boot.ConfigProjection.Telegram = WorkerTelegram{}
+			boot.ConfigProjection.Models[0].BaseURL = "https://gateway.invalid/v1"
+			boot.ConfigProjection.Models[0].DataBoundary = "local"
+		}
+		body, err := json.Marshal(boot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// When
+		message, err := DecodeWorkerMessage(body, BrokerToWorker)
+		// Then
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := message.(*Bootstrap)
+		if !reflect.DeepEqual(got.AccountNotes, boot.AccountNotes) || !reflect.DeepEqual(got.RiskPolicy, boot.RiskPolicy) {
+			t.Fatal("administrator text changed in transit")
+		}
+	}
+}
+
+func TestBootstrapAccountNotesRejectMalformedTextAndShapes(t *testing.T) {
+	// Given
+	boot := riskPolicyBootstrap(nil)
+	boot.AccountNotes = []AccountNote{{Text: "NOTE-CANARY"}}
+	body, err := json.Marshal(boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, replacement := range []string{`null`, `{}`, `[null]`, `[{}]`, `[{"text":null}]`, `[{"text":"x","source":"/file"}]`, `[{"text":"x","text":"y"}]`, `[{"text":"x\u0000y"}]`} {
+		// When
+		malformed := strings.Replace(string(body), `[{"text":"NOTE-CANARY"}]`, replacement, 1)
+		_, err := DecodeWorkerMessage([]byte(malformed), BrokerToWorker)
+		// Then
+		if err == nil {
+			t.Fatalf("accepted account_notes=%s", replacement)
+		}
+	}
+	for _, text := range []string{"bad\xff", "bad\x00"} {
+		boot.AccountNotes[0].Text = text
+		if err := ValidateWorkerMessage(boot, BrokerToWorker); err == nil {
+			t.Fatal("broker accepted unsafe note text")
+		}
 	}
 }
 

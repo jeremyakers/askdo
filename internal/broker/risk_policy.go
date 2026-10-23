@@ -14,20 +14,21 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 )
 
-// The risk rubric is an administrator's Markdown guidance for how the reviewer
-// should calibrate its score. It is selected only by root, from the
-// kernel-authenticated submitter UID, and read once when an AI review starts.
-// It informs the model's assessment; it never approves, allows or executes.
+// Administrator Markdown supplies host risk calibration and additive account
+// context. Only the broker selects it, from the authenticated submitter UID and
+// account-database groups, once per AI review. It never approves or executes.
 const (
-	riskPolicyFileName  = "risk-policy.md"
-	riskPolicyScopeUser = "user"         // review.risk_policy_files entry for the submitter UID
-	riskPolicyScopeHost = "host_default" // risk-policy.md beside the selected daemon config
+	riskPolicyFileName   = "risk-policy.md"
+	riskPolicyScopeUser  = "user"         // review.account_notes.users entry for the submitter UID
+	riskPolicyScopeGroup = "group"        // review.account_notes.groups entry for a current group
+	riskPolicyScopeHost  = "host_default" // risk-policy.md beside the selected daemon config
 )
 
 // Classes of rubric failure. Only the class reaches the submitter; the path and
@@ -64,32 +65,47 @@ func riskPolicyDefaultPath(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), riskPolicyFileName)
 }
 
-// riskPolicySnapshot is the immutable rubric one AI review uses: the exact
-// bytes read when that review started, whatever the file says afterwards.
+// riskPolicySnapshot freezes all administrator layers for one AI review.
+// Later file edits and membership changes affect only later reviews.
 type riskPolicySnapshot struct {
-	subjectUID uint32 // authenticated submitter whose configuration selected it
-	scope      string
-	path       string // trusted source chosen by root configuration; never model-visible
-	text       string
-	revision   string // hex SHA-256 of the exact bytes
+	layers []manifestAdministratorLayer
 }
 
-// manifestRiskPolicy audits the rubric a reviewed job used. Root derives every
+// manifestAdministratorLayer audits a layer a reviewed job used. Root derives every
 // field from its own selection and file read, never from the worker, and the
 // manifest digest the approver sees binds them with the rest of the record.
-type manifestRiskPolicy struct {
+type manifestAdministratorLayer struct {
 	SubjectUID uint32 `json:"subject_uid"`
 	Scope      string `json:"scope"`
+	Name       string `json:"name"` // empty for the unnamed host default
 	Source     string `json:"source"`
 	SHA256     string `json:"sha256"`
 	Text       string `json:"text"`
 }
 
-func (s *riskPolicySnapshot) audit() *manifestRiskPolicy {
+func (s *riskPolicySnapshot) audit() []manifestAdministratorLayer {
 	if s == nil {
 		return nil
 	}
-	return &manifestRiskPolicy{SubjectUID: s.subjectUID, Scope: s.scope, Source: s.path, SHA256: s.revision, Text: s.text}
+	return slices.Clone(s.layers)
+}
+
+// projection carries text only. The same projection and composition function
+// feed the worker and the broker's fleet pin; provenance never comes from either.
+func (s *riskPolicySnapshot) projection() (*proto.RiskPolicy, []proto.AccountNote) {
+	var policy *proto.RiskPolicy
+	var notes []proto.AccountNote
+	if s != nil {
+		for _, layer := range s.layers {
+			switch layer.Scope {
+			case riskPolicyScopeHost:
+				policy = &proto.RiskPolicy{Text: layer.Text}
+			case riskPolicyScopeGroup, riskPolicyScopeUser:
+				notes = append(notes, proto.AccountNote{Text: layer.Text})
+			}
+		}
+	}
+	return policy, notes
 }
 
 func (j *jobRuntime) frozenRiskPolicy() *riskPolicySnapshot {
@@ -106,58 +122,63 @@ func riskPolicyAbsent(path string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// loadRiskPolicy selects and reads this job's rubric. A configured per-user
-// file replaces the host default and is required: if it is missing or unusable
-// the review fails rather than silently scoring with a different rubric. The
-// optional host default is simply absent when its file does not exist; if it
-// exists it must be usable. No rubric at all yields (nil, nil): the embedded
-// default applies and nothing changes.
+// loadRiskPolicy reads host calibration, every applicable group note (by name),
+// then the user note. Configured notes are required; any failure discards the
+// whole snapshot, never falling back to fewer layers. Only the host is optional.
 func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 	d := j.daemon
-	scope := riskPolicyScopeUser
-	path, configured := d.cfg.Review.RiskPolicyFileForUID(j.uid)
-	if !configured {
-		if d.riskPolicyDefault == "" {
-			return nil, nil
+	snapshot := &riskPolicySnapshot{}
+	appendLayer := func(scope string, note config.AccountNoteFile) error {
+		data, err := readRiskPolicy(d.riskPolicyTrust, note.Path)
+		if err != nil {
+			// The optional host file may vanish after Lstat; required notes may not.
+			if scope == riskPolicyScopeHost && errors.Is(err, errRiskPolicyAbsent) {
+				return nil
+			}
+			slog.Warn("risk policy unusable for review", "request_id", j.req.RequestID, "submitter_uid", j.uid, "scope", scope, "path", note.Path, "error", err)
+			return err
 		}
-		scope, path = riskPolicyScopeHost, d.riskPolicyDefault
-		// An administrator who never created the optional file has given nothing
-		// to substitute, so no provenance is demanded of its directories: a layout
-		// that was valid before rubrics existed, such as an alternate --config
-		// directory that root does not control, keeps working. A file that does
-		// exist, even as a dangling link, gets the full descriptor-bound trust
-		// walk below.
-		if riskPolicyAbsent(path) {
-			return nil, nil
+		sum := sha256.Sum256(data)
+		snapshot.layers = append(snapshot.layers, manifestAdministratorLayer{SubjectUID: j.uid, Scope: scope, Name: note.Name, Source: note.Path, Text: string(data), SHA256: hex.EncodeToString(sum[:])})
+		return nil
+	}
+	// Until the optional host file exists, its ancestors need no provenance,
+	// preserving alternate --config layouts that worked before guidance existed.
+	if path := d.riskPolicyDefault; path != "" && !riskPolicyAbsent(path) {
+		if err := appendLayer(riskPolicyScopeHost, config.AccountNoteFile{Path: path}); err != nil {
+			return nil, err
 		}
 	}
-	snapshot, err := j.readRiskPolicySnapshot(scope, path)
-	if err != nil {
-		// The optional file vanished after the existence check above.
-		if !configured && errors.Is(err, errRiskPolicyAbsent) {
-			return nil, nil
+	if d.cfg.Review.HasGroupNotes() {
+		lookup := d.accountGroups
+		if lookup == nil {
+			lookup = lookupAccountGroups
 		}
-		slog.Warn("risk policy unusable for review", "request_id", j.req.RequestID, "submitter_uid", j.uid, "scope", scope, "path", path, "error", err)
-		return nil, err
+		gids, err := lookup(j.uid)
+		if err != nil {
+			slog.Warn("risk policy group lookup failed", "request_id", j.req.RequestID, "submitter_uid", j.uid, "error", err)
+			return nil, fmt.Errorf("%w: account groups: %v", errRiskPolicyUnreadable, err)
+		}
+		for _, note := range d.cfg.Review.GroupNotesForGIDs(gids) {
+			if err := appendLayer(riskPolicyScopeGroup, note); err != nil {
+				return nil, err
+			}
+		}
 	}
-	return snapshot, nil
-}
-
-func (j *jobRuntime) readRiskPolicySnapshot(scope, path string) (*riskPolicySnapshot, error) {
-	data, err := readRiskPolicy(j.daemon.riskPolicyTrust, path)
-	if err != nil {
-		return nil, err
+	if note, ok := d.cfg.Review.UserNoteForUID(j.uid); ok {
+		if err := appendLayer(riskPolicyScopeUser, note); err != nil {
+			return nil, err
+		}
 	}
-	text := string(data)
-	// In fleet mode the rubric travels inside a model message, so the composite
-	// system prompt must satisfy the fleet message contract (UTF-8, no control
-	// characters other than newline and tab, bounded) or the gateway would
-	// reject the first turn with a generic protocol error.
-	if j.fleet != nil && !fleetproto.ValidMessageContent(reviewer.SystemInstructions(&proto.RiskPolicy{Text: text})) {
+	if len(snapshot.layers) == 0 {
+		return nil, nil
+	}
+	policy, notes := snapshot.projection()
+	// The fleet contract covers the entire composed message, not each file alone.
+	if j.fleet != nil && !fleetproto.ValidMessageContent(reviewer.SystemInstructions(policy, notes...)) {
 		return nil, fmt.Errorf("%w: not acceptable as a fleet model message", errRiskPolicyInvalid)
 	}
-	sum := sha256.Sum256(data)
-	return &riskPolicySnapshot{subjectUID: j.uid, scope: scope, path: path, text: text, revision: hex.EncodeToString(sum[:])}, nil
+	return snapshot, nil
 }
 
 // riskPolicyFailure is the submitter-visible classification of a rubric error;
@@ -173,13 +194,14 @@ func riskPolicyFailure(err error) string {
 	return "risk policy unavailable: " + class.Error() + "; see the broker log"
 }
 
-// The worker is not the authority for a configured rubric. In fleet mode root
+// The worker is not the authority for administrator layers. In fleet mode root
 // sees every model message, so it requires the first one to be exactly its own
 // instructions and refuses any later system message. The reviewer loop emits a
 // single system message, so a legitimate worker is unaffected; jobs without a
-// rubric are not checked here.
+// administrator layer are not checked here.
 func pinsTrustedSystemMessage(snapshot *riskPolicySnapshot, messages []modelwire.Message) bool {
-	trusted := reviewer.SystemInstructions(&proto.RiskPolicy{Text: snapshot.text})
+	policy, notes := snapshot.projection()
+	trusted := reviewer.SystemInstructions(policy, notes...)
 	if len(messages) == 0 {
 		return false
 	}

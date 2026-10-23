@@ -50,8 +50,8 @@ func TestGatewayCarriesEachHostsSystemInstructionsWithoutCrossTalk(t *testing.T)
 	}
 	hosts := map[string]AuthenticatedHost{"A": hostA, "B": enroll(), "default": enroll()}
 	system := map[string]string{
-		"A":       reviewer.SystemInstructions(&proto.RiskPolicy{Text: "HOST-A canary\n"}),
-		"B":       reviewer.SystemInstructions(&proto.RiskPolicy{Text: "HOST-B canary\n"}),
+		"A":       reviewer.SystemInstructions(&proto.RiskPolicy{Text: "HOST-A canary\n"}, proto.AccountNote{Text: "GROUP-A canary\n"}, proto.AccountNote{Text: "USER-A canary\n"}),
+		"B":       reviewer.SystemInstructions(nil, proto.AccountNote{Text: "GROUP-B canary\n"}, proto.AccountNote{Text: "USER-B canary\n"}),
 		"default": reviewer.EmbeddedInstructions,
 	}
 	user := modelwire.Message{Role: "user", Content: "same job id, same local account name"}
@@ -62,11 +62,13 @@ func TestGatewayCarriesEachHostsSystemInstructionsWithoutCrossTalk(t *testing.T)
 		return turn
 	}
 
+	// When: colliding job IDs on three authenticated hosts send their own layers.
 	for _, name := range []string{"A", "B", "default"} {
 		if result := service.modelTurn(context.Background(), hosts[name], turnFor(name), true); result.Response == nil {
 			t.Fatalf("host %s first turn: %+v", name, result.Failure)
 		}
 	}
+	// Then: the gateway relays exact system messages and isolates conversations.
 	mu.Lock()
 	got := append([]modelwire.Message(nil), firstMessages...)
 	mu.Unlock()
