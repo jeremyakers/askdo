@@ -141,7 +141,7 @@ func TestApprovalOnlySummaryAndDetails(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatalf("parts=%d", len(parts))
 	}
-	for _, want := range []string{"NO AI REVIEW", "providers unavailable", "provider-A", "rate limit or quota", "Consequences", "rollback", "dependency completeness", "energy-host", "Docker &lt;sandbox&gt;", "uid 4242", "/tmp/&lt;work&gt;", "<pre><code class=\"language-bash\">/bin/sh -c &#39;echo &lt;fake&gt; &amp; exit&#39;</code></pre>", "please &lt;approve&gt; &amp; run", "2026-09-21T12:00:00Z"} {
+	for _, want := range []string{"NO AI REVIEW", "providers unavailable", "provider-A", "rate limit or quota", "Consequences", "rollback", "dependency completeness", "energy-host", "Docker &lt;sandbox&gt;", "uid 4242", "/tmp/&lt;work&gt;", "<pre><code class=\"language-bash\">/bin/sh -c &#39;echo &lt;fake&gt; &amp; exit&#39;</code></pre>", "please &lt;approve&gt; &amp; run"} {
 		if !strings.Contains(parts[0], want) {
 			t.Errorf("missing %q: %s", want, parts[0])
 		}
@@ -267,7 +267,7 @@ func TestRenderSummaryRequiredFields(t *testing.T) {
 		"<b>Warnings</b>", "• Service downtime during migration.", "• Partial migration may require manual recovery.",
 		"<b>Uncertainties</b>", "• Current backup availability was not verified.",
 		"<b>Reversibility:</b> Rollback procedure found; success not verified.",
-		"Reviewer <code>kimi-for-coding</code>", "expires 2026-09-21T12:00:00Z",
+		"Reviewer <code>kimi-for-coding</code>",
 		"job <code>abcdef0123456789abcdef0123456789</code>",
 	} {
 		if !strings.Contains(text, want) {

@@ -168,7 +168,8 @@ func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
 	if in.CapturedStdinBytes > 0 {
 		blocks = append(blocks, fmt.Sprintf("<b>Input:</b> captured script input (%d bytes); %s; review via bundle:stdin\n", in.CapturedStdinBytes, capturedDeliveryLabel(in.CapturedStdinKind)))
 	}
-	blocks = append(blocks, fmt.Sprintf("\nExpires %s · job <code>%s</code>\n", esc(in.Expiry.UTC().Format(time.RFC3339)), esc(in.JobID)))
+	// No expiry here: summary parts are counted across hosts (see expiryText).
+	blocks = append(blocks, fmt.Sprintf("\nJob <code>%s</code>\n", esc(in.JobID)))
 	return blocks, nil
 }
 
@@ -213,8 +214,21 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 	if len(in.Failures) > 0 {
 		reason = "providers unavailable"
 	}
-	return fmt.Sprintf("<b>NO AI REVIEW</b> · %s. Consequences/risks, rollback and dependency completeness were NOT assessed. Job <code>%s</code> expires %s. Approve once executes exactly one time without AI review; Deny rejects; Details shows unreviewed facts only.", reason, esc(in.JobID), esc(in.Expiry.UTC().Format(time.RFC3339))), kb, nil
+	return fmt.Sprintf("<b>NO AI REVIEW</b> · %s. Consequences/risks, rollback and dependency completeness were NOT assessed. Job <code>%s</code> expires %s. Approve once executes exactly one time without AI review; Deny rejects; Details shows unreviewed facts only.", reason, esc(in.JobID), esc(expiryText(in.Expiry))), kb, nil
 }
+
+// expiryLayout shows an approval deadline as wall-clock time in the rendering
+// host's zone, so an operator can see at a glance how long remains. The date
+// and year stay because approval windows have no maximum length. Minutes
+// truncate, so a card never shows a later deadline than the real one.
+//
+// Local text varies in length with the host's zone, so it appears only in the
+// single actionable card. Summary parts must render identically on every host:
+// in fleet mode the broker freezes their count and the gateway, in its own
+// zone, re-renders and rejects any mismatch.
+const expiryLayout = "Mon Jan 2, 2006, 3:04 PM MST"
+
+func expiryText(deadline time.Time) string { return deadline.Local().Format(expiryLayout) }
 
 // RenderSummaryParts renders the complete required summary as an ordered
 // sequence of HTML message texts. If the summary fits one message the
@@ -281,7 +295,7 @@ func RenderReviewedCard(in CardInput, nonce string) (string, InlineKeyboardMarku
 	// RenderCard already validated the nonce. Only reviewed cards offer advice.
 	kb.InlineKeyboard[0] = slices.Insert(kb.InlineKeyboard[0], 2, InlineKeyboardButton{Text: "Request changes", CallbackData: ActionRequestChanges + ":" + nonce})
 	text += " Request changes rejects execution and returns review feedback for a new submission."
-	return "Security risk: " + securityRiskScore(in.Report.Risk) + ". " + text, kb, nil
+	return "Security risk: " + securityRiskScore(in.Report.Risk) + ". Expires " + esc(expiryText(in.Expiry)) + ". " + text, kb, nil
 }
 
 // RenderAutoNotice constructs a non-actionable policy notice from broker-frozen
@@ -515,8 +529,8 @@ func summaryBlocks(in CardInput) []string {
 	}
 	add("\n<b>Reversibility:</b> ")
 	add("%s\n", esc(in.Report.Reversibility))
-	add("\nReviewer <code>%s</code> · expires %s · job <code>%s</code>\n",
-		esc(in.ReviewerModel), esc(in.Expiry.UTC().Format(time.RFC3339)), esc(in.JobID))
+	// No expiry here: summary parts are counted across hosts (see expiryText).
+	add("\nReviewer <code>%s</code> · job <code>%s</code>\n", esc(in.ReviewerModel), esc(in.JobID))
 	return blocks
 }
 

@@ -613,14 +613,20 @@ func TestNotifyCardContentCompleteness(t *testing.T) {
 		"job <code>0123456789abcdef0123456789abcdef</code>",
 		"Stops the application.", "Service downtime during migration.",
 		"Backup availability was not verified.", "Rollback procedure found; success not verified.",
-		"Reviewer <code>local</code>", "expires ",
+		"Reviewer <code>local</code>",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("summary missing %q; got:\n%s", want, joined)
 		}
 	}
-	if !strings.Contains(joined, time.UnixMilli(notification.ExpiryUnixMS).UTC().Format(time.RFC3339)) {
-		t.Fatalf("summary does not show the reported expiry; got:\n%s", joined)
+	// The actionable card shows the deadline as local wall-clock time, not a
+	// UTC timestamp.
+	reported := time.UnixMilli(notification.ExpiryUnixMS)
+	if !strings.Contains(sent[len(sent)-1].Text, "Expires "+reported.Local().Format("Mon Jan 2, 2006, 3:04 PM MST")) {
+		t.Fatalf("card does not show the reported expiry; got:\n%s", joined)
+	}
+	if strings.Contains(joined, reported.UTC().Format(time.RFC3339)) {
+		t.Fatalf("summary still shows the UTC expiry; got:\n%s", joined)
 	}
 	// The token must never appear in any message.
 	if strings.Contains(joined, fake.Token()) {
