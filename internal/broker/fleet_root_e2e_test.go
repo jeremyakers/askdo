@@ -87,6 +87,10 @@ type rootFleetOptions struct {
 	protectOriginalBundle  bool
 	profileCondition       string
 	exemptRoot             bool
+	// secondRecipient routes the channel to two chats. Each recipient gets one
+	// message per request, so a partial delivery means the first recipient's
+	// message succeeded and a later recipient's failed.
+	secondRecipient bool
 }
 
 func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unreviewed bool, options ...rootFleetOptions) *rootFleetFixture {
@@ -242,6 +246,9 @@ func newRootFleetFixture(t *testing.T, binary, risk string, auto, captured, unre
 		profileTimeout = 5 * time.Second
 	}
 	f.gatewayCfg = gateway.Config{ConfigVersion: 1, Listen: "127.0.0.1:8443", PublicURL: f.server.URL, TLSCertFile: write("tls.crt", cert), TLSKeyFile: write("tls.key", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: priv})), SigningKeyFile: write("signing", []byte(base64.StdEncoding.EncodeToString(key))), Database: filepath.Join(root, "gateway.sqlite3"), Profiles: []config.ModelConfig{{Name: "local", API: "openai_chat", BaseURL: provider.URL, Model: "fixture", DataBoundary: "local", RequestTimeout: config.Duration(profileTimeout)}}, Bots: []gateway.BotConfig{{Name: "fixture", TokenFile: write("tg.token", []byte("42:"+strings.Repeat("f", 32)))}}, Channels: []gateway.ChannelConfig{{Name: "ops", Bot: "fixture", ApprovalTTL: 120, Recipients: []config.TelegramRecipient{{ChatID: telegramChat, OperatorUserIDs: []int64{telegramOperator}}}}}}
+	if opts.secondRecipient {
+		f.gatewayCfg.Channels[0].Recipients = append(f.gatewayCfg.Channels[0].Recipients, config.TelegramRecipient{ChatID: telegramChat + 1, OperatorUserIDs: []int64{telegramOperator}})
+	}
 	if opts.profileCondition == "removed" {
 		f.gatewayCfg.Profiles = []config.ModelConfig{}
 	} else if opts.profileCondition == "external" {
@@ -1330,7 +1337,9 @@ func TestRootFleetAutoPolicyDeliveryGates(t *testing.T) {
 		{"unknown_always_human", "unknown", 4, false, false, true, store.StateDenied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRootFleetFixture(t, binary, tc.risk, true, false, false, rootFleetOptions{maxRisk: tc.cap})
+			// Partial and revocation cases need a second notice: call 2 is the
+			// second recipient's notice, after the first was acknowledged.
+			f := newRootFleetFixture(t, binary, tc.risk, true, false, false, rootFleetOptions{maxRisk: tc.cap, secondRecipient: tc.partial || tc.revoke})
 			if tc.partial || tc.revoke {
 				f.bot.FailSend(func(call int, text string, keyboard bool) *faketelegram.APIError {
 					if call == 2 && !keyboard {

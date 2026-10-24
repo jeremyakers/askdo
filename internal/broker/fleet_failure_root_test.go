@@ -130,7 +130,9 @@ func TestRootFleetSignedFailureReporting(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			// Given an actual unprivileged reviewer, root broker, TLS gateway and
 			// SQLite, first establish one reviewed, human-authorized root dispatch.
-			f := newRootFleetFixture(t, binary, "1", scenario == "auto_send", false, scenario == "unreviewed_send")
+			// A partial send needs two recipients: the first card is delivered
+			// (allow 1 below) and the second recipient's card fails.
+			f := newRootFleetFixture(t, binary, "1", scenario == "auto_send", false, scenario == "unreviewed_send", rootFleetOptions{secondRecipient: scenario == "partial_send"})
 			worker, ok := f.broker.daemon.worker.(*processWorker)
 			if !ok || worker.uid == 0 || worker.gid == 0 {
 				t.Fatal("reviewer not unprivileged")
