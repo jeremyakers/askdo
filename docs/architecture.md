@@ -134,26 +134,31 @@ root broker, config parser and reviewer must be upgraded together before
 using their fields. The default registry is eight tools, at most twelve with
 all four opt-ins. See [rollout constraints](configuration.md#optional-host-evidence-and-rollout).
 
-### Per-submitter risk calibration
+### Reviewer instruction layers
 
-An administrator can map OS login names to Markdown rubrics through
-`review.risk_policy_files`. Root resolves those names to UIDs and selects by the
-kernel-authenticated **submitting** UID, independently of display names and the
-target execution UID. An unmapped account may use the optional `risk-policy.md`
-beside the daemon's selected config; absent both, the embedded default remains.
+Compiled role, rating scale, effects guidance and report/tool duties are fixed.
+Only host risk calibration can be replaced, by the optional `risk-policy.md`
+beside the selected config. Additive `review.account_notes` describes normal work
+for Unix groups and users without replacing that calibration or granting rights.
+Names resolve to UIDs/GIDs at config load. Each review selects by the authenticated
+**submitting** UID and its current account-database groups, not display names,
+target UID or process credential groups. Notes follow host guidance: applicable
+groups sorted by name, then the user's own note.
 
-For each AI review, the broker safely acquires the selected administrator-owned
-file and freezes one exact-byte snapshot. The worker gets only its text in the
-bootstrap, never a choice of paths. The selected rubric replaces default scoring
-guidance, not the fixed report/tool duties. Root records the policy source,
-subject UID, exact text and SHA-256 revision in the digest-bound manifest.
-Retries, fallback models and pending approvals keep that snapshot; later reviews
-can pick up edits without a restart. Approval-only jobs do not consult rubrics.
+The broker reads administrator-controlled files once per AI review and freezes
+an ordered snapshot. The worker gets only text, never a choice of paths. Root
+records scope, name, source, subject UID, exact text and SHA-256 for each layer in
+the digest-bound `administrator_layers` manifest list. Retries, fallback models
+and pending approvals keep it; later reviews pick up file and membership changes
+without a restart. Unusable files or membership lookup failures fail only the
+affected AI review, never startup or a fallback to fewer notes. Approval-only
+jobs consult neither files nor membership. See
+[configuration and migration](configuration.md#reviewer-instruction-layers-and-account-notes).
 
 Fleet reviews use the same host-local selection. The existing model-message
 transport carries that job's system instructions; the broker checks custom
 instructions against its own frozen snapshot before forwarding them. Nothing
-installs a shared gateway-wide rubric or reuses another host's/account's policy.
+installs shared gateway-wide context or reuses another host's/account's notes.
 These checks establish instruction provenance, not model obedience or accurate
 scoring. Prose cannot authorize execution; existing explicit risk auto-approval
 grants and human approval/dispatch controls remain the authorities.

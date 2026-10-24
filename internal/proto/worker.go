@@ -99,9 +99,10 @@ type Bootstrap struct {
 	// configured choices failed preflight.
 	PreflightFailures []AvailabilityFailure `json:"preflight_failures,omitempty"`
 	ApprovalOnly      bool                  `json:"approval_only,omitempty"`
-	// RiskPolicy is the administrator rubric snapshot the broker selected for
-	// this review. Absent means the embedded default rubric applies.
-	RiskPolicy *RiskPolicy `json:"risk_policy,omitempty"`
+	// RiskPolicy replaces only the host calibration; AccountNotes are additive
+	// context in group-name order, then the user note. Both are broker snapshots.
+	RiskPolicy   *RiskPolicy   `json:"risk_policy,omitempty"`
+	AccountNotes []AccountNote `json:"account_notes,omitempty"`
 }
 
 // WorkerOperation is the frozen operation supplied to the reviewer.
@@ -767,9 +768,10 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 	}
 	if discriminator.Type == "bootstrap" {
 		var flags struct {
-			FleetMode  json.RawMessage `json:"fleet_mode"`
-			RiskPolicy json.RawMessage `json:"risk_policy"`
-			Operation  struct {
+			FleetMode    json.RawMessage `json:"fleet_mode"`
+			RiskPolicy   json.RawMessage `json:"risk_policy"`
+			AccountNotes json.RawMessage `json:"account_notes"`
+			Operation    struct {
 				CapturedStdin json.RawMessage `json:"captured_stdin"`
 			} `json:"operation"`
 		}
@@ -781,6 +783,9 @@ func DecodeWorkerMessage(data []byte, direction Direction) (any, error) {
 		}
 		if string(flags.RiskPolicy) == "null" {
 			return nil, errors.New("null risk policy")
+		}
+		if string(flags.AccountNotes) == "null" {
+			return nil, errors.New("null account notes")
 		}
 		if string(flags.Operation.CapturedStdin) == "null" {
 			return nil, errors.New("null captured input metadata")
@@ -1059,6 +1064,11 @@ func validateBootstrap(m Bootstrap) error {
 	}
 	if m.RiskPolicy != nil {
 		if err := m.RiskPolicy.Validate(); err != nil {
+			return err
+		}
+	}
+	for _, note := range m.AccountNotes {
+		if err := note.Validate(); err != nil {
 			return err
 		}
 	}

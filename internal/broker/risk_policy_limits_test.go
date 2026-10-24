@@ -14,13 +14,15 @@ import (
 )
 
 func TestRiskPolicyEscapingExceedsBootstrapFrameBeforeWorkerStarts(t *testing.T) {
-	// Given: one roughly 11 MiB rubric allocation expands past the 64 MiB
-	// frame limit because the real JSON encoder escapes each '<' as six bytes.
+	// Given: host guidance and a note each fit, but together expand past the
+	// 64 MiB frame limit because the JSON encoder escapes '<' as six bytes.
 	env := newRiskPolicyEnv(t)
-	path := env.write(t, "policies/escaped.md", strings.Repeat("<", int(proto.MaxFrameLength)/6+1))
+	payload := strings.Repeat("<", int(proto.MaxFrameLength)/12+1)
+	path := env.write(t, "notes/escaped.md", payload)
+	hostPath := env.write(t, "risk-policy.md", payload)
 	var starts atomic.Int32
 	worker := &countingWorker{starts: &starts, inner: &ScriptedWorker{}}
-	h := env.harness(t, testConfig(), map[string]string{env.a.login: path}, "", worker)
+	h := env.harness(t, testConfig(), map[string]string{env.a.login: path}, hostPath, worker)
 
 	// When
 	h.peerUID.Store(env.a.uid)
@@ -68,15 +70,17 @@ func TestRiskPolicyEscapingExceedsBootstrapFrameBeforeWorkerStarts(t *testing.T)
 }
 
 func TestRiskPolicyManifestHandoffLimitAppliesBeforeForegroundApprovalOnly(t *testing.T) {
-	// Given: the encoded rubric string alone fits within 1 MiB; the complete
+	// Given: host guidance and a user note each fit within 1 MiB; the combined
 	// manifest does not. Detached jobs have no helper manifest-size limit.
 	env := newRiskPolicyEnv(t)
-	path := env.write(t, "policies/manifest.md", strings.Repeat("<", (1<<20)/6))
+	payload := strings.Repeat("<", (1<<20)/12+1)
+	path := env.write(t, "notes/manifest.md", payload)
+	hostPath := env.write(t, "risk-policy.md", payload)
 	for _, lifecycle := range []string{proto.LifecycleForeground, proto.LifecycleDetached} {
 		t.Run(lifecycle, func(t *testing.T) {
 			notified := make(chan struct{}, 1)
 			worker := &ScriptedWorker{Config: ScriptedWorkerConfig{Decision: "deny", AwaitingDecision: notified}}
-			h := env.harness(t, testConfig(), map[string]string{env.a.login: path}, "", worker)
+			h := env.harness(t, testConfig(), map[string]string{env.a.login: path}, hostPath, worker)
 			h.peerUID.Store(env.a.uid)
 			h.daemon.peerPID = func(*net.UnixConn) (int64, error) { return 1234, nil }
 			h.daemon.ttyEvidence = func(int64) (ttyIdentity, error) {

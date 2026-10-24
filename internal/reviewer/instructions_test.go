@@ -36,3 +36,25 @@ func TestSystemInstructionsSelectsOnlyTheSuppliedRubric(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemInstructionsAppendsAccountNotesAfterGuidance(t *testing.T) {
+	// Given: ordered administrator payloads, distinct from the host calibration.
+	notes := []proto.AccountNote{{Text: "GROUP-A-7f31\n"}, {Text: "GROUP-Z-2ce5\n"}, {Text: "USER-0b96\n"}}
+	for _, policy := range []*proto.RiskPolicy{nil, {Text: "HOST-901d\n"}} {
+		// When
+		got := SystemInstructions(policy, notes...)
+		// Then: the base instruction bytes are untouched and payload order is exact.
+		base := SystemInstructions(policy)
+		if !strings.HasPrefix(got, base) {
+			t.Fatal("account notes replaced guidance or fixed instructions")
+		}
+		position := len(base)
+		for _, note := range notes {
+			next := strings.Index(got, note.Text)
+			if next < position || strings.Count(got, note.Text) != 1 {
+				t.Fatal("note payload missing, reordered or rewritten")
+			}
+			position = next + len(note.Text)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
@@ -48,13 +49,13 @@ func TestReadRiskPolicyReturnsExactBytesOfOwnedNonWritableFiles(t *testing.T) {
 	exact := []byte("\xef\xbb\xbf  tab\there\r\nnaïve ✓ <b>&</b>\n\n  ")
 	for _, mode := range []os.FileMode{0o644, 0o600, 0o444} {
 		path := writeRiskPolicyFile(t, filepath.Join(root, "etc", "policy.md"), exact, mode)
-		got, err := readRiskPolicy(trust, path)
+		got, err := readRiskPolicy(trust, path, int64(proto.MaxFrameLength))
 		if err != nil || !bytes.Equal(got, exact) {
 			t.Fatalf("mode %o: bytes=%q err=%v, want exact fixture", mode, got, err)
 		}
 	}
 	empty := writeRiskPolicyFile(t, filepath.Join(root, "etc", "empty.md"), nil, 0o644)
-	if got, err := readRiskPolicy(trust, empty); err != nil || len(got) != 0 {
+	if got, err := readRiskPolicy(trust, empty, int64(proto.MaxFrameLength)); err != nil || len(got) != 0 {
 		t.Fatalf("empty rubric: %q %v", got, err)
 	}
 }
@@ -133,7 +134,7 @@ func TestReadRiskPolicyRejectsWritableLinkedAndForeignProvenance(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			trust, root := riskPolicyFixture(t)
 			path := tc.build(t, &trust, root)
-			got, err := readRiskPolicy(trust, path)
+			got, err := readRiskPolicy(trust, path, int64(proto.MaxFrameLength))
 			if len(got) != 0 || !errors.Is(err, errRiskPolicyUnsafe) {
 				t.Fatalf("data=%q err=%v, want errRiskPolicyUnsafe and no bytes", got, err)
 			}
@@ -150,7 +151,7 @@ func TestProductionTrustRefusesAnUnprivilegedTree(t *testing.T) {
 	}
 	_, root := riskPolicyFixture(t)
 	path := writeRiskPolicyFile(t, filepath.Join(root, "p.md"), []byte("rubric"), 0o644)
-	if got, err := readRiskPolicy(rootRiskPolicyTrust(), path); len(got) != 0 || !errors.Is(err, errRiskPolicyUnsafe) {
+	if got, err := readRiskPolicy(rootRiskPolicyTrust(), path, int64(proto.MaxFrameLength)); len(got) != 0 || !errors.Is(err, errRiskPolicyUnsafe) {
 		t.Fatalf("production trust accepted an unprivileged tree: %q %v", got, err)
 	}
 }
@@ -164,7 +165,7 @@ func TestRootRiskPolicyTrustWithRealRootOwnership(t *testing.T) {
 	trust := rootRiskPolicyTrust()
 	dir := filepath.Join(base, "policies")
 	path := writeRiskPolicyFile(t, filepath.Join(dir, "a.md"), []byte("root rubric\n"), 0o644)
-	if got, err := readRiskPolicy(trust, path); err != nil || string(got) != "root rubric\n" {
+	if got, err := readRiskPolicy(trust, path, int64(proto.MaxFrameLength)); err != nil || string(got) != "root rubric\n" {
 		t.Fatalf("root-owned tree rejected: %q %v", got, err)
 	}
 	const nobody = 65534
@@ -189,7 +190,7 @@ func TestRootRiskPolicyTrustWithRealRootOwnership(t *testing.T) {
 		if err := mutate(); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if got, err := readRiskPolicy(trust, path); len(got) != 0 || !errors.Is(err, errRiskPolicyUnsafe) {
+		if got, err := readRiskPolicy(trust, path, int64(proto.MaxFrameLength)); len(got) != 0 || !errors.Is(err, errRiskPolicyUnsafe) {
 			t.Fatalf("%s: accepted (%q, %v)", name, got, err)
 		}
 	}
@@ -198,7 +199,7 @@ func TestRootRiskPolicyTrustWithRealRootOwnership(t *testing.T) {
 func TestReadRiskPolicyReportsMissingFilesAsAbsent(t *testing.T) {
 	trust, root := riskPolicyFixture(t)
 	for _, path := range []string{filepath.Join(root, "missing.md"), filepath.Join(root, "no", "such", "dir", "p.md")} {
-		if got, err := readRiskPolicy(trust, path); len(got) != 0 || !errors.Is(err, errRiskPolicyAbsent) {
+		if got, err := readRiskPolicy(trust, path, int64(proto.MaxFrameLength)); len(got) != 0 || !errors.Is(err, errRiskPolicyAbsent) {
 			t.Fatalf("%s: data=%q err=%v, want errRiskPolicyAbsent", path, got, err)
 		}
 	}
@@ -218,12 +219,12 @@ func makeRiskPolicyDir(t *testing.T, dir string, mode os.FileMode) string {
 
 // loadRubric selects and reads a rubric the way the start of an AI review does,
 // for a broker whose rubric trust is the given fixture. A non-nil files map is
-// resolved like review.risk_policy_files at Load.
+// resolved like review.account_notes.users at Load.
 func loadRubric(t *testing.T, trust riskPolicyTrust, hostDefault string, uid uint32, files map[string]string) (*riskPolicySnapshot, error) {
 	t.Helper()
 	cfg := testConfig()
-	cfg.Review.RiskPolicyFiles = files
-	if err := cfg.Review.ResolveRiskPolicyFiles(); err != nil {
+	cfg.Review.AccountNotes = &config.AccountNotesConfig{Users: files}
+	if err := cfg.Review.ResolveAccountNotes(); err != nil {
 		t.Fatal(err)
 	}
 	job := &jobRuntime{daemon: &daemon{cfg: cfg, riskPolicyDefault: hostDefault, riskPolicyTrust: trust}, uid: uid, req: proto.SubmitRequest{RequestID: "2026-10-21_#1"}}
@@ -299,7 +300,7 @@ func TestPresentHostDefaultIsStillHeldToTheTrustRule(t *testing.T) {
 			path := writeRiskPolicyFile(t, filepath.Join(dir, riskPolicyFileName), []byte(rubric), 0o644)
 			snapshot, err := loadRubric(t, trust, path, uid, nil)
 			if layout.trusted {
-				if err != nil || snapshot == nil || snapshot.text != rubric || snapshot.scope != riskPolicyScopeHost || snapshot.revision != revisionOf(rubric) {
+				if err != nil || snapshot == nil || len(snapshot.layers) != 1 || snapshot.layers[0].Text != rubric || snapshot.layers[0].Scope != riskPolicyScopeHost || snapshot.layers[0].SHA256 != revisionOf(rubric) {
 					t.Fatalf("trusted layout: snapshot=%+v err=%v", snapshot, err)
 				}
 				return
@@ -380,7 +381,7 @@ func TestAbsentHostDefaultUnderUntrustedAncestorDoesNotFailAIReviews(t *testing.
 	if result.State != "finished" || boot.RiskPolicy != nil {
 		t.Fatalf("state=%s message=%q rubric=%+v, want a finished review with no rubric", result.State, result.Message, boot.RiskPolicy)
 	}
-	if manifest := frozenManifestBytes(t, h, env.b.uid, id); bytes.Contains(manifest, []byte("risk_policy")) {
+	if manifest := frozenManifestBytes(t, h, env.b.uid, id); bytes.Contains(manifest, []byte("administrator_layers")) {
 		t.Fatalf("default review manifest gained a rubric record: %s", manifest)
 	}
 }
@@ -392,7 +393,7 @@ func TestReadRiskPolicyRejectsContentTheProtocolCannotCarry(t *testing.T) {
 		"NUL":           []byte("ru\x00bric"),
 	} {
 		path := writeRiskPolicyFile(t, filepath.Join(root, "p.md"), data, 0o644)
-		if got, err := readRiskPolicy(trust, path); len(got) != 0 || !errors.Is(err, errRiskPolicyInvalid) {
+		if got, err := readRiskPolicy(trust, path, int64(proto.MaxFrameLength)); len(got) != 0 || !errors.Is(err, errRiskPolicyInvalid) {
 			t.Fatalf("%s: data=%q err=%v, want errRiskPolicyInvalid", name, got, err)
 		}
 	}
@@ -403,7 +404,7 @@ func TestReadRiskPolicyRejectsContentTheProtocolCannotCarry(t *testing.T) {
 	if err := os.Truncate(big, int64(proto.MaxFrameLength)+1); err != nil {
 		t.Skipf("sparse file unsupported: %v", err)
 	}
-	if got, err := readRiskPolicy(trust, big); len(got) != 0 || !errors.Is(err, errRiskPolicyInvalid) {
+	if got, err := readRiskPolicy(trust, big, int64(proto.MaxFrameLength)); len(got) != 0 || !errors.Is(err, errRiskPolicyInvalid) {
 		t.Fatalf("oversize: %d bytes err=%v, want errRiskPolicyInvalid", len(got), err)
 	}
 }

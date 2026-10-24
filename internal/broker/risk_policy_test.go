@@ -9,8 +9,11 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +32,7 @@ import (
 )
 
 // riskPolicyEnv is an isolated administrator tree plus two real, distinct Unix
-// accounts. Logins are only used to build review.risk_policy_files; selection
+// accounts. Logins are only used to build review.account_notes; selection
 // still happens on the kernel-authenticated UID.
 type riskPolicyEnv struct {
 	trust riskPolicyTrust
@@ -54,8 +57,11 @@ func (e riskPolicyEnv) write(t *testing.T, name, content string) string {
 // auto_approve_grants.
 func (e riskPolicyEnv) harness(t *testing.T, cfg *config.Config, files map[string]string, hostDefault string, worker Worker) *brokerHarness {
 	t.Helper()
-	cfg.Review.RiskPolicyFiles = files
-	if err := cfg.Review.ResolveRiskPolicyFiles(); err != nil {
+	if cfg.Review.AccountNotes == nil {
+		cfg.Review.AccountNotes = &config.AccountNotesConfig{}
+	}
+	cfg.Review.AccountNotes.Users = files
+	if err := cfg.Review.ResolveAccountNotes(); err != nil {
 		t.Fatal(err)
 	}
 	h := newBrokerHarnessWithConfig(t, worker, nil, cfg)
@@ -103,44 +109,108 @@ func revisionOf(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func TestRiskPolicySelectionFollowsAuthenticatedSubmitterUID(t *testing.T) {
+func TestAccountNotesSelectionFollowsAuthenticatedUIDAndOrderedGroups(t *testing.T) {
+	// Given: two mapped groups, a user note, and separate host calibration.
 	env := newRiskPolicyEnv(t)
-	rubricA, rubricB, rubricHost := "A canary \r\n\t  exact\n", "B canary 日本語 ", "HOST canary\n"
-	pathA, pathB := env.write(t, "policies/a.md", rubricA), env.write(t, "policies/b.md", rubricB)
-	hostPath := env.write(t, "risk-policy.md", rubricHost)
+	groups := noteTestGroups(t, env)
+	slices.SortFunc(groups, func(a, b noteTestGroup) int { return strings.Compare(a.Name, b.Name) })
+	groupIDs := make([]uint32, 0, 2)
+	groupPaths := map[string]string{}
+	wantGroups := []manifestAdministratorLayer{}
+	for i, group := range groups {
+		groupIDs = append(groupIDs, group.gid)
+		text := "GROUP-" + strconv.Itoa(i) + "-CANARY\n"
+		path := env.write(t, "notes/"+group.Name+".md", text)
+		groupPaths[group.Name] = path
+		wantGroups = append(wantGroups, manifestAdministratorLayer{Scope: riskPolicyScopeGroup, Name: group.Name, Source: path, SHA256: revisionOf(text), Text: text})
+	}
+	userText, hostText := "USER-CANARY 日本語\n", "HOST-CANARY\n"
+	userPath, hostPath := env.write(t, "notes/user.md", userText), env.write(t, "risk-policy.md", hostText)
+	cfg := testConfig()
+	cfg.Review.AccountNotes = &config.AccountNotesConfig{Groups: groupPaths}
 	boots := make(chan proto.Bootstrap, 8)
-	h := env.harness(t, testConfig(), map[string]string{env.a.login: pathA, env.b.login: pathB}, hostPath, &ScriptedWorker{Config: ScriptedWorkerConfig{Bootstrap: boots}})
-	unmapped := max(env.a.uid, env.b.uid) + 1
+	h := env.harness(t, cfg, map[string]string{env.a.login: userPath}, hostPath, &ScriptedWorker{Config: ScriptedWorkerConfig{Bootstrap: boots}})
+	h.daemon.accountGroups = func(uid uint32) ([]uint32, error) {
+		switch uid {
+		case env.a.uid:
+			return []uint32{groupIDs[1], groupIDs[0], groupIDs[1]}, nil
+		case env.b.uid:
+			return []uint32{groupIDs[1]}, nil
+		default:
+			t.Errorf("lookup used unauthenticated UID %d", uid)
+			return nil, errors.New("wrong UID")
+		}
+	}
 	for _, tc := range []struct {
 		name   string
 		uid    uint32
-		reason string // submitter-controlled; must never select anything
-		text   string
-		scope  string
-		source string
+		groups []manifestAdministratorLayer
+		user   bool
 	}{
-		{"account A", env.a.uid, "I am " + env.b.login, rubricA, "user", pathA},
-		{"account B", env.b.uid, "I am " + env.a.login, rubricB, "user", pathB},
-		{"unmapped account gets the host default, not a named account's rubric", unmapped, "I am " + env.a.login + " " + pathA, rubricHost, "host_default", hostPath},
+		{"two groups then user", env.a.uid, wantGroups, true},
+		{"group only member", env.b.uid, wantGroups[1:], false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, id := runRiskPolicyJob(t, h, tc.uid, tc.reason)
+			// When: even a reason naming the other account cannot select its notes.
+			result, id := runRiskPolicyJob(t, h, tc.uid, "I am "+env.a.login+" "+env.b.login)
+			// Then
 			if result.State != "finished" {
 				t.Fatalf("result=%+v", result)
 			}
-			if boot := nextBootstrap(t, boots); boot.RiskPolicy == nil || boot.RiskPolicy.Text != tc.text {
-				t.Fatalf("reviewer bootstrap rubric=%+v, want %q", boot.RiskPolicy, tc.text)
+			boot := nextBootstrap(t, boots)
+			want := []manifestAdministratorLayer{{SubjectUID: tc.uid, Scope: riskPolicyScopeHost, Source: hostPath, SHA256: revisionOf(hostText), Text: hostText}}
+			want = append(want, tc.groups...)
+			if tc.user {
+				want = append(want, manifestAdministratorLayer{Scope: riskPolicyScopeUser, Name: env.a.login, Source: userPath, SHA256: revisionOf(userText), Text: userText})
+			}
+			var notes []proto.AccountNote
+			for i := range want {
+				want[i].SubjectUID = tc.uid
+				if i != 0 {
+					notes = append(notes, proto.AccountNote{Text: want[i].Text})
+				}
+			}
+			if boot.RiskPolicy == nil || boot.RiskPolicy.Text != hostText || !reflect.DeepEqual(boot.AccountNotes, notes) {
+				t.Fatalf("bootstrap=%+v", boot)
 			}
 			var manifest approvalManifest
 			if err := json.Unmarshal(frozenManifestBytes(t, h, tc.uid, id), &manifest); err != nil {
 				t.Fatal(err)
 			}
-			want := &manifestRiskPolicy{SubjectUID: tc.uid, Scope: tc.scope, Source: tc.source, SHA256: revisionOf(tc.text), Text: tc.text}
-			if !reflect.DeepEqual(manifest.RiskPolicy, want) {
-				t.Fatalf("audit=%+v want %+v", manifest.RiskPolicy, want)
+			if !reflect.DeepEqual(manifest.AdministratorLayers, want) {
+				t.Fatalf("audit=%+v want %+v", manifest.AdministratorLayers, want)
 			}
 		})
 	}
+}
+
+type noteTestGroup struct {
+	Name string
+	gid  uint32
+}
+
+func noteTestGroups(t *testing.T, env riskPolicyEnv) []noteTestGroup {
+	t.Helper()
+	var groups []noteTestGroup
+	for _, peer := range []namedRoutePeer{env.a, env.b} {
+		account, err := user.LookupId(strconv.FormatUint(uint64(peer.uid), 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		group, err := user.LookupGroupId(account.Gid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gid, err := strconv.ParseUint(group.Gid, 10, 32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		groups = append(groups, noteTestGroup{Name: group.Name, gid: uint32(gid)})
+	}
+	if groups[0].gid == groups[1].gid {
+		t.Fatal("account-note tests need two distinct Unix groups")
+	}
+	return groups
 }
 
 func TestNoRubricKeepsDefaultBootstrapAndHistoricalManifestShape(t *testing.T) {
@@ -164,10 +234,10 @@ func TestNoRubricKeepsDefaultBootstrapAndHistoricalManifestShape(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.State != "finished" || boot.RiskPolicy != nil || bytes.Contains(wire, []byte("risk_policy")) {
+			if result.State != "finished" || boot.RiskPolicy != nil || len(boot.AccountNotes) != 0 || bytes.Contains(wire, []byte("risk_policy")) || reviewer.SystemInstructions(boot.RiskPolicy, boot.AccountNotes...) != reviewer.EmbeddedInstructions {
 				t.Fatalf("state=%s bootstrap rubric=%+v wire=%s", result.State, boot.RiskPolicy, wire)
 			}
-			if manifest := frozenManifestBytes(t, h, env.b.uid, id); bytes.Contains(manifest, []byte("risk_policy")) {
+			if manifest := frozenManifestBytes(t, h, env.b.uid, id); bytes.Contains(manifest, []byte("administrator_layers")) {
 				t.Fatalf("default review manifest gained a rubric record: %s", manifest)
 			}
 		})
@@ -197,8 +267,8 @@ func TestRiskPolicyEditAffectsNextReviewNotTheOneInFlight(t *testing.T) {
 	_, secondID := runRiskPolicyJob(t, h, env.a.uid, "second")
 
 	for i, want := range []string{"v1 canary", "v2 canary"} {
-		if boot := nextBootstrap(t, boots); boot.RiskPolicy == nil || boot.RiskPolicy.Text != want {
-			t.Fatalf("review %d bootstrap rubric=%+v, want %q", i+1, boot.RiskPolicy, want)
+		if boot := nextBootstrap(t, boots); boot.RiskPolicy != nil || len(boot.AccountNotes) != 1 || boot.AccountNotes[0].Text != want {
+			t.Fatalf("review %d bootstrap notes=%+v, want %q", i+1, boot.AccountNotes, want)
 		}
 	}
 	for id, want := range map[string]string{first.RequestID: "v1 canary", secondID: "v2 canary"} {
@@ -206,8 +276,8 @@ func TestRiskPolicyEditAffectsNextReviewNotTheOneInFlight(t *testing.T) {
 		if err := json.Unmarshal(frozenManifestBytes(t, h, env.a.uid, id), &manifest); err != nil {
 			t.Fatal(err)
 		}
-		if manifest.RiskPolicy == nil || manifest.RiskPolicy.Text != want || manifest.RiskPolicy.SHA256 != revisionOf(want) {
-			t.Fatalf("job %s audit=%+v, want the revision it reviewed (%q)", id, manifest.RiskPolicy, want)
+		if len(manifest.AdministratorLayers) != 1 || manifest.AdministratorLayers[0].Text != want || manifest.AdministratorLayers[0].SHA256 != revisionOf(want) {
+			t.Fatalf("job %s audit=%+v, want the revision it reviewed (%q)", id, manifest.AdministratorLayers, want)
 		}
 	}
 }
@@ -240,7 +310,7 @@ func TestBootstrapProjectsTheFrozenSnapshotNotTheFile(t *testing.T) {
 			t.Fatalf("bootstrap rejected: %v", err)
 		}
 	}
-	if later, err := job.loadRiskPolicy(); err != nil || later.text != "v2 canary" {
+	if later, err := job.loadRiskPolicy(); err != nil || later.layers[0].Text != "v2 canary" {
 		t.Fatalf("the next review must see the edit: %+v %v", later, err)
 	}
 }
@@ -256,12 +326,12 @@ func TestLoadRiskPolicyPrecedenceAndAbsence(t *testing.T) {
 		files       map[string]string
 		hostDefault string
 		uid         uint32
-		text, scope string
+		texts       []string
 		wantNil     bool
 		wantErr     error
 	}{
-		{name: "per-user rubric wins over the host default", files: map[string]string{env.a.login: userPath}, hostDefault: hostPath, uid: env.a.uid, text: "user rubric", scope: riskPolicyScopeUser},
-		{name: "unmapped account uses the host default", files: map[string]string{env.a.login: userPath}, hostDefault: hostPath, uid: env.b.uid, text: "host rubric", scope: riskPolicyScopeHost},
+		{name: "user context follows host guidance", files: map[string]string{env.a.login: userPath}, hostDefault: hostPath, uid: env.a.uid, texts: []string{"host rubric", "user rubric"}},
+		{name: "unmapped account uses the host default", files: map[string]string{env.a.login: userPath}, hostDefault: hostPath, uid: env.b.uid, texts: []string{"host rubric"}},
 		{name: "missing per-user file is an error, never the host default", files: map[string]string{env.a.login: missing}, hostDefault: hostPath, uid: env.a.uid, wantNil: true, wantErr: errRiskPolicyAbsent},
 		{name: "absent host default is no policy", hostDefault: filepath.Join(env.root, "none.md"), uid: env.b.uid, wantNil: true},
 		{name: "no host default configured is no policy", uid: env.b.uid, wantNil: true},
@@ -285,8 +355,17 @@ func TestLoadRiskPolicyPrecedenceAndAbsence(t *testing.T) {
 			if err != nil || (snapshot == nil) != tc.wantNil {
 				t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 			}
-			if snapshot != nil && (snapshot.text != tc.text || snapshot.scope != tc.scope || snapshot.subjectUID != tc.uid || snapshot.revision != revisionOf(tc.text)) {
-				t.Fatalf("snapshot=%+v", snapshot)
+			if snapshot != nil {
+				var texts []string
+				for _, layer := range snapshot.layers {
+					texts = append(texts, layer.Text)
+					if layer.SubjectUID != tc.uid || layer.SHA256 != revisionOf(layer.Text) {
+						t.Fatalf("layer=%+v", layer)
+					}
+				}
+				if !reflect.DeepEqual(texts, tc.texts) {
+					t.Fatalf("payloads=%q, want %q", texts, tc.texts)
+				}
 			}
 		})
 	}
@@ -357,18 +436,21 @@ func TestUnusableRubricFailsTheAIRequiredJobBeforeAnyWorkerStarts(t *testing.T) 
 
 // An approval-only job never consults a rubric, so an unusable one is irrelevant.
 func TestApprovalOnlyJobIgnoresUnusableRubric(t *testing.T) {
+	// Given: configured but unusable host/user/group layers.
 	env := newRiskPolicyEnv(t)
 	cfg := testConfig()
+	group := noteTestGroups(t, env)[0]
+	cfg.Review.AccountNotes = &config.AccountNotesConfig{Groups: map[string]string{group.Name: filepath.Join(env.root, "missing-group.md")}}
 	cfg.Review.Mode, cfg.Review.Models = "required", nil
 	cfg.Review.ApprovalOnlyUsers = []string{env.a.login}
-	boots := make(chan *proto.RiskPolicy, 1)
+	boots := make(chan proto.Bootstrap, 1)
 	worker := protocolWorker{run: func(_ context.Context, conn net.Conn) error {
 		message, err := readWorker(conn, proto.BrokerToWorker)
 		if err != nil {
 			return err
 		}
 		boot := message.(*proto.Bootstrap)
-		boots <- boot.RiskPolicy
+		boots <- *boot
 		if !boot.ApprovalOnly {
 			t.Error("exempt account was not approval-only")
 		}
@@ -386,12 +468,18 @@ func TestApprovalOnlyJobIgnoresUnusableRubric(t *testing.T) {
 	}}
 	files := map[string]string{env.a.login: filepath.Join(env.root, "missing.md")}
 	h := env.harness(t, cfg, files, writeRiskPolicyFile(t, filepath.Join(env.root, "risk-policy.md"), []byte("ignored"), 0o666), worker)
+	h.daemon.accountGroups = func(uint32) ([]uint32, error) {
+		t.Error("approval-only job consulted group membership")
+		return nil, errors.New("not needed")
+	}
+	// When
 	result, _ := runRiskPolicyJob(t, h, env.a.uid, "human only")
+	// Then
 	if result.State != "finished" || len(h.executor.Snapshot()) != 1 {
 		t.Fatalf("result=%+v executions=%d", result, len(h.executor.Snapshot()))
 	}
-	if policy := <-boots; policy != nil {
-		t.Fatalf("approval-only bootstrap carried a rubric: %+v", policy)
+	if boot := <-boots; boot.RiskPolicy != nil || len(boot.AccountNotes) != 0 {
+		t.Fatalf("approval-only bootstrap carried administrator layers: %+v", boot)
 	}
 }
 
@@ -416,10 +504,10 @@ func TestTamperedRubricRecordInFrozenManifestNeverDispatches(t *testing.T) {
 	if err := json.Unmarshal(frozenManifestBytes(t, h, env.a.uid, req.RequestID), &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.RiskPolicy == nil || manifest.RiskPolicy.Text != "rubric as reviewed" {
-		t.Fatalf("frozen manifest lacks the reviewed rubric: %+v", manifest.RiskPolicy)
+	if len(manifest.AdministratorLayers) != 1 || manifest.AdministratorLayers[0].Text != "rubric as reviewed" {
+		t.Fatalf("frozen manifest lacks the reviewed note: %+v", manifest.AdministratorLayers)
 	}
-	manifest.RiskPolicy.Text = "a more permissive rubric"
+	manifest.AdministratorLayers[0].Text = "a substituted note"
 	tampered, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -507,10 +595,12 @@ func TestRealReviewerSendsBrokerSnapshotAsFirstModelMessage(t *testing.T) {
 // instructions and forbids later system messages; jobs without one are
 // governed exactly as before.
 func TestFleetTurnPinsTrustedSystemMessageOnlyForRubricJobs(t *testing.T) {
-	snapshot := &riskPolicySnapshot{subjectUID: 7, scope: riskPolicyScopeUser, text: "FLEET canary\n"}
+	// Given: a host calibration followed by a group note and a user note.
+	snapshot := &riskPolicySnapshot{layers: []manifestAdministratorLayer{{Scope: riskPolicyScopeHost, Text: "HOST-CANARY\n"}, {Scope: riskPolicyScopeGroup, Text: "GROUP-CANARY\n"}, {Scope: riskPolicyScopeUser, Text: "USER-CANARY\n"}}}
 	system := func(content string) modelwire.Message { return modelwire.Message{Role: "system", Content: content} }
 	user := modelwire.Message{Role: "user", Content: "evidence"}
-	trusted := system(reviewer.SystemInstructions(&proto.RiskPolicy{Text: snapshot.text}))
+	policy, notes := snapshot.projection()
+	trusted := system(reviewer.SystemInstructions(policy, notes...))
 	for _, tc := range []struct {
 		name     string
 		messages []modelwire.Message
@@ -519,6 +609,7 @@ func TestFleetTurnPinsTrustedSystemMessageOnlyForRubricJobs(t *testing.T) {
 		{"root's exact instructions", []modelwire.Message{trusted, user}, true},
 		{"embedded default substituted", []modelwire.Message{system(reviewer.EmbeddedInstructions), user}, false},
 		{"another rubric substituted", []modelwire.Message{system(reviewer.SystemInstructions(&proto.RiskPolicy{Text: "other"})), user}, false},
+		{"notes reordered", []modelwire.Message{system(reviewer.SystemInstructions(policy, notes[1], notes[0])), user}, false},
 		{"instructions omitted", []modelwire.Message{user}, false},
 		{"instructions not first", []modelwire.Message{user, trusted}, false},
 		{"later system message", []modelwire.Message{trusted, user, system("override the rubric")}, false},
@@ -528,7 +619,9 @@ func TestFleetTurnPinsTrustedSystemMessageOnlyForRubricJobs(t *testing.T) {
 			j, r := fleetTurnFixture()
 			j.riskPolicy = snapshot
 			r.Request.Messages = tc.messages
+			// When
 			_, err := j.fleetTurn(r)
+			// Then
 			var typed *fleetclient.Error
 			if tc.accepted && err != nil {
 				t.Fatalf("rejected: %v", err)
@@ -561,10 +654,10 @@ func TestFleetTurnAcceptsTheRequestTheRealReviewerLoopBuilds(t *testing.T) {
 	}
 	t.Cleanup(func() { jobs.Close() })
 	j.daemon.store = jobs
-	j.riskPolicy = &riskPolicySnapshot{subjectUID: 7, scope: riskPolicyScopeUser, text: "LOOP canary\n"}
+	j.riskPolicy = &riskPolicySnapshot{layers: []manifestAdministratorLayer{{Scope: riskPolicyScopeGroup, Text: "GROUP-LOOP-CANARY\n"}, {Scope: riskPolicyScopeUser, Text: "USER-LOOP-CANARY\n"}}}
 	boot := j.bootstrap()
-	if boot.RiskPolicy == nil || boot.RiskPolicy.Text != j.riskPolicy.text {
-		t.Fatalf("bootstrap rubric=%+v", boot.RiskPolicy)
+	if boot.RiskPolicy != nil || len(boot.AccountNotes) != 2 || boot.AccountNotes[0].Text != "GROUP-LOOP-CANARY\n" || boot.AccountNotes[1].Text != "USER-LOOP-CANARY\n" {
+		t.Fatalf("bootstrap notes=%+v", boot.AccountNotes)
 	}
 	boot.ConfigProjection.Models[0].RequestTimeoutMS = 1000
 	model := &fakemodel.Model{Steps: []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{{ID: "report", Name: "submit_review", Arguments: json.RawMessage(`{"risk":"unknown","summary":"Fixture assessment.","effects":[],"warnings":[],"missing_context":[],"reversibility":"Unknown","intent_match":"unverified"}`)}}}}}}
@@ -572,7 +665,7 @@ func TestFleetTurnAcceptsTheRequestTheRealReviewerLoopBuilds(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Request = model.Requests[0]
-	if r.Request.Messages[0].Content != reviewer.SystemInstructions(&proto.RiskPolicy{Text: j.riskPolicy.text}) {
+	if r.Request.Messages[0].Content != reviewer.SystemInstructions(nil, proto.AccountNote{Text: "GROUP-LOOP-CANARY\n"}, proto.AccountNote{Text: "USER-LOOP-CANARY\n"}) {
 		t.Fatal("worker did not build the first message from root's snapshot")
 	}
 	turn, err := j.fleetTurn(r)
@@ -603,7 +696,7 @@ func TestLoadRiskPolicyFleetModeHonoursFleetMessageContract(t *testing.T) {
 			}
 			job := newTestJobRuntime(t, h.daemon, proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id"}, RequestID: reserveForTest(t, h.socket, h.peerUID.Load())}, spool)
 			job.uid = env.a.uid
-			if snapshot, err := job.loadRiskPolicy(); err != nil || snapshot.text != text {
+			if snapshot, err := job.loadRiskPolicy(); err != nil || snapshot.layers[0].Text != text {
 				t.Fatalf("direct mode must keep the exact bytes: %v", err)
 			}
 			job.fleet = &fleetJob{}
@@ -682,7 +775,12 @@ func TestConcurrentRubricLoadsAreSelfConsistent(t *testing.T) {
 			job := newJobRuntime(h.daemon, uid, proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id"}, RequestID: strings.Repeat("0", 31) + string(rune('a'+worker))}, spool, resolveSubmitterIdentity(uid), nil, "n")
 			for range 25 {
 				snapshot, err := job.loadRiskPolicy()
-				if err != nil || snapshot.revision != revisionOf(snapshot.text) || snapshot.subjectUID != uid || !contains(allowed, snapshot.text) {
+				if err != nil || snapshot == nil {
+					t.Errorf("snapshot=%+v err=%v", snapshot, err)
+					return
+				}
+				layer := snapshot.layers[0]
+				if layer.SHA256 != revisionOf(layer.Text) || layer.SubjectUID != uid || !contains(allowed, layer.Text) {
 					t.Errorf("uid %d: snapshot=%+v err=%v", uid, snapshot, err)
 					return
 				}
