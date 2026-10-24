@@ -36,7 +36,7 @@ func TestCompactReviewedCardLeadsWithVerdict(t *testing.T) {
 			if !strings.HasPrefix(text, tc.heading+" — Edits auth config. Restarts the service.\n") {
 				t.Fatalf("verdict not first: %s", text)
 			}
-			for _, want := range []string{"<code>" + in.Host + " / " + in.JobID + "</code> · " + in.SubmitterName + " → root · expires ", "⚠️ Doesn&#39;t match the stated reason", "• First harm\n• Second harm\n• Third harm\n", "+2 more in Details", "<b>Runs:</b> <code>" + in.Operation + "</code>", "<b>Why:</b> " + in.Reason, "captured script input (123 bytes)", "⚠️ Content withheld from AI review: 1 item(s) — see Details"} {
+			for _, want := range []string{"<code>" + in.Host + " / " + in.JobID + "</code> · " + in.SubmitterName + " → root · expires ", "⚠️ Doesn&#39;t match the stated reason", "• First harm\n• Second harm\n• Third harm\n", "+2 more in Details", "<b>Runs:</b> <code>" + in.Operation + "</code>", "<b>Why:</b> " + in.Reason, "captured script input (123 bytes, sealed_memfd)", "⚠️ Content withheld from AI review: 1 item(s) — see Details"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("missing %q in %s", want, text)
 				}
@@ -89,7 +89,7 @@ func TestCompactCardTruncatesHostileFieldsWithoutBreakingHTML(t *testing.T) {
 			t.Fatalf("broken HTML/entity: %v", err)
 		}
 	}
-	for _, fact := range []string{"captured script input (123 bytes)", "99 item(s)", "+1 more in Details"} {
+	for _, fact := range []string{"captured script input (123 bytes, sealed_memfd)", "99 item(s)", "+1 more in Details"} {
 		if !strings.Contains(text, fact) {
 			t.Fatalf("lost fact %q", fact)
 		}
@@ -132,7 +132,7 @@ func TestCompactUnreviewedCardKeepsUnassessedFacts(t *testing.T) {
 			if !strings.HasPrefix(text, "⚠️ <b>NO AI REVIEW</b> — "+cause+". Risks NOT assessed.\n") {
 				t.Fatal(text)
 			}
-			for _, fact := range []string{"uid 123 → uid 234", "captured script input (17 bytes)", "2 item(s) — see Details", "<b>Runs:</b>", "<b>Why:</b>"} {
+			for _, fact := range []string{"uid 123 → uid 234", "captured script input (17 bytes, sealed_memfd)", "2 item(s) — see Details", "<b>Runs:</b>", "<b>Why:</b>"} {
 				if !strings.Contains(text, fact) {
 					t.Errorf("lost %q", fact)
 				}

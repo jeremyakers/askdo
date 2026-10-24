@@ -223,7 +223,7 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 	if len(in.Failures) > 0 {
 		reason = "providers unavailable"
 	}
-	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, WithheldCount: in.WithheldCount}
+	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
 	return "⚠️ <b>NO AI REVIEW</b> — " + reason + ". Risks NOT assessed.\n" + compactIdentity(facts, expiryText(in.Expiry)) + compactOperation(facts), kb, nil
 }
 
@@ -385,7 +385,13 @@ func compactWarnings(report proto.ReviewReport) string {
 func compactOperation(in CardInput) string {
 	text := "\n<b>Runs:</b> <code>" + compactEsc(in.Operation, 420) + "</code>"
 	if in.CapturedStdinBytes > 0 {
-		text += fmt.Sprintf("\n<b>Input:</b> captured script input (%d bytes)", in.CapturedStdinBytes)
+		// The delivery kind is documented as visible before approval; the
+		// empty kind is the historical sealed_memfd default (capturedDeliveryLabel).
+		kind := proto.SealedMemfd
+		if in.CapturedStdinKind == proto.SocketStream {
+			kind = proto.SocketStream
+		}
+		text += fmt.Sprintf("\n<b>Input:</b> captured script input (%d bytes, %s)", in.CapturedStdinBytes, kind)
 	}
 	if in.WithheldCount > 0 {
 		text += fmt.Sprintf("\n⚠️ Content withheld from AI review: %d item(s) — see Details", in.WithheldCount)

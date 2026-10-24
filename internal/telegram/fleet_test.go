@@ -120,7 +120,8 @@ func TestFleetSubmitterFactsReachDedicatedSections(t *testing.T) {
 				if directories.String() != cwd || commands.String() != ticket.Display.Operation {
 					t.Fatalf("wrong cwd/command: %q / %q", directories.String(), commands.String())
 				}
-				if !strings.Contains(strings.Join(got.Details, ""), "(73 bytes)") || !strings.Contains(got.Final, "(73 bytes)") {
+				// The fixture freezes no kind, so the card names the sealed_memfd default.
+				if !strings.Contains(strings.Join(got.Details, ""), "(73 bytes)") || !strings.Contains(got.Final, "(73 bytes, sealed_memfd)") {
 					t.Fatal("capture metadata missing")
 				}
 				ticket.Display.SummaryParts = len(got.Parts)
