@@ -126,7 +126,6 @@ func TestReviewedSecurityScoreCannotForgeTags(t *testing.T) {
 }
 
 func TestApprovalOnlySummaryAndDetails(t *testing.T) {
-	useLocalZone(t, time.FixedZone("CDT", -5*60*60))
 	in := ApprovalOnlyInput{
 		Host: "energy-host", Container: "Docker <sandbox>", TargetUID: 0,
 		JobID: "abcdef0123456789abcdef0123456789", SubmitterUID: 4242,
@@ -142,7 +141,7 @@ func TestApprovalOnlySummaryAndDetails(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatalf("parts=%d", len(parts))
 	}
-	for _, want := range []string{"NO AI REVIEW", "providers unavailable", "provider-A", "rate limit or quota", "Consequences", "rollback", "dependency completeness", "energy-host", "Docker &lt;sandbox&gt;", "uid 4242", "/tmp/&lt;work&gt;", "<pre><code class=\"language-bash\">/bin/sh -c &#39;echo &lt;fake&gt; &amp; exit&#39;</code></pre>", "please &lt;approve&gt; &amp; run", "Mon Sep 21, 7:00 AM CDT"} {
+	for _, want := range []string{"NO AI REVIEW", "providers unavailable", "provider-A", "rate limit or quota", "Consequences", "rollback", "dependency completeness", "energy-host", "Docker &lt;sandbox&gt;", "uid 4242", "/tmp/&lt;work&gt;", "<pre><code class=\"language-bash\">/bin/sh -c &#39;echo &lt;fake&gt; &amp; exit&#39;</code></pre>", "please &lt;approve&gt; &amp; run"} {
 		if !strings.Contains(parts[0], want) {
 			t.Errorf("missing %q: %s", want, parts[0])
 		}
@@ -247,7 +246,6 @@ func TestApprovalOnlyEveryChunkLeadsWithUnreviewedWarning(t *testing.T) {
 }
 
 func TestRenderSummaryRequiredFields(t *testing.T) {
-	useLocalZone(t, time.FixedZone("CDT", -5*60*60))
 	parts, err := RenderSummaryParts(testCardInput())
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
@@ -269,7 +267,7 @@ func TestRenderSummaryRequiredFields(t *testing.T) {
 		"<b>Warnings</b>", "• Service downtime during migration.", "• Partial migration may require manual recovery.",
 		"<b>Uncertainties</b>", "• Current backup availability was not verified.",
 		"<b>Reversibility:</b> Rollback procedure found; success not verified.",
-		"Reviewer <code>kimi-for-coding</code>", "expires Mon Sep 21, 7:00 AM CDT",
+		"Reviewer <code>kimi-for-coding</code>",
 		"job <code>abcdef0123456789abcdef0123456789</code>",
 	} {
 		if !strings.Contains(text, want) {
