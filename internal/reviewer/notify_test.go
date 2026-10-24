@@ -619,8 +619,13 @@ func TestNotifyCardContentCompleteness(t *testing.T) {
 			t.Fatalf("summary missing %q; got:\n%s", want, joined)
 		}
 	}
-	if !strings.Contains(joined, time.UnixMilli(notification.ExpiryUnixMS).UTC().Format(time.RFC3339)) {
+	// Cards show the deadline as local wall-clock time, not a UTC timestamp.
+	reported := time.UnixMilli(notification.ExpiryUnixMS)
+	if !strings.Contains(joined, reported.Local().Format("Mon Jan 2, 3:04 PM MST")) {
 		t.Fatalf("summary does not show the reported expiry; got:\n%s", joined)
+	}
+	if strings.Contains(joined, reported.UTC().Format(time.RFC3339)) {
+		t.Fatalf("summary still shows the UTC expiry; got:\n%s", joined)
 	}
 	// The token must never appear in any message.
 	if strings.Contains(joined, fake.Token()) {
