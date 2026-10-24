@@ -46,24 +46,28 @@ func testCardInput() CardInput {
 
 func TestHostHeaderPairsServerAndJobID(t *testing.T) {
 	for _, tc := range []struct{ name, host, header string }{
-		{"canonical", "Diskstation", "<b>Host:</b> <code>Diskstation / 2026-10-22_#2</code>"},
-		{"escaped", "Disk<&station>", "<b>Host:</b> <code>Disk&lt;&amp;station&gt; / 2026-10-22_#2</code>"},
+		{"canonical", "Diskstation", "<code>Diskstation / 2026-10-22_#2</code>"},
+		{"escaped", "Disk<&station>", "<code>Disk&lt;&amp;station&gt; / 2026-10-22_#2</code>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given a trusted server name and its canonical broker-local job ID.
 			in := testCardInput()
 			in.Host, in.JobID = tc.host, "2026-10-22_#2"
 			renders := map[string]func() ([]string, error){
-				"reviewed": func() ([]string, error) { return RenderSummaryParts(in) },
+				"reviewed": func() ([]string, error) {
+					text, _, err := RenderReviewedCard(in, testNonce)
+					return []string{text}, err
+				},
 				"unreviewed": func() ([]string, error) {
-					return RenderApprovalOnlySummaryParts(ApprovalOnlyInput{
+					text, _, err := RenderApprovalOnlyCard(ApprovalOnlyInput{
 						Host: in.Host, JobID: in.JobID, Operation: in.Operation, Expiry: in.Expiry,
-					})
+					}, testNonce)
+					return []string{text}, err
 				},
 			}
 			for name, render := range renders {
 				t.Run(name, func(t *testing.T) {
-					// When either approval flow renders its summary.
+					// When either approval flow renders its card.
 					parts, err := render()
 					if err != nil {
 						t.Fatal(err)
@@ -95,10 +99,18 @@ func TestReviewedSecurityScoreOnAllCards(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, text := range []string{strings.Join(summary, ""), strings.Join(details, ""), card} {
-				if !strings.Contains(text, "Security risk: "+tc.visible) {
-					t.Errorf("security score %q missing: %s", tc.visible, text)
-				}
+			if len(summary) != 0 {
+				t.Fatal("initial summary messages remain")
+			}
+			if text := strings.Join(details, ""); !strings.Contains(text, "Security risk: "+tc.visible) {
+				t.Errorf("security score %q missing: %s", tc.visible, text)
+			}
+			visible := tc.visible
+			if tc.risk == "unknown" {
+				visible = "unknown"
+			}
+			if !strings.Contains(card, "<b>Risk "+visible+"</b>") {
+				t.Fatalf("score missing: %s", card)
 			}
 			if len(kb.InlineKeyboard) != 1 || len(kb.InlineKeyboard[0]) == 0 || kb.InlineKeyboard[0][0].Text != "Approve once" {
 				t.Fatalf("human approval controls changed: %+v", kb)
@@ -111,7 +123,6 @@ func TestReviewedSecurityScoreCannotForgeTags(t *testing.T) {
 	in := testCardInput()
 	in.Report.Risk = `1</b><b>approved`
 	for _, render := range []func() (string, error){
-		func() (string, error) { parts, err := RenderSummaryParts(in); return strings.Join(parts, ""), err },
 		func() (string, error) {
 			parts, err := RenderDetails(DetailsInput{CardInput: in})
 			return strings.Join(parts, ""), err
@@ -125,7 +136,7 @@ func TestReviewedSecurityScoreCannotForgeTags(t *testing.T) {
 	}
 }
 
-func TestApprovalOnlySummaryAndDetails(t *testing.T) {
+func TestApprovalOnlyExpandedDetails(t *testing.T) {
 	in := ApprovalOnlyInput{
 		Host: "energy-host", Container: "Docker <sandbox>", TargetUID: 0,
 		JobID: "abcdef0123456789abcdef0123456789", SubmitterUID: 4242,
@@ -134,7 +145,7 @@ func TestApprovalOnlySummaryAndDetails(t *testing.T) {
 		Expiry:   time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 		Failures: []proto.AvailabilityFailure{{Name: "provider-A", Code: proto.AvailabilityQuota}},
 	}
-	parts, err := RenderApprovalOnlySummaryParts(in)
+	parts, err := RenderApprovalOnlyDetails(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,23 +162,20 @@ func TestApprovalOnlySummaryAndDetails(t *testing.T) {
 			t.Errorf("fabricated %q", forbidden)
 		}
 	}
-	details, err := RenderApprovalOnlyDetails(in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(strings.Join(details, ""), "NO AI REVIEW") {
-		t.Fatal("details obscured unreviewed status")
+	summary, err := RenderApprovalOnlySummaryParts(in)
+	if err != nil || len(summary) != 0 {
+		t.Fatalf("unreviewed summaries must be empty: %v %v", summary, err)
 	}
 	in.Failures = nil
-	policy, err := RenderApprovalOnlySummaryParts(in)
+	policy, err := RenderApprovalOnlyDetails(in)
 	if err != nil || !strings.Contains(policy[0], "administrator policy") || strings.Contains(policy[0], "providers unavailable") {
 		t.Fatalf("policy=%v %v", policy, err)
 	}
 }
 
-func TestApprovalOnlyHostileContentChunking(t *testing.T) {
+func TestApprovalOnlyHostileDetailsChunking(t *testing.T) {
 	in := ApprovalOnlyInput{Host: "host", JobID: "job", Operation: "cmd " + strings.Repeat("😃<&'", 900), Reason: strings.Repeat("<reason>&", 700), Expiry: time.Now().Add(time.Minute), Failures: []proto.AvailabilityFailure{{Name: "<script>secret/path</script>", Code: proto.AvailabilityTransport}}}
-	parts, err := RenderApprovalOnlySummaryParts(in)
+	parts, err := RenderApprovalOnlyDetails(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +204,7 @@ func TestApprovalOnlyHostileContentChunking(t *testing.T) {
 	}
 }
 
-func TestApprovalOnlyEveryChunkLeadsWithUnreviewedWarning(t *testing.T) {
+func TestApprovalOnlyEveryDetailsChunkLeadsWithUnreviewedWarning(t *testing.T) {
 	in := ApprovalOnlyInput{
 		Host: "verified-host", Container: "verified-container", JobID: "job-123",
 		Operation: "/bin/sh -c '" + strings.Repeat("echo safe; ", 700) + "FINAL-COMMAND'",
@@ -205,7 +213,7 @@ func TestApprovalOnlyEveryChunkLeadsWithUnreviewedWarning(t *testing.T) {
 		Expiry:   time.Now().Add(time.Minute),
 		Failures: []proto.AvailabilityFailure{{Name: "remote", Code: proto.AvailabilityTransport}},
 	}
-	parts, err := RenderApprovalOnlySummaryParts(in)
+	parts, err := RenderApprovalOnlyDetails(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +225,7 @@ func TestApprovalOnlyEveryChunkLeadsWithUnreviewedWarning(t *testing.T) {
 		if !strings.HasPrefix(part, prefix) {
 			t.Errorf("part %d does not lead with unreviewed warning: %.160q", i+1, part)
 		}
-		if !strings.Contains(part, "unreviewed summary part") || !strings.Contains(part, "providers unavailable after fallback") || !strings.Contains(part, "No independent AI assessment took place") || !strings.Contains(part, "NOT assessed") {
+		if !strings.Contains(part, "unreviewed details part") || !strings.Contains(part, "providers unavailable after fallback") || !strings.Contains(part, "No independent AI assessment took place") || !strings.Contains(part, "NOT assessed") {
 			t.Errorf("part %d lacks persistent context: %.240q", i+1, part)
 		}
 		if utf8.RuneCountInString(part) > MaxMessageRunes {
@@ -236,7 +244,7 @@ func TestApprovalOnlyEveryChunkLeadsWithUnreviewedWarning(t *testing.T) {
 	// generic header duplicated on top of the required prominent heading.
 	in.Operation = "/usr/bin/id -u"
 	in.Reason = "inspect identity"
-	short, err := RenderApprovalOnlySummaryParts(in)
+	short, err := RenderApprovalOnlyDetails(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,8 +253,8 @@ func TestApprovalOnlyEveryChunkLeadsWithUnreviewedWarning(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryRequiredFields(t *testing.T) {
-	parts, err := RenderSummaryParts(testCardInput())
+func TestRenderDetailsRequiredRequestFields(t *testing.T) {
+	parts, err := RenderDetails(DetailsInput{CardInput: testCardInput()})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -255,7 +263,7 @@ func TestRenderSummaryRequiredFields(t *testing.T) {
 	}
 	text := parts[0]
 	for _, want := range []string{
-		"<b>Privilege approval · Security risk: 4/5</b>",
+		"<b>Security risk: 4/5</b>",
 		"<b>Host:</b> <code>energy-host / abcdef0123456789abcdef0123456789</code>",
 		"<b>Environment:</b> Docker container",
 		"<b>Submitted by:</b> <code>sample-agent</code> (uid 4242) → root",
@@ -264,11 +272,11 @@ func TestRenderSummaryRequiredFields(t *testing.T) {
 		"<b>Reason</b>", "migrate volumes to rootless storage",
 		"<b>Review summary</b>", "Stops the application and re-mounts its volumes.",
 		"<b>Effects</b>", "- Stops the application.", "- Changes volume paths.",
-		"<b>Warnings</b>", "• Service downtime during migration.", "• Partial migration may require manual recovery.",
-		"<b>Uncertainties</b>", "• Current backup availability was not verified.",
+		"<b>Warnings (with evidence)</b>", "- Service downtime during migration.", "- Partial migration may require manual recovery.",
+		"<b>Missing context / uncertainties</b>", "- Current backup availability was not verified.",
 		"<b>Reversibility:</b> Rollback procedure found; success not verified.",
 		"Reviewer <code>kimi-for-coding</code>",
-		"job <code>abcdef0123456789abcdef0123456789</code>",
+		"<b>Intent match:</b> consistent",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("summary missing %q\n---\n%s", want, text)
@@ -286,10 +294,10 @@ func TestRenderSummaryRequiredFields(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryLongCommandStartsWithApprovalFacts(t *testing.T) {
+func TestRenderDetailsLongCommandStartsWithRequestFacts(t *testing.T) {
 	in := testCardInput()
 	in.Operation = strings.Repeat("/long/command ", 500)
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +305,7 @@ func TestRenderSummaryLongCommandStartsWithApprovalFacts(t *testing.T) {
 		t.Fatalf("expected overflow, got %d part(s)", len(parts))
 	}
 	first := parts[0]
-	for _, want := range []string{"<b>Privilege approval · Security risk: 4/5</b>", "<b>Host:</b>"} {
+	for _, want := range []string{"<b>Security risk: 4/5</b>", "<b>Host:</b>"} {
 		if !strings.Contains(first, want) {
 			t.Errorf("first summary part missing %q", want)
 		}
@@ -310,11 +318,11 @@ func TestRenderSummaryLongCommandStartsWithApprovalFacts(t *testing.T) {
 	}
 }
 
-func TestReviewSummaryDoesNotClassifyCommandSyntax(t *testing.T) {
+func TestReviewDetailsDoesNotClassifyCommandSyntax(t *testing.T) {
 	for _, command := range []string{"/usr/bin/id -u", "/bin/sh -c 'echo hi'"} {
 		in := testCardInput()
 		in.Operation = command
-		parts, err := RenderSummaryParts(in)
+		parts, err := RenderDetails(DetailsInput{CardInput: in})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,7 +335,7 @@ func TestReviewSummaryDoesNotClassifyCommandSyntax(t *testing.T) {
 
 func TestReviewedMessagesDoNotAddMechanicalCompletenessDisclaimer(t *testing.T) {
 	in := testCardInput()
-	summary, err := RenderSummaryParts(in)
+	card, _, err := RenderReviewedCard(in, testNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,16 +343,12 @@ func TestReviewedMessagesDoNotAddMechanicalCompletenessDisclaimer(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	card, _, err := RenderCard(in.JobID, testNonce)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, surface := range []string{strings.Join(summary, ""), strings.Join(details, ""), card} {
+	for _, surface := range []string{strings.Join(details, ""), card} {
 		if strings.Contains(surface, "LLM-selected review: completeness not mechanically checked") {
 			t.Fatalf("mechanical disclaimer remained in reviewed Telegram output: %s", surface)
 		}
 	}
-	if !strings.Contains(strings.Join(summary, ""), in.Report.Summary) {
+	if !strings.Contains(card, in.Report.Summary) {
 		t.Fatal("removing the disclaimer also removed the model's review")
 	}
 }
@@ -352,7 +356,7 @@ func TestReviewedMessagesDoNotAddMechanicalCompletenessDisclaimer(t *testing.T) 
 func TestCommandDisplayEscapesHostileInlineText(t *testing.T) {
 	in := testCardInput()
 	in.Operation = `/bin/dash -c "echo <b>fake</b> & done"`
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +374,7 @@ func TestCommandDisplayEscapesHostileInlineText(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryCWDDisplaysExactPath(t *testing.T) {
+func TestRenderDetailsCWDDisplaysExactPath(t *testing.T) {
 	for _, cwd := range []string{
 		"/tmp/a\tb", "/tmp/a\nb", "/tmp/a\u202eb", "/tmp/a\\tb",
 		"/tmp/quotes\"\\andé\t<b>Host:</b>",
@@ -378,7 +382,7 @@ func TestRenderSummaryCWDDisplaysExactPath(t *testing.T) {
 		t.Run(strconv.Quote(cwd), func(t *testing.T) {
 			in := testCardInput()
 			in.CWD = cwd
-			parts, err := RenderSummaryParts(in)
+			parts, err := RenderDetails(DetailsInput{CardInput: in})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -419,10 +423,10 @@ func TestRenderSummaryCWDDisplaysExactPath(t *testing.T) {
 	}
 }
 
-func TestRenderSummarySubmitterFallback(t *testing.T) {
+func TestRenderDetailsSubmitterFallback(t *testing.T) {
 	in := testCardInput()
 	in.SubmitterName = ""
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -432,7 +436,7 @@ func TestRenderSummarySubmitterFallback(t *testing.T) {
 	// The container line is omitted when no environment evidence exists.
 	in2 := testCardInput()
 	in2.Container = ""
-	parts2, err := RenderSummaryParts(in2)
+	parts2, err := RenderDetails(DetailsInput{CardInput: in2})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -459,7 +463,7 @@ func TestRenderSummaryValidation(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryHTMLEscapesDynamicContent(t *testing.T) {
+func TestRenderDetailsHTMLEscapesDynamicContent(t *testing.T) {
 	in := testCardInput()
 	in.Operation = `rm -rf / && echo "<b>fake</b><a href='https://evil.example'>link</a>"`
 	in.Reason = "<script>alert('x')</script> & < > quotes \"'"
@@ -468,7 +472,7 @@ func TestRenderSummaryHTMLEscapesDynamicContent(t *testing.T) {
 	in.SubmitterName = "<operator>&co"
 	in.CWD = "/tmp/<dir>&ok"
 
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -546,7 +550,7 @@ func tokenizeTags(text string) []string {
 	}
 }
 
-func TestRenderSummaryChunkingPreservesWarnings(t *testing.T) {
+func TestRenderDetailsChunkingPreservesWarnings(t *testing.T) {
 	in := testCardInput()
 	// 24 warnings x ~500 runes forces a multi-part summary.
 	warnings := make([]proto.ReviewWarning, 24)
@@ -558,7 +562,7 @@ func TestRenderSummaryChunkingPreservesWarnings(t *testing.T) {
 	}
 	in.Report.Warnings = warnings
 
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -572,7 +576,7 @@ func TestRenderSummaryChunkingPreservesWarnings(t *testing.T) {
 		if err := assertBalancedTags(p); err != nil {
 			t.Fatalf("part %d tags not balanced: %v\n%s", i, err, p)
 		}
-		wantHeader := fmt.Sprintf("summary part %d/%d", i+1, len(parts))
+		wantHeader := fmt.Sprintf("details part %d/%d", i+1, len(parts))
 		if !strings.HasPrefix(p, "Job "+in.JobID+" — "+wantHeader) {
 			t.Fatalf("part %d missing ordered header, starts: %.80q", i, p)
 		}
@@ -585,21 +589,21 @@ func TestRenderSummaryChunkingPreservesWarnings(t *testing.T) {
 		}
 	}
 	// Required sections still present after chunking.
-	for _, want := range []string{"<b>Privilege approval · Security risk: 4/5</b>", "<b>Warnings</b>", "Reversibility:", "Reviewer <code>kimi-for-coding</code>", "<b>Uncertainties</b>"} {
+	for _, want := range []string{"<b>Security risk: 4/5</b>", "<b>Warnings (with evidence)</b>", "Reversibility:", "Reviewer <code>kimi-for-coding</code>", "<b>Missing context / uncertainties</b>"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("chunked summary lost %q", want)
 		}
 	}
 	// The heading must precede the warnings section (field order preserved).
-	if strings.Index(joined, "<b>Privilege approval") > strings.Index(joined, "<b>Warnings</b>") {
+	if strings.Index(joined, "<b>Security risk:") > strings.Index(joined, "<b>Warnings (with evidence)</b>") {
 		t.Fatal("field order not preserved across chunks")
 	}
 }
 
-func TestRenderSummaryMidFieldContinuation(t *testing.T) {
+func TestRenderDetailsMidFieldContinuation(t *testing.T) {
 	in := testCardInput()
 	in.Reason = strings.Repeat("A", 3000) + strings.Repeat("B", 3000)
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -629,14 +633,14 @@ func TestRenderSummaryMidFieldContinuation(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryLongCommandNeverTruncated(t *testing.T) {
+func TestRenderDetailsLongCommandNeverTruncated(t *testing.T) {
 	// A command far beyond one message must survive chunking complete:
 	// every fragment of the command body is present in order, and the
 	// suffix (its "arguments") is retained — no silent ellipsis.
 	suffix := "--final-argument-value-ZZZZ"
 	in := testCardInput()
 	in.Operation = strings.Repeat("/very/long/command/component/ ", 160) + suffix
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -664,7 +668,7 @@ func TestRenderSummaryLongCommandNeverTruncated(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryHugeCommandMultiContinuation(t *testing.T) {
+func TestRenderDetailsHugeCommandMultiContinuation(t *testing.T) {
 	// A command several message-lengths long exercises repeated
 	// continuation splits of the wrapped code block: every part must keep
 	// balanced tags, the content must survive in order, and the suffix
@@ -672,7 +676,7 @@ func TestRenderSummaryHugeCommandMultiContinuation(t *testing.T) {
 	suffix := "--tail-argument-END"
 	in := testCardInput()
 	in.Operation = strings.Repeat("arg-%02d-value-", 6) + "x" + strings.Repeat("/long/path/component/", 400) + suffix
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -700,14 +704,14 @@ func TestRenderSummaryHugeCommandMultiContinuation(t *testing.T) {
 	}
 }
 
-func TestRenderSummaryChunkedEntitiesAndHostileJobID(t *testing.T) {
+func TestRenderDetailsChunkedEntitiesAndHostileJobID(t *testing.T) {
 	in := testCardInput()
 	in.JobID = `job<&"'` // A direct renderer caller must not inject markup through continuation headers.
 	in.Operation = "/usr/bin/command " + strings.Repeat("😃<&'", 850) + " --last-arg"
 	in.CWD = "/" + strings.Repeat("<&", 1100)
 	in.Reason = strings.Repeat("reason<&", 850)
 	in.Report.Warnings = []proto.ReviewWarning{{Message: "warning: " + strings.Repeat("é<&'", 850), Evidence: "f1"}}
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +720,7 @@ func TestRenderSummaryChunkedEntitiesAndHostileJobID(t *testing.T) {
 	}
 	var command strings.Builder
 	for i, part := range parts {
-		if !strings.HasPrefix(part, "Job "+html.EscapeString(in.JobID)+" — summary part ") {
+		if !strings.HasPrefix(part, "Job "+html.EscapeString(in.JobID)+" — details part ") {
 			t.Errorf("part %d job header not escaped: %.90q", i, part)
 		}
 		if utf8.RuneCountInString(part) > MaxMessageRunes || !utf8.ValidString(part) {
@@ -754,7 +758,7 @@ func TestStripControlCharacters(t *testing.T) {
 	in := testCardInput()
 	in.Operation = "run\x00me\x07\x1b[2J\x85neutral ​‎‮\ufeffdone"
 	in.Reason = "line one\nline two\twith tab"
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
@@ -777,7 +781,7 @@ func TestRenderCard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderCard: %v", err)
 	}
-	if !strings.Contains(text, "Approval required for job job-123") || !strings.Contains(text, "details above") {
+	if text != "Job job-123" {
 		t.Fatalf("card text wrong: %q", text)
 	}
 	if len(kb.InlineKeyboard) != 1 || len(kb.InlineKeyboard[0]) != 3 {
@@ -990,14 +994,14 @@ func TestSendApprovalOrdersPartsBeforeCard(t *testing.T) {
 	}
 }
 
-func TestSendApprovalLongSummaryBeforeCard(t *testing.T) {
+func TestSendApprovalLongCommandStillSendsOneCard(t *testing.T) {
 	in := testCardInput()
 	in.Operation = strings.Repeat("/long/command ", 500)
 	parts, err := RenderSummaryParts(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	card, kb, err := RenderCard(in.JobID, testNonce)
+	card, kb, err := RenderReviewedCard(in, testNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1006,19 +1010,8 @@ func TestSendApprovalLongSummaryBeforeCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := bot.byMethod("sendMessage")
-	if len(sent) != len(parts)+1 || len(parts) < 2 {
+	if len(sent) != 1 || len(parts) != 0 {
 		t.Fatalf("sent %d messages for %d summary parts", len(sent), len(parts))
-	}
-	if !strings.Contains(sent[0].body["text"].(string), "<b>Privilege approval") {
-		t.Fatal("first delivered summary omitted the approval heading")
-	}
-	for i, part := range parts {
-		if sent[i].body["text"] != part {
-			t.Fatalf("summary part %d was not delivered in order", i)
-		}
-		if _, hasKeyboard := sent[i].body["reply_markup"]; hasKeyboard {
-			t.Fatalf("summary part %d carried approval buttons", i)
-		}
 	}
 	if sent[len(parts)].body["text"] != card {
 		t.Fatal("approval card was not delivered after every summary part")
@@ -1064,17 +1057,6 @@ func TestSendApprovalPartialFailurePostsNoCard(t *testing.T) {
 	}
 }
 
-func TestSendApprovalRequiresParts(t *testing.T) {
-	bot := newFakeBot(t, nil)
-	client := bot.client(t)
-	if _, _, err := SendApproval(context.Background(), client, 1, nil, "card", InlineKeyboardMarkup{}); err == nil {
-		t.Fatal("expected error for empty summary parts")
-	}
-	if len(bot.recorded()) != 0 {
-		t.Fatal("no request may be sent when parts are missing")
-	}
-}
-
 func TestSendDetailsUsesHTML(t *testing.T) {
 	bot := newFakeBot(t, nil)
 	client := bot.client(t)
@@ -1093,20 +1075,12 @@ func TestSendDetailsUsesHTML(t *testing.T) {
 	}
 }
 
-// TestRenderedCardDemo prints one full approval request — ordered summary
-// parts plus the approval card — for human inspection of wording and
+// TestRenderedCardDemo prints one approval card for human inspection of wording and
 // warnings (Wave 5 real-surface QA). Run: go test -v -run DemoCard ./internal/telegram/
 func TestRenderedCardDemo(t *testing.T) {
-	parts, err := RenderSummaryParts(testCardInput())
+	card, kb, err := RenderReviewedCard(testCardInput(), "00112233445566778899aabbccddeeff")
 	if err != nil {
 		t.Fatal(err)
-	}
-	card, kb, err := RenderCard(testCardInput().JobID, "00112233445566778899aabbccddeeff")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, part := range parts {
-		t.Logf("--- summary part %d/%d ---\n%s", i+1, len(parts), part)
 	}
 	t.Logf("--- approval card ---\n%s", card)
 	for row, buttons := range kb.InlineKeyboard {

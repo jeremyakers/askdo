@@ -110,12 +110,12 @@ func TestCapturedStdinReviewCoverageRequiresHuman(t *testing.T) {
 			}
 			cardWarning := false
 			for _, message := range fake.Sent() {
-				if strings.Contains(message.Text, "captured stdin") && strings.Contains(message.Text, "Warnings") {
+				if strings.Contains(message.Text, "captured stdin") && strings.Contains(message.Text, "• ") {
 					cardWarning = true
 				}
 			}
 			if tc.unread && !cardWarning {
-				t.Fatal("broker warning not visible in human summary")
+				t.Fatal("broker warning not visible on the approval card")
 			}
 			fake.QueueCallback(1, "deny", telegramOperator, telegramChat, card.ID, card.ButtonData("d:"))
 			if terminal := submitAndReadTerminalBody(t, conn); !strings.Contains(string(terminal), `"state":"denied"`) {

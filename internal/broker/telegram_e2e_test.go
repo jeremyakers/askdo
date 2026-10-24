@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"net"
@@ -176,8 +177,8 @@ func awaitApprovalCLI(t *testing.T, result <-chan int, _ *bytes.Buffer) int {
 func assertUnreviewedTelegram(t *testing.T, fake *faketelegram.Server, card faketelegram.Message, failureStatuses ...string) {
 	t.Helper()
 	sent := fake.Sent()
-	if len(sent) < 2 || len(sent[0].Buttons) != 0 || card.ID != sent[len(sent)-1].ID || card.ChatID != telegramChat || len(card.Buttons) != 3 {
-		t.Fatalf("unreviewed summary must precede actionable card: %+v", sent)
+	if len(sent) != 1 || card.ID != sent[0].ID || card.ChatID != telegramChat || len(card.Buttons) != 3 {
+		t.Fatalf("unreviewed request must be one actionable card: %+v", sent)
 	}
 	for i, message := range sent {
 		if !strings.Contains(message.Text, "NO AI REVIEW") {
@@ -190,9 +191,39 @@ func assertUnreviewedTelegram(t *testing.T, fake *faketelegram.Server, card fake
 		}
 	}
 	summary := sent[0].Text
-	for _, want := range append([]string{"UNASSESSED", "/usr/bin/true", "unreviewed e2e"}, failureStatuses...) {
+	if len(failureStatuses) > 0 {
+		summary += requestTelegramDetails(t, fake, card, 1)
+	}
+	for _, want := range append([]string{"Risks NOT assessed", "/usr/bin/true", "unreviewed e2e"}, failureStatuses...) {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("unreviewed summary missing %q: %s", want, summary)
+		}
+	}
+}
+
+func requestTelegramDetails(t *testing.T, fake *faketelegram.Server, card faketelegram.Message, updateID int64) string {
+	t.Helper()
+	before := len(fake.Sent())
+	query := fmt.Sprintf("details-%d", updateID)
+	fake.QueueCallback(updateID, query, telegramOperator, telegramChat, card.ID, card.ButtonData("v:"))
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		changed := fake.Changed()
+		for _, answer := range fake.Answers() {
+			if answer == query {
+				var text strings.Builder
+				for _, message := range fake.Sent()[before:] {
+					text.WriteString(message.Text)
+				}
+				return text.String()
+			}
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatal("Details callback never finished")
+			return ""
 		}
 	}
 }
@@ -344,7 +375,7 @@ func TestUnavailableRealWorkerTelegramApprove(t *testing.T) {
 	if !strings.Contains(card.Text, "providers unavailable") || len(executor.Snapshot()) != 0 {
 		t.Fatalf("unavailable card=%q executions=%d", card.Text, len(executor.Snapshot()))
 	}
-	fake.QueueCallback(1, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
+	fake.QueueCallback(2, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
 	if code := awaitApprovalCLI(t, result, stderr); code != 0 || stdout.String() != "unavailable approved\n" {
 		t.Fatalf("exit=%d stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -430,15 +461,16 @@ func TestTelegramApproveEndToEnd(t *testing.T) {
 	if card.ChatID != telegramChat || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
 		t.Fatalf("card=%+v", card)
 	}
-	// The rendered summary reached the operator before the card.
+	// The complete initial request is one verdict-first actionable card.
 	sent := fake.Sent()
-	if len(sent) < 2 || len(sent[0].Buttons) != 0 {
-		t.Fatalf("summary must arrive before actionable card: %+v", sent)
+	if len(sent) != 1 || len(sent[0].Buttons) != 4 {
+		t.Fatalf("request must be one actionable card: %+v", sent)
 	}
 	joined := ""
 	for _, m := range sent {
 		joined += m.Text + "\n"
 	}
+	joined += requestTelegramDetails(t, fake, card, 1)
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +480,7 @@ func TestTelegramApproveEndToEnd(t *testing.T) {
 		name = account.Username
 	}
 	for _, want := range []string{
-		"<b>Privilege approval · Security risk: 1/5</b>", "<b>Host:</b> <code>",
+		"🟢 <b>Risk 1/5</b>", "<b>Host:</b> <code>",
 		"<b>Submitted by:</b> <code>" + html.EscapeString(name) + "</code> (uid " + strconv.FormatUint(uint64(testUID), 10) + ") → root",
 		"<b>Working directory:</b>\n<code>" + html.EscapeString(cwd) + "</code>",
 		"<pre><code class=\"language-bash\">/usr/bin/true</code></pre>\n\n<b>Reason</b>\ntelegram approve",
@@ -461,7 +493,7 @@ func TestTelegramApproveEndToEnd(t *testing.T) {
 	if got := len(executor.Snapshot()); got != 0 {
 		t.Fatalf("security score 1/5 executed without human approval: %d", got)
 	}
-	fake.QueueCallback(1, "q1", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
+	fake.QueueCallback(2, "q2", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
 
 	if code := <-result; code != 0 {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
@@ -484,7 +516,7 @@ func TestTelegramApproveEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(job.ApprovalJSON, &approval); err != nil {
 		t.Fatalf("approval record: %v", err)
 	}
-	if approval.Digest != job.ManifestHash || approval.CardID != card.ID || approval.OperatorUserID != telegramOperator || approval.ExpiryUnixMS <= 0 {
+	if approval.Digest != job.ManifestHash || approval.CardID != card.ID || approval.OperatorUserID != telegramOperator || approval.ExpiryUnixMS <= 0 || len(approval.MessageIDs) != 0 {
 		t.Fatalf("approval record=%s", job.ApprovalJSON)
 	}
 }
@@ -545,7 +577,7 @@ func TestTelegramCanonicalReservationAndForeignNonce(t *testing.T) {
 		t.Fatalf("frozen manifest ID=%q, reserved=%q: %v", frozen.RequestID, req.RequestID, err)
 	}
 	sent := fake.Sent()
-	if len(sent) < 4 || !strings.Contains(sent[len(sent)-2].Text, req.RequestID) || !strings.Contains(card.Text, req.RequestID) {
+	if len(sent) != 2 || !strings.Contains(sent[0].Text, first.RequestID) || !strings.Contains(sent[1].Text, req.RequestID) || !strings.Contains(card.Text, req.RequestID) {
 		t.Fatalf("summary/card missing canonical ID %q: %+v", req.RequestID, sent)
 	}
 	if firstCard.ButtonData("a:") == card.ButtonData("a:") {

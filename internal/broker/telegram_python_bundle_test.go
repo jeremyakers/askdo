@@ -164,7 +164,7 @@ func TestTelegramCapturedPythonBundleModelLedReview(t *testing.T) {
 				for _, sent := range fake.Sent() {
 					summary += sent.Text
 				}
-				if !strings.Contains(summary, "<b>Review summary</b>") || strings.Contains(summary, "LLM-selected review: completeness not mechanically checked") || strings.Contains(summary, "INCOMPLETE REVIEW") || strings.Contains(summary, "NO AI REVIEW") {
+				if !strings.Contains(summary, "Shell entry invokes Python main, which imports helper; fake execution only.") || strings.Contains(summary, "LLM-selected review: completeness not mechanically checked") || strings.Contains(summary, "INCOMPLETE REVIEW") || strings.Contains(summary, "NO AI REVIEW") {
 					t.Fatalf("denied helper stopped the model report reaching the operator: %s", summary)
 				}
 			}

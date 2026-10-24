@@ -243,6 +243,14 @@ func (f *ticketWireFixture) receipt(t *testing.T, host, bearer string, sub fleet
 	if err = fleetproto.CheckReceipt(*event.Receipt, sub.Ticket, sub.Route, time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
+	if sub.Ticket.Display.SummaryParts != 0 {
+		t.Fatal("new ticket froze summary messages")
+	}
+	for _, delivery := range event.Receipt.Deliveries {
+		if delivery.SummaryMessageIDs == nil || len(delivery.SummaryMessageIDs) != 0 {
+			t.Fatal("receipt contains summary messages")
+		}
+	}
 	return *event.Receipt
 }
 
@@ -364,7 +372,7 @@ func TestTLSEarlyCallbacksPartialSendsAndRevocation(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	for _, fail := range []int{1, 2, 3, 4} {
+	for _, fail := range []int{1, 2} {
 		t.Run("partial_"+strconv.Itoa(fail), func(t *testing.T) {
 			f := wireFixture(t, fail)
 			sub := frozenSubmission(t, f.host)
@@ -433,7 +441,7 @@ func autoSubmission(t *testing.T, host string) fleetproto.TicketSubmission {
 }
 
 func TestTLSAutomaticNoticeChunkCountAndPartialNoticeFailure(t *testing.T) {
-	for _, fail := range []int{0, 1, 2, 3, 4} {
+	for _, fail := range []int{0, 1, 2} {
 		t.Run(strconv.Itoa(fail), func(t *testing.T) {
 			f := wireFixture(t, fail)
 			sub := autoSubmission(t, f.host)
@@ -453,6 +461,17 @@ func TestTLSAutomaticNoticeChunkCountAndPartialNoticeFailure(t *testing.T) {
 				if err = fleetproto.CheckReceipt(*event.Receipt, sub.Ticket, sub.Route, time.Now().Unix()); err != nil {
 					t.Fatal(err)
 				}
+				f.bot.mu.Lock()
+				sends := f.bot.sends
+				f.bot.mu.Unlock()
+				if sends != len(sub.Route.Recipients) {
+					t.Fatalf("not one notice per recipient: %d", sends)
+				}
+				for _, delivery := range event.Receipt.Deliveries {
+					if len(delivery.SummaryMessageIDs) != 0 {
+						t.Fatal("auto receipt includes summaries")
+					}
+				}
 			} else if event.Type != fleetproto.EventFailed {
 				t.Fatal("partial notice claimed complete")
 			}
@@ -462,6 +481,9 @@ func TestTLSAutomaticNoticeChunkCountAndPartialNoticeFailure(t *testing.T) {
 		f := wireFixture(t, 2)
 		sub := frozenSubmission(t, f.host)
 		sub.Ticket.Display.Operation = strings.Repeat("long compact plain fact <&>\n", 400)
+		// Given an older host's nonzero frozen count, even though the new
+		// renderer always emits zero summary parts.
+		sub.Ticket.Display.SummaryParts = 1
 		sub.Ticket.Binding.DisplayHash, _ = fleetproto.HashDisplay(sub.Ticket.Display)
 		data, _ := json.Marshal(sub)
 		status, _ := f.request(t, http.MethodPut, f.host, f.bearer, string(sub.Ticket.Binding.JobID), "", data)
@@ -472,8 +494,8 @@ func TestTLSAutomaticNoticeChunkCountAndPartialNoticeFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(rendering.Parts) < 3 {
-			t.Fatal("fixture did not chunk")
+		if len(rendering.Parts) != 0 || len(rendering.Details) < 3 {
+			t.Fatal("long request must expand only in Details")
 		}
 		sub.Ticket.Display.SummaryParts = len(rendering.Parts)
 		sub.Ticket.Binding.DisplayHash, _ = fleetproto.HashDisplay(sub.Ticket.Display)
@@ -484,7 +506,7 @@ func TestTLSAutomaticNoticeChunkCountAndPartialNoticeFailure(t *testing.T) {
 		}
 		event, _, err := fleetproto.Verify[fleetproto.Event](f.key.Public().(ed25519.PublicKey), wire)
 		if err != nil || event.Type != fleetproto.EventFailed {
-			t.Fatal("partial summary authorized", err)
+			t.Fatal("partial card fanout authorized", err)
 		}
 	})
 }

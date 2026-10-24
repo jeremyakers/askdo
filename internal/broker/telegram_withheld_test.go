@@ -64,7 +64,7 @@ func TestTelegramWithheldHostCredentialReview(t *testing.T) {
 			}()
 			card := awaitTelegramCard(t, fake)
 			sent := fake.Sent()
-			if len(sent) < 2 || len(sent[0].Buttons) != 0 || !strings.Contains(sent[0].Text, "Credential contents were not inspected") || !strings.Contains(sent[0].Text, secret) || !strings.Contains(sent[0].Text, "Reviewer <code>") || strings.Contains(sent[0].Text, "NO AI REVIEW") || !strings.Contains(card.Text, "details above") || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
+			if len(sent) != 1 || !strings.Contains(card.Text, "Credential contents were not inspected") || !strings.Contains(card.Text, "Content withheld from AI review: 1 item(s)") || strings.Contains(card.Text, "NO AI REVIEW") || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
 				t.Fatalf("missing reviewed warning and path in summary/card: %+v", sent)
 			}
 			if len(executor.Snapshot()) != 0 {
@@ -94,7 +94,11 @@ func TestTelegramWithheldHostCredentialReview(t *testing.T) {
 			if len(executor.Snapshot()) != 0 {
 				t.Fatal("unauthorized callback executed")
 			}
-			fake.QueueCallback(2, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
+			details := requestTelegramDetails(t, fake, card, 2)
+			if !strings.Contains(details, secret) || !strings.Contains(details, "Reviewer <code>") {
+				t.Fatalf("withheld path/reviewer absent from Details: %s", details)
+			}
+			fake.QueueCallback(3, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
 			if code := awaitApprovalCLI(t, result, &stderr); code != 0 {
 				t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 			}

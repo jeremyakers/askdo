@@ -77,7 +77,7 @@ func TestTelegramAutoScoreOneDispatchAfterNotice(t *testing.T) {
 	fake := faketelegram.New(t)
 	entered, deliver := make(chan struct{}, 1), make(chan struct{})
 	fake.FailSend(func(_ int, text string, _ bool) *faketelegram.APIError {
-		if strings.Contains(text, "auto-execution") {
+		if strings.Contains(text, "Auto-approved by policy") {
 			entered <- struct{}{}
 			<-deliver
 		}
@@ -90,8 +90,8 @@ func TestTelegramAutoScoreOneDispatchAfterNotice(t *testing.T) {
 	if got := len(executor.Snapshot()); got != 0 {
 		t.Fatalf("execution before Bot API accepted notice: %d", got)
 	}
-	if sent := fake.Sent(); len(sent) == 0 || len(sent[0].Buttons) != 0 || !strings.Contains(sent[0].Text, "Security risk: 1/5") {
-		t.Fatalf("reviewed summary before notice: %+v", sent)
+	if sent := fake.Sent(); len(sent) != 0 {
+		t.Fatalf("unacknowledged notice must be the first send: %+v", sent)
 	}
 	close(deliver)
 	if code := awaitApprovalCLI(t, result, stderr); code != 0 || stdout.String() != "auto execution\n" {
@@ -100,8 +100,8 @@ func TestTelegramAutoScoreOneDispatchAfterNotice(t *testing.T) {
 	id := jobID(stderr.String())
 	waitForState(t, h.daemon.store, 0, id, store.StateFinished)
 	sent := fake.Sent()
-	if len(sent) < 2 || sent[len(sent)-1].ChatID != telegramChat || !strings.Contains(sent[len(sent)-1].Text, "auto-execution") {
-		t.Fatalf("reviewed summary then auto notice: %+v", sent)
+	if len(sent) != 1 || sent[0].ChatID != telegramChat || !strings.Contains(sent[0].Text, "Auto-approved by policy") || !strings.Contains(sent[0].Text, "Risk 1/5") || !strings.Contains(sent[0].Text, "No human approval was requested.") {
+		t.Fatalf("single policy notice missing: %+v", sent)
 	}
 	if !strings.Contains(sent[0].Text, id) || !strings.Contains(sent[len(sent)-1].Text, id) {
 		t.Fatalf("canonical result ID %q missing from summary or auto notice: %+v", id, sent)
@@ -147,8 +147,7 @@ func TestTelegramAutoDeliveryFailureNeverDispatches(t *testing.T) {
 		name string
 		fail func(int, string) bool
 	}{
-		{"summary", func(call int, _ string) bool { return call == 1 }},
-		{"notice", func(_ int, text string) bool { return strings.Contains(text, "auto-execution") }},
+		{"notice", func(call int, _ string) bool { return call == 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := faketelegram.New(t)
@@ -223,7 +222,7 @@ func TestAutoNotifyingCancelledOrExpiredNeverDispatches(t *testing.T) {
 			ready, deliver := make(chan struct{}, 1), make(chan struct{})
 			fake := faketelegram.New(t)
 			fake.FailSend(func(_ int, text string, _ bool) *faketelegram.APIError {
-				if strings.Contains(text, "auto-execution") {
+				if strings.Contains(text, "Auto-approved by policy") {
 					ready <- struct{}{}
 					<-deliver
 				}
@@ -257,7 +256,7 @@ func TestAutoChangedCWDAfterFreezeNeverDispatches(t *testing.T) {
 	ready, deliver := make(chan struct{}, 1), make(chan struct{})
 	fake := faketelegram.New(t)
 	fake.FailSend(func(_ int, text string, _ bool) *faketelegram.APIError {
-		if strings.Contains(text, "auto-execution") {
+		if strings.Contains(text, "Auto-approved by policy") {
 			ready <- struct{}{}
 			<-deliver
 		}

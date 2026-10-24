@@ -156,7 +156,7 @@ func TestSendApprovalEndToEndWireFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderSummaryParts: %v", err)
 	}
-	cardText, kb, err := RenderCard(in.JobID, testNonce)
+	cardText, kb, err := RenderReviewedCard(in, testNonce)
 	if err != nil {
 		t.Fatalf("RenderCard: %v", err)
 	}

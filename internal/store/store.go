@@ -566,7 +566,7 @@ func (store *Store) commitNamedDecision(ctx context.Context, uid uint32, request
 func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthorization) (bool, error) {
 	if auth.RequestID == "" || len(auth.ManifestDigest) != 64 || auth.Score < 1 || auth.Score > 4 ||
 		auth.AdminMaxRisk < 1 || auth.AdminMaxRisk > 4 || auth.Score > auth.AdminMaxRisk ||
-		(auth.ChannelName == "" && (auth.NoticeID <= 0 || len(auth.SummaryMessageIDs) == 0 || len(auth.SummaryMessageIDs) > 32)) ||
+		(auth.ChannelName == "" && (auth.NoticeID <= 0 || auth.SummaryMessageIDs == nil || len(auth.SummaryMessageIDs) > 32)) ||
 		auth.NowUTC.IsZero() || auth.NotifiedAtUTC.IsZero() || auth.NotifiedAtUTC.After(auth.NowUTC) {
 		return false, nil
 	}
@@ -586,7 +586,7 @@ func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthoriza
 		}
 		seen := map[int64]bool{}
 		for _, target := range auth.Targets {
-			if target.ChatID == 0 || target.NoticeID <= 0 || seen[target.ChatID] || len(target.MessageIDs) == 0 || len(target.MessageIDs) > 32 {
+			if target.ChatID == 0 || target.NoticeID <= 0 || seen[target.ChatID] || target.MessageIDs == nil || len(target.MessageIDs) > 32 {
 				return false, nil
 			}
 			seen[target.ChatID] = true

@@ -7,29 +7,23 @@ import (
 	"unicode/utf8"
 )
 
-// withheldWarning is the code-constructed warning the operator must see on the
-// summary path (before Approve/Deny), never only behind Details.
-const withheldWarning = "Credential content withheld from AI review"
+// The card must disclose withholding; references belong in Details.
+const withheldWarning = "Content withheld from AI review"
 
-// The summary leads with a prominent withheld-credential warning, the count,
-// and every withheld reference. Details repeats the access-policy facts;
-// neither surface scores the model's file selections.
-func TestSummaryShowsWithheldCredentialWarning(t *testing.T) {
+// The card discloses the count; Details includes every withheld reference.
+// Neither surface scores the model's file selections.
+func TestCardShowsWithheldCredentialWarning(t *testing.T) {
 	in := testCardInput()
 	in.WithheldRefs = []string{"/home/u/app/.env", "/home/u/.ssh/id_rsa"}
 	in.WithheldCount = 2
-	parts, err := RenderSummaryParts(in)
+	text, _, err := RenderReviewedCard(in, testNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(parts, "")
-	for _, want := range []string{withheldWarning, "/home/u/app/.env", "/home/u/.ssh/id_rsa"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("summary missing %q", want)
+	for _, want := range []string{withheldWarning, "2 item(s) — see Details"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("card missing %q", want)
 		}
-	}
-	if !strings.Contains(parts[0], withheldWarning) {
-		t.Fatal("withheld warning must lead the summary, ahead of the approval card")
 	}
 
 	details, err := RenderDetails(DetailsInput{CardInput: in})
@@ -37,7 +31,7 @@ func TestSummaryShowsWithheldCredentialWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	joinedDetails := strings.Join(details, "")
-	if !strings.Contains(joinedDetails, "/home/u/app/.env") || strings.Contains(joinedDetails, "Coverage detail") {
+	if !strings.Contains(joinedDetails, "/home/u/app/.env") || !strings.Contains(joinedDetails, "/home/u/.ssh/id_rsa") || strings.Contains(joinedDetails, "Coverage detail") {
 		t.Fatal("details must disclose withholding without scoring coverage")
 	}
 }
@@ -49,7 +43,7 @@ func TestWithheldWarningEscapesMaliciousRefs(t *testing.T) {
 	in := testCardInput()
 	in.WithheldRefs = []string{`/etc/<b>injected</b>&"x"`, "/etc/passwd\r\n<b>Privilege", "/etc/‮fake"}
 	in.WithheldCount = 3
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,10 +60,8 @@ func TestWithheldWarningEscapesMaliciousRefs(t *testing.T) {
 	}
 }
 
-// With many withheld references the summary chunks; the warning must still
-// appear in the first part and every part stays within the Telegram cap with
-// balanced tags and fully escaped references.
-func TestWithheldWarningSurvivesChunking(t *testing.T) {
+// Many withheld references expand only in bounded, balanced Details messages.
+func TestWithheldFactsSurviveDetailsChunking(t *testing.T) {
 	in := testCardInput()
 	refs := make([]string, 0, 16)
 	for i := 0; i < 16; i++ {
@@ -78,15 +70,12 @@ func TestWithheldWarningSurvivesChunking(t *testing.T) {
 	}
 	in.WithheldRefs = refs
 	in.WithheldCount = 48
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(parts) < 2 {
 		t.Fatalf("expected chunking with 16 bounded refs, got %d part(s)", len(parts))
-	}
-	if !strings.Contains(parts[0], withheldWarning) {
-		t.Fatal("first chunked part lost the withheld warning")
 	}
 	for i, part := range parts {
 		if n := utf8.RuneCountInString(part); n > MaxMessageRunes {
@@ -97,7 +86,7 @@ func TestWithheldWarningSurvivesChunking(t *testing.T) {
 		}
 	}
 	joined := strings.Join(parts, "")
-	if !strings.Contains(joined, "AI review: 48") {
+	if !strings.Contains(joined, "Credential content withheld: 48") {
 		t.Fatal("withheld count lost during chunking")
 	}
 	for _, ref := range []string{refs[0], refs[len(refs)-1]} {

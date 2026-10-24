@@ -202,14 +202,14 @@ func TestApprovalOnlyPolicyNoModelConstruction(t *testing.T) {
 	freezeApprovalOnly(t, w, []proto.AvailabilityFailure{})
 	n := awaitNotification(t, w)
 	sent := fake.Sent()
-	if len(sent) < 2 || !strings.Contains(sent[0].Text, "NO AI REVIEW") || !strings.Contains(sent[0].Text, "administrator policy") || !strings.Contains(sent[len(sent)-1].Text, "NO AI REVIEW") {
+	if len(sent) != 1 || len(n.MessageIDs) != 0 || !strings.Contains(sent[0].Text, "NO AI REVIEW") || !strings.Contains(sent[0].Text, "administrator policy") {
 		t.Fatalf("unreviewed card missing: %+v", sent)
 	}
 	if strings.Contains(sent[0].Text, "Review summary") || strings.Contains(sent[0].Text, "LOW risk") {
 		t.Fatal("fabricated review")
 	}
-	if len(sent[0].Buttons) != 0 || len(sent[len(sent)-1].Buttons) != 3 {
-		t.Fatal("actionable card preceded full summary")
+	if len(sent[0].Buttons) != 3 {
+		t.Fatal("unreviewed card must carry its controls")
 	}
 	fake.QueueCallback(1, "q1", notifyOperator+1, notifyChat, n.CardID, sent[len(sent)-1].ButtonData("a:"))
 	fake.QueueCallback(2, "q2", notifyOperator, notifyChat+1, n.CardID, sent[len(sent)-1].ButtonData("a:"))
@@ -243,7 +243,11 @@ func TestApprovalOnlyAllProvidersUnavailable(t *testing.T) {
 	}
 	freezeApprovalOnly(t, w, unavailable.History)
 	n := awaitNotification(t, w)
-	text := strings.Join([]string{fake.Sent()[0].Text, awaitCard(t, fake).Text}, "\n")
+	details := requestNotifyDetails(t, w, n)
+	text := fake.Sent()[0].Text
+	for _, message := range details {
+		text += "\n" + message.Text
+	}
 	for _, want := range []string{"NO AI REVIEW", "providers unavailable", "local", "rate limit or quota", "NOT assessed"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q: %s", want, text)
@@ -252,7 +256,7 @@ func TestApprovalOnlyAllProvidersUnavailable(t *testing.T) {
 	if strings.Contains(text, "Review summary") || strings.Contains(text, "risk</b>") {
 		t.Fatal("fabricated review")
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, n.CardID, awaitCard(t, fake).ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, n.CardID, awaitCard(t, fake).ButtonData("d:"))
 	if d := awaitMessage(t, w.messages, "decision").(*proto.Decision); d.Action != "deny" {
 		t.Fatalf("decision=%+v", d)
 	}
@@ -281,11 +285,15 @@ func TestApprovalOnlyUntrustedFailureNameCannotInject(t *testing.T) {
 	unavailable := awaitMessage(t, w.messages, "review_unavailable").(*proto.ReviewUnavailable)
 	freezeApprovalOnly(t, w, unavailable.History)
 	n := awaitNotification(t, w)
-	text := strings.Join([]string{fake.Sent()[0].Text, awaitCard(t, fake).Text}, "\n")
+	details := requestNotifyDetails(t, w, n)
+	text := fake.Sent()[0].Text
+	for _, message := range details {
+		text += "\n" + message.Text
+	}
 	if !strings.Contains(text, "configured provider") || !strings.Contains(text, "connection unavailable") || strings.Contains(text, "accountID") || strings.Contains(text, "/private/key") {
 		t.Fatalf("unsafe typed name: %s", text)
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, n.CardID, awaitCard(t, fake).ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, n.CardID, awaitCard(t, fake).ButtonData("d:"))
 	_ = awaitMessage(t, w.messages, "decision")
 	if err := <-w.done; err != nil {
 		t.Fatal(err)
@@ -430,7 +438,7 @@ func TestNamedNotifyAllRecipientsAndDecidingTuple(t *testing.T) {
 	w := wireNotifyReviewer(t, fake, reviewerTestReport("4"), 30*time.Second, namedNotifyRoute)
 	freezeReview(t, w)
 	n := awaitNotification(t, w)
-	if len(n.Targets) != 2 || n.CardID != 0 || n.Targets[0].ChatID != 101 || n.Targets[1].ChatID != -202 || len(n.Targets[0].MessageIDs) == 0 || len(n.Targets[1].MessageIDs) == 0 {
+	if len(n.Targets) != 2 || n.CardID != 0 || n.Targets[0].ChatID != 101 || n.Targets[1].ChatID != -202 || len(n.Targets[0].MessageIDs) != 0 || len(n.Targets[1].MessageIDs) != 0 {
 		t.Fatalf("notification=%+v", n)
 	}
 	sent := fake.Sent()
@@ -461,9 +469,9 @@ func TestNamedNotifyAllRecipientsAndDecidingTuple(t *testing.T) {
 
 func TestNamedNotifyPartialSendNeverReportsApproval(t *testing.T) {
 	fake := faketelegram.New(t)
-	// First summary and card succeed; second chat summary fails.
+	// First card succeeds; the second chat's card fails.
 	fake.FailSend(func(call int, _ string, _ bool) *faketelegram.APIError {
-		if call == 3 {
+		if call == 2 {
 			return &faketelegram.APIError{Code: 403, Description: "blocked"}
 		}
 		return nil
@@ -521,6 +529,31 @@ func awaitCard(t *testing.T, fake *faketelegram.Server) faketelegram.Message {
 	return faketelegram.Message{}
 }
 
+// Wait for the Details callback acknowledgement, which follows all Details sends.
+// Callers use update ID 2 or later for their subsequent terminal decision.
+func requestNotifyDetails(t *testing.T, w *notifyWiring, n *proto.NotificationSent) []faketelegram.Message {
+	t.Helper()
+	card := awaitCard(t, w.fake)
+	before := len(w.fake.Sent())
+	w.fake.QueueCallback(1, "details", notifyOperator, notifyChat, n.CardID, card.ButtonData("v:"))
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		changed := w.fake.Changed()
+		for _, answer := range w.fake.Answers() {
+			if answer == "details" {
+				return w.fake.Sent()[before:]
+			}
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatal("Details callback did not finish")
+			return nil
+		}
+	}
+}
+
 func TestNotifyApproveFlow(t *testing.T) {
 	fake := faketelegram.New(t)
 	w := wireNotifyReviewer(t, fake, reviewerTestReport("4"), 30*time.Second)
@@ -530,7 +563,7 @@ func TestNotifyApproveFlow(t *testing.T) {
 	if notification.Digest != notifyDigest {
 		t.Fatalf("notification digest=%q", notification.Digest)
 	}
-	if notification.CardID <= 0 || len(notification.MessageIDs) != 1 {
+	if notification.CardID <= 0 || len(notification.MessageIDs) != 0 || len(fake.Sent()) != 1 {
 		t.Fatalf("notification=%+v", notification)
 	}
 	// expiry = send-complete + TTL, within the wire's millisecond precision.
@@ -543,7 +576,7 @@ func TestNotifyApproveFlow(t *testing.T) {
 	if card.ChatID != notifyChat || card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" {
 		t.Fatalf("card=%+v", card)
 	}
-	if !strings.Contains(card.Text, "Security risk: 4/5") {
+	if !strings.Contains(card.Text, "Risk 4/5") {
 		t.Fatalf("delivered approval card omitted the reviewed security score: %s", card.Text)
 	}
 	approveData := card.ButtonData("a:")
@@ -599,18 +632,22 @@ func TestNotifyCardContentCompleteness(t *testing.T) {
 	notification := awaitNotification(t, w)
 
 	sent := fake.Sent()
-	if len(sent) != len(notification.MessageIDs)+1 || len(sent[0].Buttons) != 0 {
-		t.Fatalf("summary must precede the actionable card: %+v", sent)
+	if len(sent) != 1 || len(notification.MessageIDs) != 0 || len(sent[0].Buttons) != 4 {
+		t.Fatalf("request must be one actionable card: %+v", sent)
 	}
-	joined := strings.Join([]string{sent[0].Text, sent[len(sent)-1].Text}, "\n")
+	details := requestNotifyDetails(t, w, notification)
+	joined := sent[0].Text
+	for _, message := range details {
+		joined += "\n" + message.Text
+	}
 	for _, want := range []string{
-		"<b>Privilege approval · Security risk: 4/5</b>", "<b>Host:</b> <code>energy-host / 0123456789abcdef0123456789abcdef</code>",
+		"🔴 <b>Risk 4/5</b>", "<b>Host:</b> <code>energy-host / 0123456789abcdef0123456789abcdef</code>",
 		"<b>Environment:</b> Docker &lt;sandbox&gt;",
 		"<b>Submitted by:</b> <code>operator&lt;&amp;&gt;</code> (uid 1234) → root",
 		"<b>Working directory:</b>\n<code>/tmp/work&lt;&amp;&gt;</code>",
 		"<pre><code class=\"language-bash\">/usr/bin/id -u</code></pre>\n\n<b>Reason</b>\ntest",
 		"<b>Review summary</b>\nStops the application and changes volume paths.",
-		"job <code>0123456789abcdef0123456789abcdef</code>",
+		"<b>Intent match:</b> consistent",
 		"Stops the application.", "Service downtime during migration.",
 		"Backup availability was not verified.", "Rollback procedure found; success not verified.",
 		"Reviewer <code>local</code>",
@@ -622,7 +659,7 @@ func TestNotifyCardContentCompleteness(t *testing.T) {
 	// The actionable card shows the deadline as local wall-clock time, not a
 	// UTC timestamp.
 	reported := time.UnixMilli(notification.ExpiryUnixMS)
-	if !strings.Contains(sent[len(sent)-1].Text, "Expires "+reported.Local().Format("Mon Jan 2, 2006, 3:04 PM MST")) {
+	if !strings.Contains(sent[0].Text, "expires "+reported.Local().Format("Mon Jan 2, 2006, 3:04 PM MST")) {
 		t.Fatalf("card does not show the reported expiry; got:\n%s", joined)
 	}
 	if strings.Contains(joined, reported.UTC().Format(time.RFC3339)) {
@@ -635,14 +672,14 @@ func TestNotifyCardContentCompleteness(t *testing.T) {
 	if strings.Contains(joined, "<sandbox>") || strings.Contains(joined, "operator<&>") {
 		t.Fatal("unescaped metadata entered Telegram HTML")
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
 	_ = awaitMessage(t, w.messages, "decision")
 	if err := <-w.done; err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestNotifyReviewSummaryBeforeCardForInlineShell(t *testing.T) {
+func TestNotifyVerdictOnCardForInlineShell(t *testing.T) {
 	fake := faketelegram.New(t)
 	w := wireNotifyReviewer(t, fake, reviewerTestReport("1"), 30*time.Second, func(boot *proto.Bootstrap) {
 		boot.Operation.Argv = []string{"/usr/bin/bash", "-ceu", "./run.sh"}
@@ -650,10 +687,10 @@ func TestNotifyReviewSummaryBeforeCardForInlineShell(t *testing.T) {
 	freezeReview(t, w)
 	notification := awaitNotification(t, w)
 	sent := fake.Sent()
-	if len(notification.MessageIDs) == 0 || len(sent) <= len(notification.MessageIDs) {
+	if len(notification.MessageIDs) != 0 || len(sent) != 1 {
 		t.Fatalf("summary/card delivery incomplete: notification=%+v sent=%+v", notification, sent)
 	}
-	if !strings.Contains(sent[0].Text, "<b>Review summary</b>") || strings.Contains(sent[0].Text, "Reviewer-selected dependencies may be incomplete") || strings.Contains(sent[0].Text, "LLM-selected review: completeness not mechanically checked") {
+	if !strings.Contains(sent[0].Text, "Concrete adverse assessment.") || strings.Contains(sent[0].Text, "Reviewer-selected dependencies may be incomplete") || strings.Contains(sent[0].Text, "LLM-selected review: completeness not mechanically checked") {
 		t.Fatalf("reviewer summary used a machine-authored completeness judgment: %s", sent[0].Text)
 	}
 	if strings.Contains(sent[0].Text, "No script source was inspected") {
@@ -674,7 +711,10 @@ func TestNotifyQuotesLiteralArgvWithoutDroppingControls(t *testing.T) {
 	})
 	freezeReview(t, w)
 	notification := awaitNotification(t, w)
-	text := html.UnescapeString(fake.Sent()[0].Text)
+	text := ""
+	for _, message := range requestNotifyDetails(t, w, notification) {
+		text += html.UnescapeString(message.Text)
+	}
 	if !strings.Contains(text, "<pre><code class=\"language-bash\">") {
 		t.Fatalf("missing Bash block: %s", text)
 	}
@@ -689,7 +729,7 @@ func TestNotifyQuotesLiteralArgvWithoutDroppingControls(t *testing.T) {
 			t.Errorf("literal control not escaped in command: %q", raw)
 		}
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
 	_ = awaitMessage(t, w.messages, "decision")
 	if err := <-w.done; err != nil {
 		t.Fatal(err)
@@ -707,7 +747,10 @@ func TestNotifyBundleDisplaysExecutionArgv(t *testing.T) {
 	})
 	freezeReview(t, w)
 	notification := awaitNotification(t, w)
-	text := html.UnescapeString(fake.Sent()[0].Text)
+	text := ""
+	for _, message := range requestNotifyDetails(t, w, notification) {
+		text += html.UnescapeString(message.Text)
+	}
 	assertDisplayedArgv(t, text, []string{"/bin/bash", "--noprofile", "--norc", "/tmp/staged bundle/scripts/start.sh", "", "name with spaces", "a;b"})
 	for _, want := range []string{"/bin/bash --noprofile --norc", "/tmp/staged bundle/scripts/start.sh", " '' ", "name with spaces", "a;b"} {
 		if !strings.Contains(text, want) {
@@ -717,14 +760,14 @@ func TestNotifyBundleDisplaysExecutionArgv(t *testing.T) {
 	if strings.Contains(text, "bundle entry") {
 		t.Fatalf("bundle entry placeholder shown instead of execution argv: %s", text)
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
 	_ = awaitMessage(t, w.messages, "decision")
 	if err := <-w.done; err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestNotifyPreservesLongCommandAcrossSummaryParts(t *testing.T) {
+func TestNotifyPreservesLongCommandAcrossDetailsParts(t *testing.T) {
 	fake := faketelegram.New(t)
 	longArg := strings.Repeat("long-value-", 300) + "FINAL-ARGUMENT"
 	w := wireNotifyReviewer(t, fake, reviewerTestReport("1"), 30*time.Second, func(boot *proto.Bootstrap) {
@@ -732,11 +775,11 @@ func TestNotifyPreservesLongCommandAcrossSummaryParts(t *testing.T) {
 	})
 	freezeReview(t, w)
 	notification := awaitNotification(t, w)
-	if len(notification.MessageIDs) < 2 {
-		t.Fatal("long command did not produce multiple summary parts")
+	if len(notification.MessageIDs) != 0 || len(fake.Sent()) != 1 {
+		t.Fatal("long command must still produce one card")
 	}
 	var code strings.Builder
-	for _, message := range fake.Sent()[:len(notification.MessageIDs)] {
+	for _, message := range requestNotifyDetails(t, w, notification) {
 		const open, close = `<pre><code class="language-bash">`, `</code></pre>`
 		if start := strings.Index(message.Text, open); start >= 0 {
 			end := strings.Index(message.Text[start+len(open):], close)
@@ -749,7 +792,7 @@ func TestNotifyPreservesLongCommandAcrossSummaryParts(t *testing.T) {
 	if got := html.UnescapeString(code.String()); got != "/usr/bin/id "+longArg {
 		t.Fatalf("command truncated or changed across parts: length=%d want=%d", len(got), len(longArg)+12)
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, notification.CardID, awaitCard(t, fake).ButtonData("d:"))
 	_ = awaitMessage(t, w.messages, "decision")
 	if err := <-w.done; err != nil {
 		t.Fatal(err)
@@ -788,7 +831,7 @@ func assertDisplayedArgv(t *testing.T, text string, want []string) {
 	}
 }
 
-func TestNotifyOversizeSummaryOrderedParts(t *testing.T) {
+func TestNotifyOversizeReviewUsesCardAndOnDemandOrderedDetails(t *testing.T) {
 	fake := faketelegram.New(t)
 	var warnings []string
 	for i := 0; i < 20; i++ {
@@ -801,16 +844,16 @@ func TestNotifyOversizeSummaryOrderedParts(t *testing.T) {
 	card := awaitCard(t, fake)
 
 	sent := fake.Sent()
-	if len(sent) < 3 {
-		t.Fatalf("oversize summary produced %d messages, want ordered parts + card", len(sent))
+	if len(sent) != 1 || len(notification.MessageIDs) != 0 || strings.Count(card.Text, "• ") != 3 || !strings.Contains(card.Text, "+17 more in Details") {
+		t.Fatalf("oversize review did not stay on one compact card: %+v", sent)
 	}
-	// Every summary part precedes the card, is numbered in order, and stays
-	// under the message cap.
-	for i, m := range sent[:len(sent)-1] {
+	details := requestNotifyDetails(t, w, notification)
+	// Expanded Details are numbered, button-free and bounded.
+	for i, m := range details {
 		if len(m.Buttons) != 0 {
 			t.Fatalf("summary part %d carries buttons", i)
 		}
-		header := fmt.Sprintf("summary part %d/%d:", i+1, len(sent)-1)
+		header := fmt.Sprintf("details part %d/%d:", i+1, len(details))
 		if !strings.Contains(m.Text, header) {
 			t.Fatalf("part %d missing ordered header %q:\n%s", i, header, m.Text[:80])
 		}
@@ -818,12 +861,9 @@ func TestNotifyOversizeSummaryOrderedParts(t *testing.T) {
 			t.Fatalf("part %d exceeds the message cap", i)
 		}
 	}
-	if len(notification.MessageIDs) != len(sent)-1 {
-		t.Fatalf("notification reports %d message IDs for %d parts", len(notification.MessageIDs), len(sent)-1)
-	}
 	// Warnings are never dropped across the chunk boundary.
 	joined := ""
-	for _, m := range sent {
+	for _, m := range details {
 		joined += m.Text
 	}
 	for i := 0; i < 20; i++ {
@@ -831,7 +871,7 @@ func TestNotifyOversizeSummaryOrderedParts(t *testing.T) {
 			t.Fatalf("warning %d dropped from ordered parts", i)
 		}
 	}
-	fake.QueueCallback(1, "q1", notifyOperator, notifyChat, notification.CardID, card.ButtonData("d:"))
+	fake.QueueCallback(2, "q2", notifyOperator, notifyChat, notification.CardID, card.ButtonData("d:"))
 	_ = awaitMessage(t, w.messages, "decision")
 	if err := <-w.done; err != nil {
 		t.Fatal(err)

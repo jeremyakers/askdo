@@ -14,7 +14,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/telegram"
 )
 
-const maxSummaryParts = 32
+const maxDetailsParts = 32
 
 // Transport binds one immutable client snapshot to notification and decision
 // delivery. Legacy workers use the direct poller; the broker supplies Subscribe
@@ -97,9 +97,6 @@ func NotifyReviewed(ctx context.Context, transport Transport, facts ReviewedFact
 	if err != nil {
 		return nil, fmt.Errorf("render approval summary: %w", err)
 	}
-	if len(card.parts) > maxSummaryParts {
-		return nil, fmt.Errorf("approval summary exceeds %d parts", maxSummaryParts)
-	}
 	card.text, card.keyboard, err = telegram.RenderReviewedCard(input, card.nonce)
 	if err != nil {
 		return nil, fmt.Errorf("render approval card: %w", err)
@@ -136,9 +133,6 @@ func NotifyUnreviewed(ctx context.Context, transport Transport, facts Unreviewed
 	if err != nil {
 		return nil, fmt.Errorf("render approval-only summary: %w", err)
 	}
-	if len(card.parts) > maxSummaryParts {
-		return nil, fmt.Errorf("approval-only summary exceeds %d parts", maxSummaryParts)
-	}
 	card.text, card.keyboard, err = telegram.RenderApprovalOnlyCard(input, card.nonce)
 	if err != nil {
 		return nil, fmt.Errorf("render approval-only card: %w", err)
@@ -147,8 +141,8 @@ func NotifyUnreviewed(ctx context.Context, transport Transport, facts Unreviewed
 	if err != nil {
 		return nil, fmt.Errorf("render approval-only details: %w", err)
 	}
-	if len(card.details) > maxSummaryParts {
-		return nil, fmt.Errorf("approval-only details exceed %d parts", maxSummaryParts)
+	if len(card.details) > maxDetailsParts {
+		return nil, fmt.Errorf("approval-only details exceed %d parts", maxDetailsParts)
 	}
 	card.notifying = "sending unreviewed approval request"
 	return notify(ctx, transport, card)

@@ -21,9 +21,12 @@ On the server, you (or your agent) run:
 askdo --reason 'restart nginx after config change' -- /usr/bin/systemctl restart nginx
 ```
 
-Your phone buzzes. You see the server, the command, and who's asking. With AI
-review enabled, you also get a summary of the proposed changes and a risk
-rating. Tap **Approve once** to run it, **Deny** to stop it, or **Details** to
+Your phone buzzes once per request. The approval card leads with the AI's risk
+rating and verdict, followed by the server/job identity, who's asking, expiry,
+up to three ranked warnings, the command and the reason. **Details** expands
+the full request, review, evidence and reviewer history. With no AI review, the
+card instead prominently says **NO AI REVIEW — Risks NOT assessed**.
+Tap **Approve once** to run it, **Deny** to stop it, or **Details** to
 take a closer look. AI-reviewed cards also offer **Request changes**: run
 nothing and return the review's uncertainties, warnings, and suggestions to
 the submitting agent. The output comes back to the terminal that asked.
@@ -34,9 +37,17 @@ untrusted advice, not permission to change policy. Request changes ends the
 job as `denied` (exit 126); the waiting client and `askdo status JOB_ID`
 (including `--json`) show the feedback. Nothing automatically resubmits:
 address the feedback, then submit a new job for a full review. Approval-only
-cards and automatic approval retain their existing behavior. Upgrade matching
-host/reviewer and fleet gateway binaries to use this feature; older clients
-still receive a plain denial.
+decisions and automatic-approval policy retain their existing behavior. Automatic
+notices are also one message and explicitly say no human approval was requested.
+Upgrade matching host/reviewer and fleet gateway binaries to use this feature;
+older clients still receive a plain denial.
+
+For verdict-first cards, upgrade the fleet gateway **first**, then all hosts as
+one coordinated rollout. New hosts freeze `summary_parts: 0`. An older gateway
+rejects those tickets; a new gateway rejects older hosts' tickets whose frozen
+summary count is nonzero. Mixed versions fail closed: nothing executes for
+rejected tickets. Pending old-layout tickets cannot be delivered by the new
+renderer; resubmit them after the matching upgrade.
 
 ## Why askdo?
 

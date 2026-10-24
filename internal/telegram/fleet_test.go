@@ -44,15 +44,15 @@ func TestFleetSubmitterFactsReachDedicatedSections(t *testing.T) {
 				}
 				var purposes, directories, commands strings.Builder
 				section := ""
-				for _, part := range got.Parts {
+				for _, part := range got.Details {
 					if err := assertBalancedTags(part); err != nil {
 						t.Fatal(err)
 					}
 					if runeCount(part) > MaxMessageRunes {
 						t.Fatal("oversized part")
 					}
-					if kind == fleetproto.HumanUnreviewed && len(got.Parts) > 1 {
-						start := strings.Index(part, "Job "+string(ticket.Binding.JobID)+" — unreviewed summary part ")
+					if kind == fleetproto.HumanUnreviewed && len(got.Details) > 1 {
+						start := strings.Index(part, "Job "+string(ticket.Binding.JobID)+" — unreviewed details part ")
 						if start < 0 {
 							t.Fatal("missing numbered unreviewed part")
 						}
@@ -120,7 +120,7 @@ func TestFleetSubmitterFactsReachDedicatedSections(t *testing.T) {
 				if directories.String() != cwd || commands.String() != ticket.Display.Operation {
 					t.Fatalf("wrong cwd/command: %q / %q", directories.String(), commands.String())
 				}
-				if !strings.Contains(strings.Join(got.Parts, ""), "(73 bytes)") {
+				if !strings.Contains(strings.Join(got.Details, ""), "(73 bytes)") || !strings.Contains(got.Final, "(73 bytes)") {
 					t.Fatal("capture metadata missing")
 				}
 				ticket.Display.SummaryParts = len(got.Parts)
@@ -154,10 +154,10 @@ func TestFleetRenderingDeterministicPartsBeforeManifestFreeze(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Then every bounded chunk and card/notice is reproducible and escaped.
-			if len(before.Parts) < 2 || strings.Join(before.Parts, "") != strings.Join(after.Parts, "") || before.Final != after.Final {
+			if len(before.Parts) != 0 || len(after.Parts) != 0 || strings.Join(before.Details, "") != strings.Join(after.Details, "") || before.Final != after.Final {
 				t.Fatal("unstable rendering")
 			}
-			for _, part := range after.Parts {
+			for _, part := range append(after.Details, after.Final) {
 				if runeCount(part) > MaxMessageRunes || strings.Contains(part, "<host>") || strings.Contains(part, "<credential>") {
 					t.Fatal("unbounded or unescaped rendering")
 				}
@@ -169,5 +169,25 @@ func TestFleetRenderingDeterministicPartsBeforeManifestFreeze(t *testing.T) {
 				t.Fatal("nonce controls changed")
 			}
 		})
+	}
+}
+
+func TestFleetWithholdingTotalStaysOnCardAndFactsMoveToDetails(t *testing.T) {
+	// Given: the broker's total exceeds its bounded reference list.
+	ticket := fleetproto.Ticket{Binding: fleetproto.TicketBinding{JobID: "2026-10-24_#5", Nonce: strings.Repeat("a", 32), TicketKind: fleetproto.HumanUnreviewed, ExpiresAt: 2000000000}, Display: fleetproto.Display{Operation: "/usr/bin/true", Identity: fleetproto.Identity{Hostname: "host", Username: "agent"}, Withholding: []string{"48 credential-like paths withheld", "bundle:<secret>.env"}, UnreviewedReason: "policy"}}
+	// When: the gateway renders the frozen facts.
+	got, err := RenderFleet(ticket)
+	// Then: no initial summaries, the full total on the card, and exact facts in Details.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Parts) != 0 || !strings.Contains(got.Final, "48 item(s) — see Details") {
+		t.Fatalf("wrong withholding card: %+v", got)
+	}
+	details := strings.Join(got.Details, "")
+	for _, fact := range []string{"48 credential-like paths withheld", "bundle:&lt;secret&gt;.env"} {
+		if !strings.Contains(details, fact) {
+			t.Errorf("Details lost %q", fact)
+		}
 	}
 }

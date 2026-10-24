@@ -20,7 +20,7 @@ func TestCapturedKindReachesReviewedAndUnreviewedRendering(t *testing.T) {
 		in := testCardInput()
 		in.CapturedStdinBytes = 17
 		in.CapturedStdinKind = kind
-		parts, err := RenderSummaryParts(in)
+		parts, err := RenderDetails(DetailsInput{CardInput: in})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -29,7 +29,7 @@ func TestCapturedKindReachesReviewedAndUnreviewedRendering(t *testing.T) {
 			t.Fatal("reviewed kind missing")
 		}
 		u := ApprovalOnlyInput{Host: in.Host, JobID: in.JobID, Operation: in.Operation, Expiry: in.Expiry, CapturedStdinBytes: 17, CapturedStdinKind: kind}
-		parts, err = RenderApprovalOnlySummaryParts(u)
+		parts, err = RenderApprovalOnlyDetails(u)
 		if err != nil {
 			t.Fatal(err)
 		}

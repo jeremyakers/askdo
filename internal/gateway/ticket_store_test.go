@@ -104,7 +104,7 @@ func TestInboxRetainsEarlyValidCallbacksWithoutNoiseBlocking(t *testing.T) {
 	updates := []telegram.Update{
 		callback(1, 99, 1, 2, telegram.ActionApprove, sub.Ticket.Binding.Nonce),
 		callback(2, 2, 1, 99, telegram.ActionApprove, sub.Ticket.Binding.Nonce),
-		callback(3, 2, 1, 2, telegram.ActionDeny, sub.Ticket.Binding.Nonce),
+		callback(3, 2, 1, int64(sub.Ticket.Display.SummaryParts+1), telegram.ActionDeny, sub.Ticket.Binding.Nonce),
 	}
 	if err := store.Ingest(ctx, "token-hash", updates); err != nil {
 		t.Fatal(err)

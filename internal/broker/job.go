@@ -564,7 +564,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 	if autoPlan != nil {
 		notification, ok := message.(*proto.AutoNotificationSent)
 		if !ok || notification.Digest != digest || (!j.namedRoute() && (notification.NoticeID <= 0 ||
-			len(notification.MessageIDs) == 0 || len(notification.MessageIDs) > 32)) {
+			notification.MessageIDs == nil || len(notification.MessageIDs) > 32)) {
 			j.fail("invalid auto notification")
 			return
 		}
@@ -606,7 +606,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 		changed, commitErr := j.daemon.store.CommitAutoStart(ctx, store.AutoStartAuthorization{
 			UID: j.uid, RequestID: j.req.RequestID, ManifestDigest: digest,
 			Score: autoPlan.Score, AdminMaxRisk: cap, NoticeID: notification.NoticeID,
-			SummaryMessageIDs: append([]int64(nil), notification.MessageIDs...),
+			SummaryMessageIDs: append([]int64{}, notification.MessageIDs...),
 			ChannelName:       j.selectedChannelName(), Targets: append([]proto.AutoNotificationTarget(nil), notification.Targets...),
 			NotifiedAtUTC: notified, NowUTC: time.Now().UTC(),
 		})

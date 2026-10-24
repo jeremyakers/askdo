@@ -67,6 +67,7 @@ func TestTelegramTrustedRootTextExecutableReviewedIncompleteThenApprovedOnce(t *
 	for _, message := range fake.Sent() {
 		joined += message.Text + "\n"
 	}
+	joined += requestTelegramDetails(t, fake, card, 1)
 	if !strings.Contains(joined, "Executable bytes were not inspected") || strings.Contains(joined, "LLM-selected review: completeness not mechanically checked") || strings.Contains(joined, "INCOMPLETE REVIEW") {
 		t.Fatalf("model uncertainty was replaced by a machine-authored completeness judgment:\n%s", joined)
 	}
@@ -75,14 +76,14 @@ func TestTelegramTrustedRootTextExecutableReviewedIncompleteThenApprovedOnce(t *
 		t.Fatalf("preapproval exit=%d stderr=%s", code, stderr.String())
 	default:
 	}
-	fake.QueueCallback(1, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
+	fake.QueueCallback(2, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
 	if code := awaitApprovalCLI(t, result, &stderr); code != 0 || stdout.String() != "trusted-root text executed\n" {
 		t.Fatalf("exit=%d stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if len(executor.Snapshot()) != 1 {
 		t.Fatalf("executions=%d", len(executor.Snapshot()))
 	}
-	fake.QueueCallback(2, "replay", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
+	fake.QueueCallback(3, "replay", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
 	if len(executor.Snapshot()) != 1 {
 		t.Fatal("approval replay executed twice")
 	}

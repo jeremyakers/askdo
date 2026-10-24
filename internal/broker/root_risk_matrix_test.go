@@ -76,7 +76,7 @@ func (e rootRiskExecutor) Start(op Operation, stdout, stderr io.Writer) (Executi
 			}
 			if json.Unmarshal(row.ApprovalJSON, &audit) == nil && audit.Kind == "auto" && audit.Score == atoiRisk(e.risk) && audit.Digest == row.ManifestHash {
 				for _, msg := range e.fake.Sent() {
-					if msg.ID == audit.NoticeID && strings.Contains(msg.Text, "auto-execution") && strings.Contains(msg.Text, event.jobID) && strings.Contains(msg.Text, "Security risk: "+e.risk+"/5") {
+					if msg.ID == audit.NoticeID && strings.Contains(msg.Text, "Auto-approved by policy") && strings.Contains(msg.Text, event.jobID) && strings.Contains(msg.Text, "Risk "+e.risk+"/5") {
 						event.noticeAccepted = true
 						event.auditCommitted = true
 						break
@@ -148,7 +148,7 @@ func TestRootRiskMatrix(t *testing.T) {
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			if tc.auto {
 				fake.FailSend(func(_ int, text string, _ bool) *faketelegram.APIError {
-					if strings.Contains(text, "auto-execution") {
+					if strings.Contains(text, "Auto-approved by policy") {
 						entered <- struct{}{}
 						<-release
 					}
@@ -194,9 +194,9 @@ func TestRootRiskMatrix(t *testing.T) {
 				card := awaitTelegramCard(t, fake)
 				score := tc.risk + "/5"
 				if tc.risk == "unknown" {
-					score = "UNKNOWN"
+					score = "unknown"
 				}
-				if card.ChatID != telegramChat || !strings.Contains(card.Text, "Security risk: "+score) || card.ButtonData("d:") == "" {
+				if card.ChatID != telegramChat || !strings.Contains(card.Text, "Risk "+score) || card.ButtonData("d:") == "" {
 					t.Fatalf("human card=%+v", card)
 				}
 				fake.QueueCallback(1, "deny", telegramOperator, telegramChat, card.ID, card.ButtonData("d:"))
@@ -232,7 +232,7 @@ func TestRootRiskMatrix(t *testing.T) {
 					t.Fatal("successful job never reached real SystemExecutor")
 				}
 				messages := fake.Sent()
-				if len(messages) < 2 || messages[0].ChatID != telegramChat || !strings.Contains(messages[0].Text, id) || !strings.Contains(messages[len(messages)-1].Text, id) || !strings.Contains(messages[len(messages)-1].Text, "Security risk: "+tc.risk+"/5") {
+				if len(messages) != 1 || messages[0].ChatID != telegramChat || !strings.Contains(messages[0].Text, id) || !strings.Contains(messages[0].Text, "Risk "+tc.risk+"/5") {
 					t.Fatalf("auto messages=%+v", messages)
 				}
 				for _, message := range messages {

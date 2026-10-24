@@ -13,8 +13,8 @@ func TestReviewedCard_whenRequestChangesAvailable(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"suggestions":[{"issue":"<unknown>&","action":"Inspect <mount>","actor":"administrator"}]}`), &in.Report); err != nil {
 		t.Fatal(err)
 	}
-	// When the summary and controls are rendered.
-	parts, err := RenderSummaryParts(in)
+	// When Details and controls are rendered.
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}

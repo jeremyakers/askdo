@@ -216,7 +216,7 @@ func runCapturedStdinRealDispatch(t *testing.T) {
 				if strings.Contains(message.Text, script) || strings.Contains(message.Text, r.CapturedStdinBase64) {
 					t.Fatal("script leaked into Telegram")
 				}
-				if strings.Contains(message.Text, "captured script input") && strings.Contains(message.Text, "stdin") && strings.Contains(message.Text, "bash") {
+				if strings.Contains(message.Text, "captured script input") && strings.Contains(message.Text, "bash") {
 					foundLabel = true
 				}
 			}

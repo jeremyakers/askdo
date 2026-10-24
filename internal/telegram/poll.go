@@ -14,8 +14,9 @@ const DefaultPollTimeoutSeconds = 25
 // maxPollTimeoutSeconds bounds the long-poll timeout.
 const maxPollTimeoutSeconds = 600
 
-// maxDetailsParts bounds the pre-rendered Details message sequence.
-const maxDetailsParts = 32
+// maxDetailsParts retains the combined former 32-part summary + 32-part Details
+// budget now that all expanded request and review facts live behind Details.
+const maxDetailsParts = 64
 
 // Callback acknowledgement texts. Acks are best-effort cleanup (design §9
 // step 5), never the authorization mechanism.

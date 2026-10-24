@@ -65,7 +65,7 @@ func (j *jobRuntime) validateTargets(targets []proto.NotificationTarget) error {
 	}
 	seen := make(map[int64]bool, len(targets))
 	for _, target := range targets {
-		if target.ChatID == 0 || target.CardID <= 0 || seen[target.ChatID] || len(target.MessageIDs) == 0 || len(target.MessageIDs) > 32 {
+		if target.ChatID == 0 || target.CardID <= 0 || seen[target.ChatID] || target.MessageIDs == nil || len(target.MessageIDs) > 32 {
 			return errors.New("invalid approval delivery")
 		}
 		seen[target.ChatID] = true
@@ -95,7 +95,7 @@ func (j *jobRuntime) validateAutoTargets(targets []proto.AutoNotificationTarget)
 	}
 	seen := make(map[int64]bool, len(targets))
 	for _, target := range targets {
-		if target.ChatID == 0 || target.NoticeID <= 0 || seen[target.ChatID] || len(target.MessageIDs) == 0 || len(target.MessageIDs) > 32 {
+		if target.ChatID == 0 || target.NoticeID <= 0 || seen[target.ChatID] || target.MessageIDs == nil || len(target.MessageIDs) > 32 {
 			return errors.New("invalid auto notification target")
 		}
 		seen[target.ChatID] = true

@@ -43,6 +43,9 @@ func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.
 	if !ok {
 		t.Fatal("fixture card was not delivered")
 	}
+	if len(fake.Sent()) != 1 {
+		t.Fatal("request sent separate summary messages")
+	}
 	if cleaned := fake.Cleaned(); len(cleaned) != 1 || cleaned[0].ChatID != 7 || cleaned[0].ID != card.ID {
 		t.Fatalf("cleanup=%+v", cleaned)
 	}

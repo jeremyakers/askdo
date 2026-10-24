@@ -118,7 +118,9 @@ func TestTicketCrashChild(t *testing.T) {
 }
 
 func TestActualKilledProcessSendReceiptInboxDecisionRecovery(t *testing.T) {
-	phases := []string{"before_intent", "intent_0_0", "external_0_0", "ack_0_0", "intent_0_1", "external_0_1", "ack_0_1", "intent_1_0", "external_1_0", "ack_1_0", "intent_1_1", "external_1_1", "ack_1_1", "all_acks", "receipt", "inbox_cursor", "decision"}
+	// Each recipient now has one send: its card/notice at part zero. Retain
+	// every intent/external/ack crash boundary for both recipients.
+	phases := []string{"before_intent", "intent_0_0", "external_0_0", "ack_0_0", "intent_1_0", "external_1_0", "ack_1_0", "all_acks", "receipt", "inbox_cursor", "decision"}
 	for _, automatic := range []bool{false, true} {
 		for _, phase := range phases {
 			if automatic && (phase == "inbox_cursor" || phase == "decision") {
@@ -255,7 +257,7 @@ func TestActualKilledProcessSendReceiptInboxDecisionRecovery(t *testing.T) {
 					bot.mu.Lock()
 					sends := bot.sends
 					bot.mu.Unlock()
-					if sends != 4 {
+					if sends != len(sub.Route.Recipients) {
 						t.Fatal("acknowledged send repeated", sends)
 					}
 				}
