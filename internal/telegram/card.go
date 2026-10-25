@@ -224,7 +224,7 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 		reason = "providers unavailable"
 	}
 	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
-	return "⚠️ <b>NO AI REVIEW</b> — " + reason + ". Risks NOT assessed.\n" + compactIdentity(facts, expiryText(in.Expiry)) + compactOperation(facts), kb, nil
+	return "⚠️ <b>NO AI REVIEW</b> — " + reason + ". Risks NOT assessed.\n" + compactIdentity(facts, expiryText(in.Expiry)) + compactOperation(facts, "Details"), kb, nil
 }
 
 // expiryLayout shows an approval deadline as wall-clock time in the rendering
@@ -291,7 +291,7 @@ func RenderReviewedCard(in CardInput, nonce string) (string, InlineKeyboardMarku
 	}
 	// RenderCard already validated the nonce. Only reviewed cards offer advice.
 	kb.InlineKeyboard[0] = slices.Insert(kb.InlineKeyboard[0], 2, InlineKeyboardButton{Text: "Request changes", CallbackData: ActionRequestChanges + ":" + nonce})
-	return riskHeading(in.Report.Risk) + " — " + verdict(in.Report, blankVerdict) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report) + compactOperation(in), kb, nil
+	return riskHeading(in.Report.Risk) + " — " + verdict(in.Report, blankVerdict) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report, "Details") + compactOperation(in, "Details"), kb, nil
 }
 
 // RenderAutoNotice constructs a non-actionable policy notice from broker-frozen
@@ -304,7 +304,8 @@ func RenderAutoNotice(in CardInput, score int) (string, error) {
 		return "", errors.New("telegram: invalid auto-approval notice")
 	}
 	heading := strings.Replace(riskHeading(strconv.Itoa(score)), "<b>Risk", "<b>Auto-approved by policy · Risk", 1)
-	return heading + " — " + verdict(in.Report, blankAutoVerdict) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report) + compactOperation(in) + "\nNo human approval was requested.", nil
+	rest := "<code>askdo review log --job " + compactEsc(in.JobID, 384) + "</code> on " + compactEsc(in.Host, 160)
+	return heading + " — " + verdict(in.Report, blankAutoVerdict) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report, rest) + compactOperation(in, rest) + "\nNo human approval was requested.", nil
 }
 
 // blankVerdict replaces a summary with no words, so a card never shows a risk
@@ -383,7 +384,10 @@ func compactIdentity(in CardInput, deadline string) string {
 	return text
 }
 
-func compactWarnings(report proto.ReviewReport) string {
+// compactWarnings and compactOperation name where the rest can be seen: the
+// Details button on actionable cards, or the host's review log for auto
+// notices, which have no buttons.
+func compactWarnings(report proto.ReviewReport, rest string) string {
 	var text strings.Builder
 	if report.IntentMatch == "inconsistent" {
 		text.WriteString("\n⚠️ Doesn&#39;t match the stated reason")
@@ -400,12 +404,12 @@ func compactWarnings(report proto.ReviewReport) string {
 		text.WriteString("\n• " + line)
 	}
 	if len(visible) > 3 {
-		fmt.Fprintf(&text, "\n+%d more in Details", len(visible)-3)
+		fmt.Fprintf(&text, "\n+%d more in %s", len(visible)-3, rest)
 	}
 	return text.String()
 }
 
-func compactOperation(in CardInput) string {
+func compactOperation(in CardInput, rest string) string {
 	text := "\n<b>Runs:</b> <code>" + compactEsc(in.Operation, 420) + "</code>"
 	if in.CapturedStdinBytes > 0 {
 		// The delivery kind is documented as visible before approval; the
@@ -417,7 +421,7 @@ func compactOperation(in CardInput) string {
 		text += fmt.Sprintf("\n<b>Input:</b> captured script input (%d bytes, %s)", in.CapturedStdinBytes, kind)
 	}
 	if in.WithheldCount > 0 {
-		text += fmt.Sprintf("\n⚠️ Content withheld from AI review: %d item(s) — see Details", in.WithheldCount)
+		text += fmt.Sprintf("\n⚠️ Content withheld from AI review: %d item(s) — see %s", in.WithheldCount, rest)
 	}
 	return text + "\n<b>Why:</b> " + compactLine(in.Reason, 220)
 }

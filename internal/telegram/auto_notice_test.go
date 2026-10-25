@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"github.com/jeremyakers/askdo/internal/proto"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,29 @@ func TestRenderAutoNoticeNoActionsOrForgedMarkup(t *testing.T) {
 		in.JobID = bad.job
 		if _, err := RenderAutoNotice(in, bad.score); err == nil {
 			t.Errorf("accepted %+v", bad)
+		}
+	}
+}
+
+func TestAutoNoticeNeverPointsToDetails(t *testing.T) {
+	// Given: an auto-approved report with more warnings than the notice shows,
+	// and content withheld from the AI review.
+	in := testCardInput()
+	in.Report.Warnings = []proto.ReviewWarning{{Message: "One."}, {Message: "Two."}, {Message: "Three."}, {Message: "Four."}, {Message: "Five."}}
+	in.WithheldCount, in.WithheldRefs = 2, []string{"bundle:secret.env"}
+	// When: the auto notice renders (it has no buttons and no Details).
+	notice, err := RenderAutoNotice(in, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Then: nothing refers to Details; overflow and withholding point to the
+	// host's review log for this job, which records the full review.
+	if strings.Contains(notice, "Details") {
+		t.Errorf("auto notice refers to Details:\n%s", notice)
+	}
+	for _, want := range []string{"+2 more", "askdo review log --job " + in.JobID, "Content withheld from AI review: 2 item(s)"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("auto notice lacks %q:\n%s", want, notice)
 		}
 	}
 }
