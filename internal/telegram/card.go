@@ -291,7 +291,7 @@ func RenderReviewedCard(in CardInput, nonce string) (string, InlineKeyboardMarku
 	}
 	// RenderCard already validated the nonce. Only reviewed cards offer advice.
 	kb.InlineKeyboard[0] = slices.Insert(kb.InlineKeyboard[0], 2, InlineKeyboardButton{Text: "Request changes", CallbackData: ActionRequestChanges + ":" + nonce})
-	return riskHeading(in.Report.Risk) + " — " + compactLine(in.Report.Summary, 240) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report) + compactOperation(in), kb, nil
+	return riskHeading(in.Report.Risk) + " — " + verdict(in.Report) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report) + compactOperation(in), kb, nil
 }
 
 // RenderAutoNotice constructs a non-actionable policy notice from broker-frozen
@@ -304,7 +304,18 @@ func RenderAutoNotice(in CardInput, score int) (string, error) {
 		return "", errors.New("telegram: invalid auto-approval notice")
 	}
 	heading := strings.Replace(riskHeading(strconv.Itoa(score)), "<b>Risk", "<b>Auto-approved by policy · Risk", 1)
-	return heading + " — " + compactLine(in.Report.Summary, 240) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report) + compactOperation(in) + "\nNo human approval was requested.", nil
+	return heading + " — " + verdict(in.Report) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report) + compactOperation(in) + "\nNo human approval was requested.", nil
+}
+
+// blankVerdict replaces a summary with no words, so a card never shows a risk
+// score with nothing after it; the full report remains behind Details.
+const blankVerdict = "No verdict from the reviewer; check Details before approving."
+
+func verdict(report proto.ReviewReport) string {
+	if text := compactLine(report.Summary, 240); text != "" {
+		return text
+	}
+	return blankVerdict
 }
 
 func riskHeading(risk string) string {

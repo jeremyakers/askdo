@@ -13,6 +13,30 @@ import (
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
+func TestBlankVerdictSaysSoInsteadOfLeavingTheHeadlineEmpty(t *testing.T) {
+	for _, summary := range []string{"", "  \n\t "} {
+		// Given: a valid report whose summary carries no words.
+		in := testCardInput()
+		in.Report.Summary = summary
+		// When: the actionable card and the auto notice render.
+		card, _, err := RenderReviewedCard(in, testNonce)
+		if err != nil {
+			t.Fatal(err)
+		}
+		notice, err := RenderAutoNotice(in, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Then: each headline says no verdict was given and points to Details.
+		for name, text := range map[string]string{"card": card, "notice": notice} {
+			headline, _, _ := strings.Cut(text, "\n")
+			if !strings.Contains(headline, blankVerdict) {
+				t.Errorf("%s headline for summary %q: %q", name, summary, headline)
+			}
+		}
+	}
+}
+
 func TestCompactReviewedCardLeadsWithVerdict(t *testing.T) {
 	for _, tc := range []struct{ risk, heading string }{
 		{"1", "🟢 <b>Risk 1/5</b>"}, {"2", "🟢 <b>Risk 2/5</b>"},
