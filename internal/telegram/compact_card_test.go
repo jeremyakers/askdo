@@ -27,12 +27,14 @@ func TestBlankVerdictSaysSoInsteadOfLeavingTheHeadlineEmpty(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Then: each headline says no verdict was given and points to Details.
-		for name, text := range map[string]string{"card": card, "notice": notice} {
-			headline, _, _ := strings.Cut(text, "\n")
-			if !strings.Contains(headline, blankVerdict) {
-				t.Errorf("%s headline for summary %q: %q", name, summary, headline)
-			}
+		// Then: the card says no verdict was given and points to Details; the
+		// auto notice says so without pointing to approval controls it lacks.
+		if headline, _, _ := strings.Cut(card, "\n"); !strings.Contains(headline, blankVerdict) {
+			t.Errorf("card headline for summary %q: %q", summary, headline)
+		}
+		headline, _, _ := strings.Cut(notice, "\n")
+		if !strings.Contains(headline, blankAutoVerdict) || strings.Contains(notice, "Details") || strings.Contains(notice, "approving") {
+			t.Errorf("auto notice headline for summary %q: %q", summary, headline)
 		}
 	}
 }

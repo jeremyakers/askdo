@@ -291,7 +291,7 @@ func RenderReviewedCard(in CardInput, nonce string) (string, InlineKeyboardMarku
 	}
 	// RenderCard already validated the nonce. Only reviewed cards offer advice.
 	kb.InlineKeyboard[0] = slices.Insert(kb.InlineKeyboard[0], 2, InlineKeyboardButton{Text: "Request changes", CallbackData: ActionRequestChanges + ":" + nonce})
-	return riskHeading(in.Report.Risk) + " — " + verdict(in.Report) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report) + compactOperation(in), kb, nil
+	return riskHeading(in.Report.Risk) + " — " + verdict(in.Report, blankVerdict) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report) + compactOperation(in), kb, nil
 }
 
 // RenderAutoNotice constructs a non-actionable policy notice from broker-frozen
@@ -304,18 +304,22 @@ func RenderAutoNotice(in CardInput, score int) (string, error) {
 		return "", errors.New("telegram: invalid auto-approval notice")
 	}
 	heading := strings.Replace(riskHeading(strconv.Itoa(score)), "<b>Risk", "<b>Auto-approved by policy · Risk", 1)
-	return heading + " — " + verdict(in.Report) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report) + compactOperation(in) + "\nNo human approval was requested.", nil
+	return heading + " — " + verdict(in.Report, blankAutoVerdict) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report) + compactOperation(in) + "\nNo human approval was requested.", nil
 }
 
 // blankVerdict replaces a summary with no words, so a card never shows a risk
 // score with nothing after it; the full report remains behind Details.
 const blankVerdict = "No verdict from the reviewer; check Details before approving."
 
-func verdict(report proto.ReviewReport) string {
+// blankAutoVerdict is the auto-notice form: the notice has no Details or
+// approval controls to point to.
+const blankAutoVerdict = "No verdict from the reviewer."
+
+func verdict(report proto.ReviewReport, fallback string) string {
 	if text := compactLine(report.Summary, 240); text != "" {
 		return text
 	}
-	return blankVerdict
+	return fallback
 }
 
 func riskHeading(risk string) string {
