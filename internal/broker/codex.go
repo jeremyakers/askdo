@@ -57,9 +57,9 @@ func (j *jobRuntime) projectModels(ctx context.Context) ([]proto.ProjectedModel,
 // An empty model list is not an infrastructure error: the parent can start an
 // approval-only worker after enforcing its own forced-review and deadline gates.
 func (j *jobRuntime) projectModelsWithFailures(ctx context.Context) ([]proto.ProjectedModel, []proto.AvailabilityFailure, error) {
-	models := make([]proto.ProjectedModel, 0, len(j.daemon.cfg.Review.Models))
+	models := make([]proto.ProjectedModel, 0, len(j.configuration().Review.Models))
 	failures := []proto.AvailabilityFailure{}
-	for _, model := range j.daemon.cfg.Review.Models {
+	for _, model := range j.configuration().Review.Models {
 		projected := proto.ProjectedModel{Name: model.Name, API: model.API, BaseURL: model.BaseURL, Model: model.Model, APIKeyFile: model.APIKeyFile, RequestTimeoutMS: model.RequestTimeout.Value().Milliseconds()}
 		if model.API != "openai_codex" {
 			models = append(models, projected)

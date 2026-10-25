@@ -85,8 +85,8 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		Context:          manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
 		Operation:        manifestOperation{Mode: op.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), op.Argv...), Env: append([]string(nil), op.Env...), CWD: op.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:         append([]captureRecord{}, index.Files...),
-		TrustAssumptions: manifestTrustAssumptions{ReadRoots: append([]string(nil), j.daemon.cfg.Inspection.ReadRoots...), DenyPaths: append([]string(nil), j.daemon.cfg.Inspection.DenyPaths...), SensitiveMasks: effectiveSensitiveMasks(j.daemon.cfg.Inspection.SensitiveMasks)},
-		Settings:         manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
+		TrustAssumptions: manifestTrustAssumptions{ReadRoots: append([]string(nil), j.configuration().Inspection.ReadRoots...), DenyPaths: append([]string(nil), j.configuration().Inspection.DenyPaths...), SensitiveMasks: effectiveSensitiveMasks(j.configuration().Inspection.SensitiveMasks)},
+		Settings:         manifestSettings{MaxInspectedFiles: j.configuration().Limits.MaxInspectedFiles, MaxInspectedBytes: j.configuration().Limits.MaxInspectedBytes},
 		TelegramRoute:    j.manifestTelegramRoute(),
 		ApprovalMode:     "approval_only", Reason: reason, AvailabilityHistory: append([]proto.AvailabilityFailure{}, history...),
 		Fleet:      fleet,
@@ -213,13 +213,13 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		Operation: manifestOperation{Mode: operation.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), operation.Argv...), Env: append([]string(nil), operation.Env...), CWD: operation.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:  append([]captureRecord(nil), index.Files...),
 		TrustAssumptions: manifestTrustAssumptions{
-			ReadRoots:      append([]string(nil), j.daemon.cfg.Inspection.ReadRoots...),
-			DenyPaths:      append([]string(nil), j.daemon.cfg.Inspection.DenyPaths...),
-			SensitiveMasks: effectiveSensitiveMasks(j.daemon.cfg.Inspection.SensitiveMasks),
+			ReadRoots:      append([]string(nil), j.configuration().Inspection.ReadRoots...),
+			DenyPaths:      append([]string(nil), j.configuration().Inspection.DenyPaths...),
+			SensitiveMasks: effectiveSensitiveMasks(j.configuration().Inspection.SensitiveMasks),
 		},
 		Report: review.Report, AutoApproval: plan, WithheldRefs: refs, WithheldCount: count, SuccessfulModel: model,
 		ModelHistory:        append([]proto.ModelHistoryEntry(nil), review.ModelHistory...),
-		Settings:            manifestSettings{MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes},
+		Settings:            manifestSettings{MaxInspectedFiles: j.configuration().Limits.MaxInspectedFiles, MaxInspectedBytes: j.configuration().Limits.MaxInspectedBytes},
 		TelegramRoute:       j.manifestTelegramRoute(),
 		Fleet:               fleet,
 		Inspection:          j.inspectionEvidence(),
@@ -287,7 +287,7 @@ func (j *jobRuntime) validateCaptureState(index captureIndex) error {
 		if validateCapturePath(record.Path) != nil {
 			return fmt.Errorf("invalid staged bundle path %q", record.Path)
 		}
-		if record.Size < 0 || record.Size > j.daemon.cfg.Limits.MaxInspectedBytes {
+		if record.Size < 0 || record.Size > j.configuration().Limits.MaxInspectedBytes {
 			return fmt.Errorf("invalid staged bundle size for %q", record.Path)
 		}
 		root, err := os.OpenRoot(j.spool.bundle)
@@ -364,7 +364,7 @@ func (j *jobRuntime) successfulModel(history []proto.ModelHistoryEntry) (string,
 		}
 		return "", fmt.Errorf("successful fleet model %q is not selected", name)
 	}
-	for _, configured := range j.daemon.cfg.Review.Models {
+	for _, configured := range j.configuration().Review.Models {
 		if configured.Name == name {
 			return name, nil
 		}

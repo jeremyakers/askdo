@@ -90,6 +90,8 @@ type daemonOptions struct {
 type daemon struct {
 	reviewLogPath  string
 	cfg            *config.Config
+	configPath     string
+	reloadConfig   bool
 	store          *store.Store
 	socketPath     string
 	spoolRoot      string
@@ -355,7 +357,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
-		riskPolicyDefault: riskPolicyDefaultPath(configPath), riskPolicyTrust: rootRiskPolicyTrust()}
+		riskPolicyDefault: riskPolicyDefaultPath(configPath), riskPolicyTrust: rootRiskPolicyTrust(), configPath: configPath, reloadConfig: options.cfg == nil}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
 	d.reviewLogPath = reviewlog.Path(storePath)
 	d.telegramClient = options.telegramClient
@@ -526,9 +528,13 @@ func (d *daemon) runQueue(ctx context.Context) {
 		if !ok {
 			return
 		}
+		if !job.startRun() {
+			continue
+		}
 		jobs.Add(1)
 		go func() {
 			defer jobs.Done()
+			defer job.finishRun()
 			job.run(ctx)
 		}()
 	}
@@ -729,8 +735,23 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 	}
 }
 
+// currentConfig never falls back to startup policy after a failed reload. Other
+// operations (including status and cancel) do not depend on current config.
+func (d *daemon) currentConfig() (*config.Config, error) {
+	if !d.reloadConfig {
+		return d.cfg, nil
+	}
+	return config.Load(d.configPath)
+}
+
 func (d *daemon) handleAutoApproval(conn *net.UnixConn, uid uint32, request proto.AutoApprovalRequest) {
-	cap := d.cfg.Review.MaxAutoRisk(uid)
+	cfg, err := d.currentConfig()
+	if err != nil {
+		slog.Warn("current configuration unavailable", "error", err)
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "current configuration unavailable"})
+		return
+	}
+	cap := cfg.Review.MaxAutoRisk(uid)
 	ctx := context.Background()
 	if request.Action == "set" {
 		threshold := *request.Threshold // validated before entry
@@ -808,7 +829,43 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			return
 		}
 	}
-	if d.cfg.Review.RequiresReview(uid, request.ForceReview) && len(d.cfg.Review.Models) == 0 && (d.cfg.Fleet == nil || len(d.cfg.Review.GatewayProfiles) == 0) {
+	cfg, err := d.currentConfig()
+	if err != nil {
+		slog.Warn("submission configuration unavailable", "request_id", request.RequestID, "error", err)
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "current configuration unavailable"})
+		return
+	}
+	policy, fleet := d.policy, d.fleet
+	var releaseResources func()
+	if d.reloadConfig {
+		policy, err = inspection.NewPolicy(cfg.Inspection, append(cfg.CredentialPaths(), d.configPath)...)
+		if err != nil {
+			slog.Warn("submission inspection policy unavailable", "request_id", request.RequestID, "error", err)
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "current configuration unavailable"})
+			return
+		}
+		fleet = nil
+		releaseResources = func() {
+			_ = policy.Close()
+			if fleet != nil {
+				fleet.Close()
+			}
+		}
+		defer func() {
+			if releaseResources != nil {
+				releaseResources()
+			}
+		}()
+		if cfg.Fleet != nil {
+			fleet, err = fleetclient.New(*cfg.Fleet)
+			if err != nil {
+				slog.Warn("submission fleet client unavailable", "request_id", request.RequestID, "error", err)
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "current configuration unavailable"})
+				return
+			}
+		}
+	}
+	if cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "review_unavailable", Message: "AI review required but no review models are configured"})
 		return
 	}
@@ -834,7 +891,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: err.Error()})
 		return
 	}
-	if err := captureSubmittedBundle(spool, request, d.cfg.Limits, d.policy); err != nil {
+	if err := captureSubmittedBundle(spool, request, cfg.Limits, policy); err != nil {
 		cwd.close()
 		d.queue.release()
 		_ = os.RemoveAll(spool.dir)
@@ -863,6 +920,13 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	job := newJobRuntime(d, uid, request, spool, identity, cwd, resolveSubmitterName(uid))
+	if d.reloadConfig {
+		job.cfg, job.policy, job.fleetClient = cfg, policy, fleet
+		job.route = cfg.Telegram.RouteForUID(uid)
+		job.namedTelegram = len(cfg.Telegram.Channels) != 0
+		job.releaseResources = releaseResources
+		releaseResources = nil // ownership transferred before publishing the job
+	}
 	job.foreground = foreground
 	d.mu.Lock()
 	d.jobs[d.key(uid, request.RequestID)] = job

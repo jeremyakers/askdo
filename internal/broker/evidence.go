@@ -57,7 +57,7 @@ func (j *jobRuntime) captureEvidence() error {
 	}
 	// Resolution is execution preflight, not a selection of files for review.
 	// Neither the executable nor its shebang interpreter is opened here.
-	if j.daemon.policy.MatchesSensitive(j.req.Argv[0]) || j.daemon.policy.MatchesSensitive(resolved) {
+	if j.inspectionPolicy().MatchesSensitive(j.req.Argv[0]) || j.inspectionPolicy().MatchesSensitive(resolved) {
 		j.recordWithheldPath(j.req.Argv[0])
 		if resolved != j.req.Argv[0] {
 			j.recordWithheldPath(resolved)

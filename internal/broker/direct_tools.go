@@ -44,7 +44,7 @@ func (j *jobRuntime) readPath(seq uint32, req proto.ReadPathRequest) (proto.Insp
 	var next int64
 	var eof bool
 	if req.Base == "host" {
-		r := j.daemon.policy.ReadRange(req.Path, req.Offset, req.MaxBytes, j.identity)
+		r := j.inspectionPolicy().ReadRange(req.Path, req.Offset, req.MaxBytes, j.identity)
 		if r.Status == inspection.StatusWithheld {
 			j.recordWithheldPath(req.Path)
 		}
@@ -98,7 +98,7 @@ func (j *jobRuntime) readPath(seq uint32, req proto.ReadPathRequest) (proto.Insp
 
 // bundleRecord selects only staged bundle paths, never a host/spool pathname.
 func (j *jobRuntime) bundleRecord(name string) (captureRecord, inspection.Status) {
-	if j.daemon.policy.MatchesSensitive(name) {
+	if j.inspectionPolicy().MatchesSensitive(name) {
 		return captureRecord{}, inspection.StatusWithheld
 	}
 	index, err := readCaptureIndex(j.spool.captureIndex)
@@ -107,7 +107,7 @@ func (j *jobRuntime) bundleRecord(name string) (captureRecord, inspection.Status
 	}
 	for _, r := range index.Files {
 		if r.Path == name {
-			if r.Masked || j.daemon.policy.MatchesSensitive(r.Path) {
+			if r.Masked || j.inspectionPolicy().MatchesSensitive(r.Path) {
 				return captureRecord{}, inspection.StatusWithheld
 			}
 			return r, inspection.StatusOK
@@ -117,10 +117,10 @@ func (j *jobRuntime) bundleRecord(name string) (captureRecord, inspection.Status
 }
 
 func (j *jobRuntime) bundleBytes(record captureRecord) ([]byte, inspection.Status) {
-	if record.Masked || j.daemon.policy.MatchesSensitive(record.Path) {
+	if record.Masked || j.inspectionPolicy().MatchesSensitive(record.Path) {
 		return nil, inspection.StatusWithheld
 	}
-	if err := validateCapturePath(record.Path); err != nil || record.Size < 0 || record.Size > j.daemon.cfg.Limits.MaxInspectedBytes {
+	if err := validateCapturePath(record.Path); err != nil || record.Size < 0 || record.Size > j.configuration().Limits.MaxInspectedBytes {
 		return nil, inspection.StatusChangedDuringCapture
 	}
 	// OpenRoot confines each lookup beneath the root, even if a staged path
@@ -166,7 +166,7 @@ func (j *jobRuntime) listPath(seq uint32, req proto.ListPathRequest) (proto.Insp
 	entries := make([]proto.DirectoryEntry, 0)
 	skipped := 0
 	if req.Base == "host" {
-		r := j.daemon.policy.ListDir(req.Path, offset, 500, j.identity)
+		r := j.inspectionPolicy().ListDir(req.Path, offset, 500, j.identity)
 		if r.Status != inspection.StatusOK {
 			if r.Status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
@@ -184,7 +184,7 @@ func (j *jobRuntime) listPath(seq uint32, req proto.ListPathRequest) (proto.Insp
 		}
 		return directOK(seq, proto.ListPathResult{Entries: entries, NextCursor: next, SkippedMasked: skipped})
 	}
-	if j.daemon.policy.MatchesSensitive(req.Path) {
+	if j.inspectionPolicy().MatchesSensitive(req.Path) {
 		j.recordMaskedBundlePath(req.Path)
 		return failedInspect(seq, inspection.StatusWithheld), nil
 	}
@@ -212,7 +212,7 @@ func (j *jobRuntime) listPath(seq uint32, req proto.ListPathRequest) (proto.Insp
 		if req.Path != "." {
 			child = path.Join(req.Path, name)
 		}
-		if j.daemon.policy.MatchesSensitive(child) || (rest == "" && (r.Masked || j.daemon.policy.MatchesSensitive(r.Path))) {
+		if j.inspectionPolicy().MatchesSensitive(child) || (rest == "" && (r.Masked || j.inspectionPolicy().MatchesSensitive(r.Path))) {
 			children[name] = "masked"
 			continue
 		}
@@ -268,7 +268,7 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 	var files []captureRecord
 	skipped := 0
 	if req.Base == "bundle" {
-		if j.daemon.policy.MatchesSensitive(req.Path) {
+		if j.inspectionPolicy().MatchesSensitive(req.Path) {
 			j.recordMaskedBundlePath(req.Path)
 			return failedInspect(seq, inspection.StatusWithheld), nil
 		}
@@ -282,7 +282,7 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 				continue
 			}
 			found = true
-			if r.Masked || j.daemon.policy.MatchesSensitive(r.Path) {
+			if r.Masked || j.inspectionPolicy().MatchesSensitive(r.Path) {
 				if r.Path == req.Path {
 					j.recordMaskedBundlePath(req.Path)
 					return failedInspect(seq, inspection.StatusWithheld), nil
@@ -296,20 +296,20 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 		if !found {
 			return failedInspect(seq, inspection.StatusNotFound), nil
 		}
-		if len(files) > j.daemon.cfg.Limits.MaxInspectedFiles {
+		if len(files) > j.configuration().Limits.MaxInspectedFiles {
 			return failedInspect(seq, inspection.StatusLimitExceeded), nil
 		}
 		sort.Slice(files, func(a, b int) bool { return files[a].Path < files[b].Path })
 	}
 	page := newSearchPage(offset)
-	var budget int64 = j.daemon.cfg.Limits.MaxInspectedBytes
+	var budget int64 = j.configuration().Limits.MaxInspectedBytes
 	// Search is a single bounded broker operation even if the configured
 	// capture budget is substantially larger.
 	if budget > 1<<20 {
 		budget = 1 << 20
 	}
 	if req.Base == "host" {
-		meta, status, reason := j.daemon.policy.StatPathReason(req.Path, false)
+		meta, status, reason := j.inspectionPolicy().StatPathReason(req.Path, false)
 		if status != inspection.StatusOK {
 			if status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
@@ -325,7 +325,7 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 		if budget < 1 {
 			return failedInspect(seq, inspection.StatusLimitExceeded), nil
 		}
-		data, status := j.daemon.policy.ReadSearchFile(req.Path, budget)
+		data, status := j.inspectionPolicy().ReadSearchFile(req.Path, budget)
 		if status == inspection.StatusWithheld {
 			j.recordWithheldPath(req.Path)
 		}
@@ -384,7 +384,7 @@ func (j *jobRuntime) walkHost(root string) ([]string, int, inspection.Status) {
 			if pageSize > 500 {
 				pageSize = 500
 			}
-			r := j.daemon.policy.ListDirForWalk(f.path, offset, pageSize, offset+maxWalkEntries-visited, j.identity)
+			r := j.inspectionPolicy().ListDirForWalk(f.path, offset, pageSize, offset+maxWalkEntries-visited, j.identity)
 			if r.Status != inspection.StatusOK {
 				return nil, 0, r.Status
 			}
@@ -400,7 +400,7 @@ func (j *jobRuntime) walkHost(root string) ([]string, int, inspection.Status) {
 				if len(child) > 1024 {
 					return nil, 0, inspection.StatusLimitExceeded
 				}
-				meta, status := j.daemon.policy.StatPath(child, false)
+				meta, status := j.inspectionPolicy().StatPath(child, false)
 				if status == inspection.StatusWithheld {
 					skipped++
 					continue
@@ -445,7 +445,7 @@ func observationOffset(cursor string, digest [32]byte) (int, bool) {
 
 func (j *jobRuntime) statPath(seq uint32, req proto.StatPathRequest) (proto.InspectResult, error) {
 	if req.Base == "host" {
-		m, status, reason := j.daemon.policy.StatPathReason(req.Path, req.Resolve)
+		m, status, reason := j.inspectionPolicy().StatPathReason(req.Path, req.Resolve)
 		if status != inspection.StatusOK {
 			if status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
@@ -464,7 +464,7 @@ func (j *jobRuntime) statPath(seq uint32, req proto.StatPathRequest) (proto.Insp
 		}
 		return failedInspect(seq, status), nil
 	}
-	if record.Size < 0 || record.Size > j.daemon.cfg.Limits.MaxInspectedBytes {
+	if record.Size < 0 || record.Size > j.configuration().Limits.MaxInspectedBytes {
 		return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
 	}
 	root, err := os.OpenRoot(j.spool.bundle)
@@ -516,7 +516,7 @@ func (j *jobRuntime) statPath(seq uint32, req proto.StatPathRequest) (proto.Insp
 }
 
 func (j *jobRuntime) mountInfo(seq uint32, req proto.MountInfoRequest) (proto.InspectResult, error) {
-	m, status, reason := j.daemon.policy.MountPathReason(req.Path)
+	m, status, reason := j.inspectionPolicy().MountPathReason(req.Path)
 	if status != inspection.StatusOK {
 		if status == inspection.StatusWithheld {
 			j.recordWithheldPath(req.Path)
@@ -530,7 +530,7 @@ func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.Insp
 	var names []string
 	skipped := 0
 	if req.Base == "host" {
-		meta, status, reason := j.daemon.policy.StatPathReason(req.Path, false)
+		meta, status, reason := j.inspectionPolicy().StatPathReason(req.Path, false)
 		if status != inspection.StatusOK {
 			if status == inspection.StatusWithheld {
 				j.recordWithheldPath(req.Path)
@@ -545,7 +545,7 @@ func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.Insp
 			return failedInspect(seq, status), nil
 		}
 	} else {
-		if j.daemon.policy.MatchesSensitive(req.Path) {
+		if j.inspectionPolicy().MatchesSensitive(req.Path) {
 			j.recordMaskedBundlePath(req.Path)
 			return failedInspect(seq, inspection.StatusWithheld), nil
 		}
@@ -563,7 +563,7 @@ func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.Insp
 			if record.Path == req.Path {
 				return failedInspect(seq, inspection.StatusInspectionDenied), nil
 			}
-			if record.Masked || j.daemon.policy.MatchesSensitive(record.Path) {
+			if record.Masked || j.inspectionPolicy().MatchesSensitive(record.Path) {
 				skipped++
 				continue
 			}
@@ -574,7 +574,7 @@ func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.Insp
 				return failedInspect(seq, status), nil
 			}
 			for parent := path.Dir(record.Path); parent != "." && parent != req.Path; parent = path.Dir(parent) {
-				if j.daemon.policy.MatchesSensitive(parent) {
+				if j.inspectionPolicy().MatchesSensitive(parent) {
 					break
 				}
 				if _, exists := seen[parent]; !exists {
@@ -605,7 +605,7 @@ func (j *jobRuntime) findPath(seq uint32, req proto.FindPathRequest) (proto.Insp
 		fingerprint.Write([]byte(name))
 		fingerprint.Write([]byte{0})
 		if req.Base == "host" {
-			m, status := j.daemon.policy.StatPath(name, false)
+			m, status := j.inspectionPolicy().StatPath(name, false)
 			if status != inspection.StatusOK {
 				return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
 			}
@@ -651,7 +651,7 @@ func (j *jobRuntime) searchHostTree(seq uint32, req proto.SearchPathRequest, re 
 		hash.Write([]byte{0})
 	}
 	for _, name := range names {
-		meta, status := j.daemon.policy.StatPath(name, false)
+		meta, status := j.inspectionPolicy().StatPath(name, false)
 		if status != inspection.StatusOK {
 			return failedInspect(seq, inspection.StatusChangedDuringCapture), nil
 		}
@@ -661,7 +661,7 @@ func (j *jobRuntime) searchHostTree(seq uint32, req proto.SearchPathRequest, re 
 		if meta.Size > budget {
 			return failedInspect(seq, inspection.StatusLimitExceeded), nil
 		}
-		data, status := j.daemon.policy.ReadSearchFile(name, budget)
+		data, status := j.inspectionPolicy().ReadSearchFile(name, budget)
 		if status != inspection.StatusOK {
 			return failedInspect(seq, status), nil
 		}

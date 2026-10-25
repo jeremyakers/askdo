@@ -66,26 +66,26 @@ type fleetManifest struct {
 }
 
 func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]proto.ProjectedModel, error) {
-	deadline := time.Now().Add(j.daemon.cfg.Review.TotalTimeout.Value())
+	deadline := time.Now().Add(j.configuration().Review.TotalTimeout.Value())
 	if d := j.deadline(); !d.IsZero() && d.Before(deadline) {
 		deadline = d
 	}
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	if j.daemon.fleet == nil {
+	if j.fleetConnection() == nil {
 		return nil, &fleetclient.Error{Code: fleetproto.ErrCodeProtocol}
 	}
-	catalog, err := j.daemon.fleet.Catalogue(ctx, j.uid)
+	catalog, err := j.fleetConnection().Catalogue(ctx, j.uid)
 	if err != nil {
 		return nil, fmt.Errorf("fleet catalogue: %w", err)
 	}
-	profiles := j.daemon.cfg.Review.GatewayProfiles
+	profiles := j.configuration().Review.GatewayProfiles
 	if approvalOnly {
 		// Human-only jobs still authenticate and bind the signed route, but
 		// unused reviewer profiles must not gate their approval ticket.
 		profiles = []string{}
 	}
-	selection, err := j.daemon.fleet.Select(catalog, profiles, j.daemon.cfg.Review.LocalOnly)
+	selection, err := j.fleetConnection().Select(catalog, profiles, j.configuration().Review.LocalOnly)
 	if err != nil {
 		return nil, fmt.Errorf("fleet selection: %w", err)
 	}
@@ -93,7 +93,7 @@ func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]pro
 	// The signed route, not worker-supplied peer numbers, is adapted to existing
 	// authenticated named-recipient gates. No Telegram credential is projected.
 	j.namedTelegram = true
-	j.route = config.TelegramRoute{ChannelName: string(catalog.Route.ChannelID), ApprovalTTL: config.Duration(min(j.daemon.cfg.Fleet.ApprovalDuration(), time.Duration(catalog.Route.TTLSeconds)*time.Second))}
+	j.route = config.TelegramRoute{ChannelName: string(catalog.Route.ChannelID), ApprovalTTL: config.Duration(min(j.configuration().Fleet.ApprovalDuration(), time.Duration(catalog.Route.TTLSeconds)*time.Second))}
 	for _, r := range catalog.Route.Recipients {
 		j.route.Recipients = append(j.route.Recipients, config.TelegramRecipient{ChatID: r.ChatID, OperatorUserIDs: append([]int64(nil), r.OperatorUserIDs...)})
 	}
@@ -104,7 +104,7 @@ func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]pro
 			return nil, &fleetclient.Error{Code: fleetproto.ErrCodeProtocol}
 		}
 		u := p.Upstreams[0]
-		models = append(models, proto.ProjectedModel{Name: string(p.ProfileID), API: string(u.API), BaseURL: u.BaseURL, Model: u.Model, DataBoundary: string(u.DataBoundary), RequestTimeoutMS: min(j.daemon.cfg.Review.RequestTimeout.Value(), time.Duration(u.RequestTimeoutSeconds)*time.Second).Milliseconds()})
+		models = append(models, proto.ProjectedModel{Name: string(p.ProfileID), API: string(u.API), BaseURL: u.BaseURL, Model: u.Model, DataBoundary: string(u.DataBoundary), RequestTimeoutMS: min(j.configuration().Review.RequestTimeout.Value(), time.Duration(u.RequestTimeoutSeconds)*time.Second).Milliseconds()})
 	}
 	if !approvalOnly && len(models) == 0 {
 		return nil, &fleetclient.Error{Code: fleetproto.ErrCodeRevision}
@@ -141,10 +141,10 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 	}
 	p := f.selection.Profiles[choice]
 	u := p.Upstreams[0]
-	if f.turn >= uint32(j.daemon.cfg.Review.MaxModelCallsPerAttempt) || r.Request.Model != u.Model || r.Request.MaxOutputTokens < 1 || r.Request.MaxOutputTokens > min(j.fleetOutputTokenLimit(), u.MaxOutputTokens) {
+	if f.turn >= uint32(j.configuration().Review.MaxModelCallsPerAttempt) || r.Request.Model != u.Model || r.Request.MaxOutputTokens < 1 || r.Request.MaxOutputTokens > min(j.fleetOutputTokenLimit(), u.MaxOutputTokens) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
-	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsForCapabilities(j.inspectionCapabilities(), j.daemon.cfg.Review.WebfetchEnabled)) {
+	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsForCapabilities(j.inspectionCapabilities(), j.configuration().Review.WebfetchEnabled)) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
 	if snapshot := j.frozenRiskPolicy(); snapshot != nil && !pinsTrustedSystemMessage(snapshot, r.Request.Messages) {
@@ -153,11 +153,11 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 	if !time.Now().Before(f.reviewDeadline) {
 		return bad(fleetproto.ErrCodeExpired)
 	}
-	turn := fleetproto.ModelTurn{Version: 1, Kind: fleetproto.KindModelTurn, Binding: fleetproto.TurnBinding{HostID: fleetproto.ID(j.daemon.cfg.Fleet.HostID), JobID: fleetproto.ID(j.req.RequestID), Attempt: uint32(choice + 1), Turn: f.turn + 1, ProfileID: p.ProfileID, ProfileRevision: p.Revision, Deadline: f.reviewDeadline.Unix()}, Request: r.Request}
+	turn := fleetproto.ModelTurn{Version: 1, Kind: fleetproto.KindModelTurn, Binding: fleetproto.TurnBinding{HostID: fleetproto.ID(j.configuration().Fleet.HostID), JobID: fleetproto.ID(j.req.RequestID), Attempt: uint32(choice + 1), Turn: f.turn + 1, ProfileID: p.ProfileID, ProfileRevision: p.Revision, Deadline: f.reviewDeadline.Unix()}, Request: r.Request}
 	// Each wire turn consumes a physical-call slot, even a cached reconciliation
 	// that makes no new upstream request. No turn may hide multiple upstream calls
 	// or enlarge root's cap.
-	turn.RetryTransient = r.RetryTransient && f.turn+1 < uint32(j.daemon.cfg.Review.MaxModelCallsPerAttempt)
+	turn.RetryTransient = r.RetryTransient && f.turn+1 < uint32(j.configuration().Review.MaxModelCallsPerAttempt)
 	wire, err := json.Marshal(turn)
 	if err != nil {
 		return bad(fleetproto.ErrCodeProtocol)
@@ -185,7 +185,7 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 // One worker limit applies to its entire ordered fallback loop. Derive it from
 // every immutable selected upstream without modifying the host's root policy.
 func (j *jobRuntime) fleetOutputTokenLimit() int {
-	limit := j.daemon.cfg.Review.MaxOutputTokens
+	limit := j.configuration().Review.MaxOutputTokens
 	if j.fleet != nil {
 		for _, profile := range j.fleet.selection.Profiles {
 			for _, upstream := range profile.Upstreams {
@@ -215,9 +215,9 @@ func (j *jobRuntime) receiveFleetTurn(session WorkerSession, r proto.ModelTurnRe
 		}
 	}()
 	requestTimeout := time.Duration(j.models[j.fleet.choice].RequestTimeoutMS) * time.Millisecond
-	requestCtx, requestCancel := context.WithTimeoutCause(ctx, min(requestTimeout, j.daemon.cfg.Review.RequestTimeout.Value()), errFleetRequestTimeout)
+	requestCtx, requestCancel := context.WithTimeoutCause(ctx, min(requestTimeout, j.configuration().Review.RequestTimeout.Value()), errFleetRequestTimeout)
 	defer requestCancel()
-	result, err := j.daemon.fleet.ModelTurn(requestCtx, j.fleet.selection, turn)
+	result, err := j.fleetConnection().ModelTurn(requestCtx, j.fleet.selection, turn)
 	// A verified terminal result wins over our timer firing just after delivery.
 	// Only an error carrying this exact local timer cause is an unknown outcome.
 	if errors.Is(err, errFleetRequestTimeout) && ctx.Err() == nil && time.Now().Before(j.fleet.reviewDeadline) {
@@ -373,7 +373,7 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 	if err != nil {
 		return nil, err
 	}
-	f.ticket = fleetproto.Ticket{Version: 1, Kind: fleetproto.KindTicket, Binding: fleetproto.TicketBinding{HostID: fleetproto.ID(j.daemon.cfg.Fleet.HostID), JobID: fleetproto.ID(j.req.RequestID), Nonce: hex.EncodeToString(nonce[:]), TicketKind: kind, ProfileHash: profilesHash, RouteHash: f.selection.Catalog.Route.Revision, ExpiresAt: expiry.Unix()}, Display: display}
+	f.ticket = fleetproto.Ticket{Version: 1, Kind: fleetproto.KindTicket, Binding: fleetproto.TicketBinding{HostID: fleetproto.ID(j.configuration().Fleet.HostID), JobID: fleetproto.ID(j.req.RequestID), Nonce: hex.EncodeToString(nonce[:]), TicketKind: kind, ProfileHash: profilesHash, RouteHash: f.selection.Catalog.Route.Revision, ExpiresAt: expiry.Unix()}, Display: display}
 	rendered, err := telegram.RenderFleet(f.ticket)
 	if err != nil {
 		return nil, fmt.Errorf("render fleet display: %w", err)
@@ -460,7 +460,7 @@ func (j *jobRuntime) runFleetTicket(ctx context.Context, session WorkerSession, 
 		return
 	}
 	for {
-		event, envelope, ok, err := j.daemon.fleet.NextEventProof(ctx, f.ticket.Binding.JobID, f.cursor)
+		event, envelope, ok, err := j.fleetConnection().NextEventProof(ctx, f.ticket.Binding.JobID, f.cursor)
 		if err != nil {
 			if fleetTransport(err) && ctx.Err() == nil {
 				if err := j.reconcileFleetTicket(ctx); err == nil {
@@ -577,7 +577,7 @@ func fleetTransport(err error) bool {
 
 func (j *jobRuntime) reconcileFleetTicket(ctx context.Context) error {
 	for {
-		_, err := j.daemon.fleet.PutTicket(ctx, j.fleet.submission)
+		_, err := j.fleetConnection().PutTicket(ctx, j.fleet.submission)
 		if err == nil || !fleetTransport(err) || ctx.Err() != nil {
 			return err
 		}
@@ -668,12 +668,16 @@ func (j *jobRuntime) commitFleetAuto(ctx context.Context, digest string, plan *p
 	for _, d := range j.fleet.receipt.Deliveries {
 		targets = append(targets, proto.AutoNotificationTarget{ChatID: d.Recipient.ChatID, NoticeID: d.NoticeMessageID, MessageIDs: append([]int64{}, d.SummaryMessageIDs...)})
 	}
+	cap, grantErr := j.currentAutoRisk()
+	if grantErr != nil {
+		j.fail("fleet auto-approval grant unavailable")
+		return
+	}
 	j.mu.Lock()
 	if j.state != store.StateReviewing {
 		j.mu.Unlock()
 		return
 	}
-	cap := j.daemon.cfg.Review.MaxAutoRisk(j.uid)
 	if cap != plan.MaxRisk || cap < plan.Score || cap < 1 || cap > 4 {
 		j.mu.Unlock()
 		j.fail("auto-approval grant revoked")

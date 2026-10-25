@@ -100,8 +100,13 @@ copy it over a trusted channel, then on the host:
 ```sh
 sudo askdo gateway connect --enrollment /root/host-pi-bundle.json --approval-only
 sudo askdo config check
-sudo systemctl restart askdo      # pick up the new config
 ```
+
+A running host broker uses the new connection for its next submitted job;
+no local broker restart is needed. Already-admitted jobs retain their original
+config, inspection policy and connection; automatic dispatch still re-reads the
+current auto-approval grant. Keep credentials needed by those jobs until they
+finish. The gateway's own config remains startup-loaded.
 
 `connect` strictly imports the bundle into a `config_version: 5` document
 ([schema](configuration.md#fleet-host-config-version-5)) and **preserves all
@@ -203,14 +208,16 @@ sudo askdo gateway connect --enrollment /root/host-pi-ai-bundle.json --profile l
 If the host used step 2's `--approval-only`, edit its root-owned
 `/etc/askdo/config.json` and set `review.mode` to `"required"` to enable AI
 review. Keep the other local policy fields unchanged; selecting `local` does
-not itself change the mode. Validate before loading the new configuration:
+not itself change the mode. Validate the new configuration:
 
 ```sh
 sudo askdo config check
 sudo askdo config check --live
-# Finish or cancel pending work before this local broker restart:
-sudo systemctl restart askdo
 ```
+
+New submissions use that policy without restarting the local broker; queued,
+reviewing and pending jobs keep their original policy and routes. Automatic
+dispatch still re-reads the current auto-approval grant.
 
 Omitting `--profile` uses the bundle's default profile selection recorded by
 `hosts add`. An empty selection requires an explicitly permitted human-only
@@ -287,11 +294,11 @@ Telegram `getUpdates` polling tolerates exactly one active poller per bot
 token. To move a bot from a standalone host to the gateway: stop the
 standalone `askdo.service` first, configure the gateway, start it, then
 connect hosts. Never run a standalone bot and the gateway on one token, even
-briefly. To roll a host back to standalone: let in-flight fleet jobs finish
-(or accept their cancel/expire/unknown outcome) **before** restarting the
-broker — no job is promised to finish across a broker restart — then restore
-its `config_version: 4` configuration with its own bot (a **separate** token
-from the gateway's), restart `askdo.service`, and never revive old jobs.
+briefly. To roll a host back to standalone, restore its `config_version: 4`
+configuration with its own bot (a **separate** token from the gateway's).
+New submissions use it without a local broker restart. In-flight fleet jobs
+keep their original connection and routes; let them finish or cancel them before
+revoking their enrollment or removing needed credentials. Never revive old jobs.
 
 ## What the gateway never does
 
