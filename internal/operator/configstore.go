@@ -65,11 +65,22 @@ type ConfigStore struct {
 // not-yet-configured sections (the shipped placeholders) do not block
 // unrelated mutations.
 func LoadForMutation(path string) (*ConfigStore, error) {
+	return loadForMutation(path, config.DecodeForMutation)
+}
+
+// LoadForReviewPolicyMutation also accepts explicit v5 fleet documents. Review
+// mode and per-login exemptions are local policy in both versions; credential
+// wizards must continue to use the direct-only LoadForMutation.
+func LoadForReviewPolicyMutation(path string) (*ConfigStore, error) {
+	return loadForMutation(path, config.DecodeForFleetMutation)
+}
+
+func loadForMutation(path string, decode func([]byte) (*config.Config, error)) (*ConfigStore, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
-	cfg, err := config.DecodeForMutation(data)
+	cfg, err := decode(data)
 	if err != nil {
 		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
@@ -123,7 +134,7 @@ func (s *ConfigStore) Save(section Section) error {
 func validateSection(cfg *config.Config, section Section) error {
 	switch section {
 	case SectionReview:
-		return config.ValidateReviewSection(cfg.Review)
+		return cfg.ValidateReviewSection()
 	case SectionTelegram:
 		return config.ValidateTelegramSection(cfg.Telegram)
 	default:

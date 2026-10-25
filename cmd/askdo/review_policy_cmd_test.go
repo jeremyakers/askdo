@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/user"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/jeremyakers/askdo/internal/config"
@@ -167,5 +169,239 @@ func TestReviewPolicyDispatchDoesNotBecomeAccessCLI(t *testing.T) {
 	}
 	if code := run([]string{"reviewer", "frobnicate"}); code != 125 {
 		t.Fatalf("reviewer worker dispatch exit=%d", code)
+	}
+}
+
+type reviewFleetFileInfo struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (i reviewFleetFileInfo) Mode() os.FileMode { return i.mode }
+func (i reviewFleetFileInfo) Sys() any          { return &syscall.Stat_t{} }
+
+func reviewFleetFixture(t *testing.T, profiles []string) string {
+	t.Helper()
+	path := reviewPolicyFixture(t)
+	cfg := reviewValue(t, path).WithFleet(config.FleetConfig{
+		URL: "https://gateway.example", HostID: "host-a",
+		EnrollmentFile: "/keys/enrollment", VerificationKeyFile: "/keys/verify",
+		CAFile: "/keys/ca", ApprovalTTL: 600,
+	}, profiles, false)
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.Stat(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(config.StubCredentialChecksForTest(func(path string) (os.FileInfo, error) {
+		mode := os.FileMode(0400)
+		if path == "/keys/enrollment" {
+			mode = 0600
+		}
+		return reviewFleetFileInfo{base, mode}, nil
+	}, nil))
+	return path
+}
+
+func writeReviewFleetValue(t *testing.T, path string, cfg *config.Config) {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReviewPolicyFleetRoundTrip(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"add", "remove", "list", "show-mode", "approval-only", "required"} {
+		t.Run(action, func(t *testing.T) {
+			// Given a valid fleet config with ordered gateway profiles and local policy.
+			stubRoot(t)
+			path := reviewFleetFixture(t, []string{"local", "fallback"})
+			before, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action == "remove" || action == "list" {
+				before.Review.ApprovalOnlyUsers = []string{current.Username}
+			}
+			if action == "required" {
+				before.Review.Mode = "approval_only"
+			}
+			writeReviewFleetValue(t, path, before)
+			args := []string{"exempt", action}
+			switch action {
+			case "add", "remove":
+				args = append(args, current.Username)
+			case "show-mode":
+				args = []string{"mode"}
+			case "approval-only", "required":
+				args = []string{"mode", action}
+			}
+			if action == "list" || action == "show-mode" {
+				getEUID = func() int { return 1000 }
+			}
+			original := fileContent(t, path)
+
+			// When the policy command operates on v5.
+			code, out, errOut := reviewCLI(append(args, "--config", path)...)
+
+			// Then it succeeds and the resulting document remains fleet-loadable.
+			if code != 0 {
+				t.Fatalf("%v exit=%d out=%q err=%q", args, code, out, errOut)
+			}
+			after, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("saved fleet config: %v", err)
+			}
+			wantUsers := []string(nil)
+			if action == "add" || action == "list" {
+				wantUsers = []string{current.Username}
+			}
+			if !reflect.DeepEqual(after.Review.ApprovalOnlyUsers, wantUsers) {
+				t.Fatalf("exemptions = %v, want %v", after.Review.ApprovalOnlyUsers, wantUsers)
+			}
+			wantMode := "required"
+			if action == "approval-only" {
+				wantMode = "approval_only"
+			}
+			if after.Review.Mode != wantMode {
+				t.Fatalf("mode = %q, want %q", after.Review.Mode, wantMode)
+			}
+			if action == "list" && !strings.Contains(out, current.Username) {
+				t.Fatalf("exemption not listed: %q", out)
+			}
+			if action == "show-mode" && !strings.Contains(out, "required") {
+				t.Fatalf("mode not displayed: %q", out)
+			}
+			if (action == "list" || action == "show-mode") && fileContent(t, path) != original {
+				t.Fatal("read-only command wrote config")
+			}
+			// Compare every unrelated decoded field, including fleet and profiles.
+			after.Review.Mode = before.Review.Mode
+			after.Review.ApprovalOnlyUsers = before.Review.ApprovalOnlyUsers
+			beforeJSON, err := json.Marshal(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterJSON, err := json.Marshal(after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(beforeJSON, afterJSON) {
+				t.Fatalf("unrelated config values changed:\nbefore=%s\nafter=%s", beforeJSON, afterJSON)
+			}
+			if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0600 {
+				t.Fatalf("config mode: info=%v err=%v", info, err)
+			}
+		})
+	}
+}
+
+func TestReviewPolicyFleetRejectsInvalidMutations(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, profiles, mode, users, extra, want string
+		args                                     []string
+	}{
+		{name: "unknown login", profiles: "local", want: "resolve", args: []string{"exempt", "add", "askdo-no-such-login-9713"}},
+		{name: "last exemption without profiles", users: current.Username, want: "review.models", args: []string{"exempt", "remove", current.Username}},
+		{name: "required without profiles", mode: "approval_only", want: "review.models", args: []string{"mode", "required"}},
+		{name: "global mode conflicts with exemptions", profiles: "local", users: current.Username, want: "approval_only_users", args: []string{"mode", "approval-only"}},
+		{name: "exemption in global mode", profiles: "local", mode: "approval_only", want: "only in required mode", args: []string{"exempt", "add", current.Username}},
+		{name: "local models forbidden", profiles: "local", extra: `"models":[],`, want: "local credentials", args: []string{"exempt", "add", current.Username}},
+		{name: "local telegram forbidden", profiles: "local", extra: `"telegram":{},`, want: "local credentials", args: []string{"mode", "approval-only"}},
+		{name: "unknown field", profiles: "local", extra: `"unknown":true,`, want: "unknown", args: []string{"exempt", "list"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given a fleet policy and a mutation that violates an existing rule.
+			stubRoot(t)
+			profiles := []string{}
+			if tc.profiles != "" {
+				profiles = []string{tc.profiles}
+			}
+			path := reviewFleetFixture(t, profiles)
+			cfg, err := config.DecodeForFleetMutation([]byte(fileContent(t, path)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.mode != "" {
+				cfg.Review.Mode = tc.mode
+			}
+			if tc.users != "" {
+				cfg.Review.ApprovalOnlyUsers = []string{tc.users}
+			}
+			writeReviewFleetValue(t, path, cfg)
+			body := fileContent(t, path)
+			if tc.extra != "" {
+				if strings.Contains(tc.extra, "models") {
+					body = strings.Replace(body, `"review":{`, `"review":{`+tc.extra, 1)
+				} else {
+					body = "{" + tc.extra + body[1:]
+				}
+				if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// When the command attempts the invalid operation.
+			code, _, errOut := reviewCLI(append(tc.args, "--config", path)...)
+
+			// Then the same rule rejects it without rewriting the document.
+			if code == 0 || !strings.Contains(errOut, tc.want) || fileContent(t, path) != body {
+				t.Fatalf("exit=%d err=%q, want %q and unchanged config", code, errOut, tc.want)
+			}
+		})
+	}
+}
+
+func TestReviewPolicyFleetAllowsExplicitApprovalOnlyWithoutProfiles(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"exempt", "mode"} {
+		t.Run(action, func(t *testing.T) {
+			// Given a fleet config with no profiles (the same policy rules as v4).
+			stubRoot(t)
+			path := reviewFleetFixture(t, []string{})
+			args := []string{"mode", "approval-only"}
+			if action == "exempt" {
+				args = []string{"exempt", "add", current.Username}
+			}
+
+			// When explicitly enabling approval-only review globally or per login.
+			code, out, errOut := reviewCLI(append(args, "--config", path)...)
+
+			// Then the saved v5 config is valid without introducing local models.
+			if code != 0 {
+				t.Fatalf("exit=%d out=%q err=%q", code, out, errOut)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Review.GatewayProfiles) != 0 || cfg.Review.Models != nil {
+				t.Fatal("approval-only mutation introduced reviewers")
+			}
+			if action == "mode" && cfg.Review.Mode != "approval_only" || action == "exempt" && !reflect.DeepEqual(cfg.Review.ApprovalOnlyUsers, []string{current.Username}) {
+				t.Fatalf("explicit approval-only policy lost: %+v", cfg.Review)
+			}
+		})
 	}
 }
