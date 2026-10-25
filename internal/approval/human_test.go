@@ -12,6 +12,34 @@ import (
 	"github.com/jeremyakers/askdo/internal/telegram"
 )
 
+func TestOversizedReviewedDetailsFailBeforeAnythingIsSent(t *testing.T) {
+	// Given: a valid review whose expanded Details needs more messages than the
+	// Details sender accepts (32 long, entity-heavy warnings).
+	fake := faketelegram.New(t)
+	client, err := telegram.NewClient(telegram.ClientConfig{TokenFile: fake.TokenFile(t), BaseURL: fake.URL()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings := make([]proto.ReviewWarning, 32)
+	for i := range warnings {
+		warnings[i] = proto.ReviewWarning{Message: strings.Repeat("<&>", 1300), Evidence: strings.Repeat("<&>", 1300)}
+	}
+	facts := ReviewedFacts{
+		Bootstrap: proto.Bootstrap{RequestID: "2026-10-19_#3", Host: "fixture", Operation: proto.WorkerOperation{Mode: "argv", Argv: []string{"/usr/bin/true"}, CWD: "/", Reason: "test"}, ConfigProjection: proto.ConfigProjection{Telegram: proto.WorkerTelegram{ChatID: 7, OperatorUserID: 42, ApprovalTTLMS: (2 * time.Hour).Milliseconds()}}},
+		Frozen:    proto.Frozen{ManifestDigest: strings.Repeat("c", 64), Report: proto.ReviewReport{Risk: "2", Summary: "Long review.", Effects: []string{}, Warnings: warnings, MissingContext: []string{}, Reversibility: "n/a", IntentMatch: "consistent"}},
+		History:   []proto.ModelHistoryEntry{{Name: "fixture", Outcome: "ok"}},
+	}
+	sent := false
+	transport := Transport{Client: client, Progress: func(proto.Progress) error { return nil }, OnSent: func(proto.NotificationSent) error { sent = true; return nil }}
+	// When: the reviewed request is notified.
+	_, err = NotifyReviewed(context.Background(), transport, facts)
+	// Then: it fails before any Telegram message or durable notification, rather
+	// than delivering a card whose Details can never be shown.
+	if err == nil || len(fake.Sent()) != 0 || sent {
+		t.Fatalf("err=%v sent_messages=%d notification_recorded=%t", err, len(fake.Sent()), sent)
+	}
+}
+
 func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.T) {
 	// Given an early click before onSent, followed by a failed durable binding.
 	fake := faketelegram.New(t)
@@ -42,6 +70,9 @@ func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.
 	card, ok := fake.Card()
 	if !ok {
 		t.Fatal("fixture card was not delivered")
+	}
+	if len(fake.Sent()) != 1 {
+		t.Fatal("request sent separate summary messages")
 	}
 	if cleaned := fake.Cleaned(); len(cleaned) != 1 || cleaned[0].ChatID != 7 || cleaned[0].ID != card.ID {
 		t.Fatalf("cleanup=%+v", cleaned)

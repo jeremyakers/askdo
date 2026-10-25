@@ -33,7 +33,7 @@ func TestAutoNoticeAcknowledgedNoDecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := fake.Sent()
-	if n.Digest != notifyDigest || n.TimeUnixMS <= 0 || len(n.MessageIDs) < 2 || len(n.MessageIDs) != len(sent)-1 || n.NoticeID != sent[len(sent)-1].ID {
+	if n.Digest != notifyDigest || n.TimeUnixMS <= 0 || len(n.MessageIDs) != 0 || len(sent) != 1 || n.NoticeID != sent[0].ID {
 		t.Fatalf("notification=%+v sent=%+v", n, sent)
 	}
 	for i, msg := range sent {
@@ -45,12 +45,12 @@ func TestAutoNoticeAcknowledgedNoDecision(t *testing.T) {
 		}
 	}
 	notice := sent[len(sent)-1].Text
-	for _, want := range []string{"1/5", "auto-execution", "notification", "prelaunch checks"} {
+	for _, want := range []string{"Auto-approved by policy", "Risk 1/5", "No human approval was requested.", "<b>Runs:</b>", "<b>Why:</b>", "Concrete adverse assessment."} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("notice missing %q: %s", want, notice)
 		}
 	}
-	if !strings.Contains(notice, "job") || countCalls(fake.Calls(), "getUpdates") != 0 {
+	if !strings.Contains(notice, "0123456789abcdef0123456789abcdef") || countCalls(fake.Calls(), "getUpdates") != 0 {
 		t.Fatalf("unexpected notice or poll: %s %+v", notice, fake.Calls())
 	}
 	fake.QueueCallback(1, "spam", notifyOperator, notifyChat, n.NoticeID, "a:"+strings.Repeat("0", 32))
@@ -58,7 +58,7 @@ func TestAutoNoticeAcknowledgedNoDecision(t *testing.T) {
 }
 
 func TestAutoNoticeFailureFailsClosed(t *testing.T) {
-	for _, failCall := range []int{1, 2, 3} {
+	for _, failCall := range []int{1} {
 		t.Run(string(rune('0'+failCall)), func(t *testing.T) {
 			fake := faketelegram.New(t)
 			fake.FailSend(func(call int, _ string, _ bool) *faketelegram.APIError {
@@ -90,7 +90,7 @@ func TestNamedAutoNoticeAllRecipientsOrNoReport(t *testing.T) {
 			fake := faketelegram.New(t)
 			if failSecond {
 				fake.FailSend(func(call int, _ string, _ bool) *faketelegram.APIError {
-					if call == 3 {
+					if call == 2 {
 						return &faketelegram.APIError{Code: 403, Description: "blocked"}
 					}
 					return nil

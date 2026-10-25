@@ -64,7 +64,6 @@ func TestAutoApprovalPlanAndNotificationWire(t *testing.T) {
 		{Type: "notification_sent", Digest: digest, MessageIDs: []int64{1}, NoticeID: 2, TimeUnixMS: 1},
 		{Type: n.Type, Digest: "bad", MessageIDs: []int64{1}, NoticeID: 2, TimeUnixMS: 1},
 		{Type: n.Type, Digest: digest, MessageIDs: nil, NoticeID: 2, TimeUnixMS: 1},
-		{Type: n.Type, Digest: digest, MessageIDs: []int64{}, NoticeID: 2, TimeUnixMS: 1},
 		{Type: n.Type, Digest: digest, MessageIDs: []int64{0}, NoticeID: 2, TimeUnixMS: 1},
 		{Type: n.Type, Digest: digest, MessageIDs: make([]int64, 33), NoticeID: 2, TimeUnixMS: 1},
 		{Type: n.Type, Digest: digest, MessageIDs: []int64{1}, NoticeID: 0, TimeUnixMS: 1},

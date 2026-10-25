@@ -205,7 +205,7 @@ func TestStoreWakesDispatcherOnlyForCommitsItActsOn(t *testing.T) {
 	store, e, data, sub, _ := ticketFixture(t)
 	ctx := context.Background()
 	host, job, binding := string(sub.Ticket.Binding.HostID), string(sub.Ticket.Binding.JobID), sub.Ticket.Binding
-	approve := callback(10, 2, 1, 2, telegram.ActionApprove, binding.Nonce)
+	approve := callback(10, 2, 1, int64(sub.Ticket.Display.SummaryParts+1), telegram.ActionApprove, binding.Nonce)
 	step := func(name string, want bool, do func() error) {
 		t.Helper()
 		listener := e.changes.listen()

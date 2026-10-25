@@ -17,12 +17,11 @@ func useLocalZone(t *testing.T, zone *time.Location) {
 	t.Cleanup(func() { time.Local = previous })
 }
 
-func TestFleetSummaryPartsAreIdenticalInEveryHostZone(t *testing.T) {
+func TestFleetSummaryPartsAreZeroInEveryHostZone(t *testing.T) {
 	for _, kind := range []fleetproto.TicketKind{fleetproto.HumanReviewed, fleetproto.HumanUnreviewed, fleetproto.AutoNotice} {
 		t.Run(string(kind), func(t *testing.T) {
-			// Given: one ticket long enough to need several summary messages. A
-			// broker freezes the part count from its own render; the gateway
-			// re-renders on another host and rejects any count mismatch.
+			// Given: a long ticket whose full request belongs in Details. The
+			// broker and gateway still check the frozen initial part count.
 			ticket := fleetproto.Ticket{Binding: fleetproto.TicketBinding{JobID: "2026-10-24_#3", Nonce: strings.Repeat("a", 32), TicketKind: kind, ExpiresAt: time.Date(2026, 10, 24, 11, 56, 27, 0, time.UTC).Unix()}, Display: fleetproto.Display{Operation: strings.Repeat("printf 'fleet chunk boundary fact'\n", 260), Identity: fleetproto.Identity{Hostname: "host", Username: "user", SubmitterUID: 1000}, UnreviewedReason: "policy"}}
 			if kind != fleetproto.HumanUnreviewed {
 				ticket.Display.UnreviewedReason = ""
@@ -46,8 +45,8 @@ func TestFleetSummaryPartsAreIdenticalInEveryHostZone(t *testing.T) {
 			gateway := render(time.FixedZone("ACST", 9*60*60+30*60))
 			// Then: the counted summary messages are byte-identical, so the
 			// frozen count always matches.
-			if len(broker.Parts) < 2 {
-				t.Fatalf("fixture must span several parts, got %d", len(broker.Parts))
+			if len(broker.Parts) != 0 || len(gateway.Parts) != 0 {
+				t.Fatalf("initial summaries remain: broker=%d gateway=%d", len(broker.Parts), len(gateway.Parts))
 			}
 			if strings.Join(broker.Parts, "\x00") != strings.Join(gateway.Parts, "\x00") {
 				t.Fatalf("summary depends on the rendering host's zone: %d vs %d parts", len(broker.Parts), len(gateway.Parts))

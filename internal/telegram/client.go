@@ -508,9 +508,6 @@ func (c *Client) responseDiagnostic(body []byte) string {
 // the part message IDs (in order) and the card message ID for the
 // notification_sent report.
 func SendApproval(ctx context.Context, c *Client, chatID int64, parts []string, cardText string, keyboard InlineKeyboardMarkup) (messageIDs []int64, cardID int64, err error) {
-	if len(parts) == 0 {
-		return nil, 0, errors.New("telegram: approval requires at least one summary part")
-	}
 	messageIDs = make([]int64, 0, len(parts))
 	for i, part := range parts {
 		id, err := c.SendHTMLMessage(ctx, chatID, part, nil)
@@ -614,7 +611,7 @@ func SendAutoNotices(ctx context.Context, c *Client, chatIDs []int64, parts []st
 // SendAutoNotice requires Bot API acknowledgments for all summary parts and
 // the final button-free notice; an ambiguous result is never authorization.
 func SendAutoNotice(ctx context.Context, c *Client, chatID int64, parts []string, notice string) ([]int64, int64, error) {
-	if len(parts) < 1 || len(parts) > 32 || notice == "" {
+	if len(parts) > 32 || notice == "" {
 		return nil, 0, errors.New("telegram: invalid auto notification")
 	}
 	ids := make([]int64, 0, len(parts))

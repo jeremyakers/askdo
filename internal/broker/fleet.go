@@ -626,7 +626,7 @@ func (j *jobRuntime) validateFleetEvent(e fleetproto.Event) error {
 func (j *jobRuntime) fleetNotification() *proto.NotificationSent {
 	n := &proto.NotificationSent{Type: "notification_sent", Digest: string(j.fleet.ticket.Binding.ManifestDigest), ExpiryUnixMS: j.fleet.ticket.Binding.ExpiresAt * 1000}
 	for _, d := range j.fleet.receipt.Deliveries {
-		n.Targets = append(n.Targets, proto.NotificationTarget{ChatID: d.Recipient.ChatID, OperatorUserIDs: append([]int64(nil), d.Recipient.OperatorUserIDs...), CardID: d.CardMessageID, MessageIDs: append([]int64(nil), d.SummaryMessageIDs...)})
+		n.Targets = append(n.Targets, proto.NotificationTarget{ChatID: d.Recipient.ChatID, OperatorUserIDs: append([]int64(nil), d.Recipient.OperatorUserIDs...), CardID: d.CardMessageID, MessageIDs: append([]int64{}, d.SummaryMessageIDs...)})
 	}
 	return n
 }
@@ -666,7 +666,7 @@ func (j *jobRuntime) commitFleetAuto(ctx context.Context, digest string, plan *p
 	}
 	targets := []proto.AutoNotificationTarget{}
 	for _, d := range j.fleet.receipt.Deliveries {
-		targets = append(targets, proto.AutoNotificationTarget{ChatID: d.Recipient.ChatID, NoticeID: d.NoticeMessageID, MessageIDs: append([]int64(nil), d.SummaryMessageIDs...)})
+		targets = append(targets, proto.AutoNotificationTarget{ChatID: d.Recipient.ChatID, NoticeID: d.NoticeMessageID, MessageIDs: append([]int64{}, d.SummaryMessageIDs...)})
 	}
 	j.mu.Lock()
 	if j.state != store.StateReviewing {

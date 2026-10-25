@@ -5,16 +5,16 @@ import (
 	"testing"
 )
 
-func TestReviewedSummarySourceContract(t *testing.T) {
+func TestReviewedDetailsSourceContract(t *testing.T) {
 	in := testCardInput()
 	in.WithheldRefs = []string{"bundle:<secret>&.env"}
 	in.WithheldCount = 2
-	parts, err := RenderSummaryParts(in)
+	parts, err := RenderDetails(DetailsInput{CardInput: in})
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := strings.Join(parts, "")
-	for _, expected := range []string{"<b>Review summary</b>", "Credential content withheld from AI review: 2", "bundle:&lt;secret&gt;&amp;.env"} {
+	for _, expected := range []string{"<b>Review summary</b>", "Credential content withheld: 2", "bundle:&lt;secret&gt;&amp;.env"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("missing %q in %s", expected, text)
 		}

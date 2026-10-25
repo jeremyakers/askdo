@@ -660,7 +660,7 @@ func ValidateWorkerMessage(message any, direction Direction) error {
 		return ValidateWorkerMessage(*m, direction)
 	case AutoNotificationSent:
 		expected = WorkerToBroker
-		if m.Type != "auto_notification_sent" || !digestPattern.MatchString(m.Digest) || m.TimeUnixMS <= 0 || (len(m.Targets) == 0 && (m.Targets != nil || len(m.MessageIDs) < 1 || len(m.MessageIDs) > 32 || m.NoticeID <= 0)) || (len(m.Targets) != 0 && (m.MessageIDs == nil || len(m.MessageIDs) != 0 || m.NoticeID != 0 || !validAutoNotificationTargets(m.Targets))) {
+		if m.Type != "auto_notification_sent" || !digestPattern.MatchString(m.Digest) || m.TimeUnixMS <= 0 || (len(m.Targets) == 0 && (m.Targets != nil || m.MessageIDs == nil || len(m.MessageIDs) > 32 || m.NoticeID <= 0)) || (len(m.Targets) != 0 && (m.MessageIDs == nil || len(m.MessageIDs) != 0 || m.NoticeID != 0 || !validAutoNotificationTargets(m.Targets))) {
 			return errors.New("invalid auto_notification_sent")
 		}
 		for _, id := range m.MessageIDs {
@@ -1226,7 +1226,7 @@ func validNotificationTargets(targets []NotificationTarget) bool {
 	}
 	seen := map[int64]bool{}
 	for _, t := range targets {
-		if t.ChatID == 0 || seen[t.ChatID] || t.CardID <= 0 || len(t.MessageIDs) == 0 || len(t.MessageIDs) > 32 || !validOperatorIDs(t.OperatorUserIDs) {
+		if t.ChatID == 0 || seen[t.ChatID] || t.CardID <= 0 || t.MessageIDs == nil || len(t.MessageIDs) > 32 || !validOperatorIDs(t.OperatorUserIDs) {
 			return false
 		}
 		seen[t.ChatID] = true
@@ -1245,7 +1245,7 @@ func validAutoNotificationTargets(targets []AutoNotificationTarget) bool {
 	}
 	seen := map[int64]bool{}
 	for _, t := range targets {
-		if t.ChatID == 0 || seen[t.ChatID] || t.NoticeID <= 0 || len(t.MessageIDs) == 0 || len(t.MessageIDs) > 32 {
+		if t.ChatID == 0 || seen[t.ChatID] || t.NoticeID <= 0 || t.MessageIDs == nil || len(t.MessageIDs) > 32 {
 			return false
 		}
 		seen[t.ChatID] = true

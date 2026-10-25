@@ -14,8 +14,10 @@ const DefaultPollTimeoutSeconds = 25
 // maxPollTimeoutSeconds bounds the long-poll timeout.
 const maxPollTimeoutSeconds = 600
 
-// maxDetailsParts bounds the pre-rendered Details message sequence.
-const maxDetailsParts = 32
+// MaxDetailsParts retains the combined former 32-part summary + 32-part Details
+// budget now that all expanded request and review facts live behind Details.
+// Callers check it before delivering a card whose Details could not be sent.
+const MaxDetailsParts = 64
 
 // Callback acknowledgement texts. Acks are best-effort cleanup (design §9
 // step 5), never the authorization mechanism.
@@ -132,8 +134,8 @@ func NewPoller(client *Client, cfg PollerConfig) (*Poller, error) {
 		return nil, errors.New("telegram: poller requires an expiry time")
 	case cfg.PollTimeoutSec < 0 || cfg.PollTimeoutSec > maxPollTimeoutSeconds:
 		return nil, fmt.Errorf("telegram: poll timeout must be 0-%d seconds", maxPollTimeoutSeconds)
-	case len(cfg.DetailsParts) > maxDetailsParts:
-		return nil, fmt.Errorf("telegram: details exceed %d parts", maxDetailsParts)
+	case len(cfg.DetailsParts) > MaxDetailsParts:
+		return nil, fmt.Errorf("telegram: details exceed %d parts", MaxDetailsParts)
 	}
 	for i, part := range cfg.DetailsParts {
 		if part == "" || runeCount(part) > MaxMessageRunes {
@@ -242,10 +244,12 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 			p.ack(ctx, cb.ID, ackNoDetail)
 			return Decision{}, false, nil
 		}
+		// Answer first: a long Details sequence must not leave the operator's
+		// Telegram spinner waiting on every message.
+		p.ack(ctx, cb.ID, "")
 		if _, err := SendDetails(ctx, p.client, target.ChatID, p.cfg.DetailsParts); err != nil {
 			return Decision{}, false, err
 		}
-		p.ack(ctx, cb.ID, "")
 		return Decision{}, false, nil
 	}
 

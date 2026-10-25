@@ -63,6 +63,26 @@ func TestCommitAutoStartAuditAndReplay(t *testing.T) {
 	}
 }
 
+func TestCommitAutoStartWithZeroSummaryParts(t *testing.T) {
+	// Given: eligible durable policy and an acknowledged notice only.
+	s := openTestStore(t)
+	a := autoFixture(t, s, "zero-summary")
+	a.SummaryMessageIDs = []int64{}
+	ctx := context.Background()
+	if err := s.SetAutoApprovalThreshold(ctx, a.UID, 2); err != nil {
+		t.Fatal(err)
+	}
+	// When: the broker commits that delivery.
+	ok, err := s.CommitAutoStart(ctx, a)
+	// Then: the notice permits the same once-only policy transition.
+	if err != nil || !ok {
+		t.Fatalf("commit=%v err=%v", ok, err)
+	}
+	if replay, err := s.CommitAutoStart(ctx, a); err != nil || replay {
+		t.Fatalf("replay=%v err=%v", replay, err)
+	}
+}
+
 func TestCommitAutoStartAdminCapAndPreference(t *testing.T) {
 	s := openTestStore(t)
 	a := autoFixture(t, s, "cap")

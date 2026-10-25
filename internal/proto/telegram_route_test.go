@@ -77,3 +77,26 @@ func TestNamedTelegramNotificationAndDecisionValidation(t *testing.T) {
 		t.Fatal("named decision without chat accepted")
 	}
 }
+
+func TestZeroSummaryNotificationReceipts(t *testing.T) {
+	// Given: positive card/notice receipts, without summary messages.
+	digest := strings.Repeat("a", 64)
+	messages := []any{
+		NotificationSent{Type: "notification_sent", Digest: digest, ExpiryUnixMS: 100, CardID: 4, MessageIDs: []int64{}},
+		NotificationSent{Type: "notification_sent", Digest: digest, ExpiryUnixMS: 100, MessageIDs: []int64{}, Targets: []NotificationTarget{{ChatID: 22, CardID: 4, MessageIDs: []int64{}, OperatorUserIDs: []int64{33}}}},
+		AutoNotificationSent{Type: "auto_notification_sent", Digest: digest, TimeUnixMS: 100, NoticeID: 4, MessageIDs: []int64{}},
+		AutoNotificationSent{Type: "auto_notification_sent", Digest: digest, TimeUnixMS: 100, MessageIDs: []int64{}, Targets: []AutoNotificationTarget{{ChatID: 22, NoticeID: 4, MessageIDs: []int64{}}}},
+	}
+	for _, message := range messages {
+		// When: the receipt passes through the private wire decoder.
+		wire, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = DecodeWorkerMessage(wire, WorkerToBroker)
+		// Then: a required empty array is a valid delivery receipt.
+		if err != nil {
+			t.Errorf("%T: %v", message, err)
+		}
+	}
+}

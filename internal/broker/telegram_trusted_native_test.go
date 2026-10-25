@@ -39,7 +39,7 @@ func TestTelegramTrustedNativeReadRequiresOperatorApprovalOnce(t *testing.T) {
 		result <- client.Run(context.Background(), []string{"--detach", "--review=yes", "--reason", "native read review", "--", target, "-u"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
 	}()
 	card := awaitTelegramCard(t, fake)
-	if card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" || len(executor.Snapshot()) != 0 || len(fake.Sent()) < 2 || !strings.Contains(fake.Sent()[0].Text, "Reviewer") {
+	if card.ButtonData("a:") == "" || card.ButtonData("d:") == "" || card.ButtonData("v:") == "" || len(executor.Snapshot()) != 0 || len(fake.Sent()) != 1 || !strings.Contains(card.Text, "Risk 1/5") {
 		t.Fatalf("review card=%+v executions=%d", card, len(executor.Snapshot()))
 	}
 	select {

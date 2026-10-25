@@ -338,8 +338,8 @@ func assertNamedDeliveries(t *testing.T, fake *faketelegram.Server, recipients .
 			if len(m.Buttons) == 0 {
 				summaries = append(summaries, m.ID)
 			} else {
-				if len(summaries) == 0 || m.ButtonData("a:") == "" || m.ButtonData("d:") == "" || m.ButtonData("v:") == "" || cards[chat].ID != 0 {
-					t.Fatalf("summary must precede one card for chat %d: %+v", chat, sent)
+				if len(summaries) != 0 || m.ButtonData("a:") == "" || m.ButtonData("d:") == "" || m.ButtonData("v:") == "" || cards[chat].ID != 0 {
+					t.Fatalf("request must be one card for chat %d: %+v", chat, sent)
 				}
 				cards[chat] = m
 			}
@@ -379,7 +379,7 @@ func TestNamedRouteRealTelegramApprovalAndPeerIsolation(t *testing.T) {
 	}
 	for i, chat := range []int64{namedOpsChat1, namedOpsChat2} {
 		target := approval.Targets[i]
-		if target.ChatID != chat || target.CardID != cards[chat].ID || len(target.MessageIDs) == 0 {
+		if target.ChatID != chat || target.CardID != cards[chat].ID || target.MessageIDs == nil || len(target.MessageIDs) != 0 {
 			t.Fatalf("missing recipient %d in binding: %+v", chat, target)
 		}
 		// This checks the real SendApproval return shape. Putting the card
@@ -408,7 +408,7 @@ func TestNamedRouteRealTelegramApprovalAndPeerIsolation(t *testing.T) {
 	for i, invalid := range []struct{ user, chat, message int64 }{
 		{namedOpsUser2, namedOpsChat1, card.ID},
 		{namedSoloUser, namedOpsChat2, card.ID},
-		{namedOpsUser2, namedOpsChat2, approval.Targets[1].MessageIDs[0]},
+		{namedOpsUser2, namedOpsChat2, card.ID + 1000},
 	} {
 		b.ops.QueueCallback(int64(i+1), fmt.Sprintf("invalid-%d", i), invalid.user, invalid.chat, invalid.message, card.ButtonData("a:"))
 		namedWait(t, b.answers, b.tokens[0])
@@ -536,7 +536,7 @@ func TestNamedRouteSecondRecipientCardFailureNeverStarts(t *testing.T) {
 	}
 	waitForState(t, h.daemon.store, peerA, req.RequestID, store.StateFailed)
 	sent := b.ops.Sent()
-	if cards != 2 || len(sent) < 3 || namedCard(t, b.ops, namedOpsChat1).ID == 0 {
+	if cards != 2 || len(sent) != 1 || namedCard(t, b.ops, namedOpsChat1).ID == 0 {
 		t.Fatalf("second recipient card did not fail after first completed: %+v", sent)
 	}
 	for _, m := range sent {
@@ -554,7 +554,7 @@ func TestNamedRouteAutoMissingRecipientNoticeNeverStarts(t *testing.T) {
 	cfg := namedConfig(t, b, true)
 	notices := 0
 	b.ops.FailSend(func(_ int, text string, _ bool) *faketelegram.APIError {
-		if strings.Contains(text, "auto-execution") {
+		if strings.Contains(text, "Auto-approved by policy") {
 			notices++
 			if notices == 2 {
 				return &faketelegram.APIError{Code: 500, Description: "notice rejected"}

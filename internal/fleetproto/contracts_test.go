@@ -62,6 +62,29 @@ func TestSignedRoundTripAndExactBytes(t *testing.T) {
 	}
 }
 
+func TestZeroSummaryTicketAndReceipt(t *testing.T) {
+	// Given: a frozen zero-part ticket and a separate positive card receipt.
+	ticket, receipt, _ := fixture(t)
+	ticket.Display.SummaryParts = 0
+	var err error
+	ticket.Binding.DisplayHash, err = HashDisplay(ticket.Display)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Binding = ticket.Binding
+	receipt.Deliveries[0].SummaryMessageIDs = []int64{}
+	// When: each wire object is validated.
+	ticketErr, receiptErr := Validate(ticket), Validate(receipt)
+	// Then: zero parts are accepted without losing the final receipt requirement.
+	if ticketErr != nil || receiptErr != nil {
+		t.Fatalf("ticket=%v receipt=%v", ticketErr, receiptErr)
+	}
+	receipt.Deliveries[0].CardMessageID = 0
+	if Validate(receipt) == nil {
+		t.Fatal("missing card accepted")
+	}
+}
+
 func TestRootChecksFrozenFactsAndCompleteness(t *testing.T) {
 	ticket, receipt, decision := fixture(t)
 	route := RouteSnapshot{Version: Version, Kind: KindRoute, ChannelID: "channel1", Revision: ticket.Binding.RouteHash, BotID: 9, TTLSeconds: 100, Recipients: []Recipient{{ChatID: -123, OperatorUserIDs: []int64{42}}}}
@@ -137,7 +160,7 @@ func TestStrictSignedPayloads(t *testing.T) {
 	public, private, _ := ed25519.GenerateKey(rand.Reader)
 	ticket, _, _ := fixture(t)
 	good, _ := json.Marshal(ticket)
-	cases := []string{`null`, string(good) + ` {}`, strings.Replace(string(good), `"version":1`, `"version":2`, 1), strings.Replace(string(good), `"kind":"ticket"`, `"kind":"receipt"`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"version":1`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"unknown":true`, 1), strings.Replace(string(good), `,"submitter_uid":0`, "", 1), strings.Replace(string(good), `"summary_parts":1`, `"summary_parts":0`, 1)}
+	cases := []string{`null`, string(good) + ` {}`, strings.Replace(string(good), `"version":1`, `"version":2`, 1), strings.Replace(string(good), `"kind":"ticket"`, `"kind":"receipt"`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"version":1`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"unknown":true`, 1), strings.Replace(string(good), `,"submitter_uid":0`, "", 1), strings.Replace(string(good), `"summary_parts":1`, `"summary_parts":-1`, 1)}
 	for i, p := range cases {
 		env := Envelope{Payload: base64.StdEncoding.EncodeToString([]byte(p)), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, append([]byte(SigningDomain), []byte(p)...)))}
 		wire, _ := json.Marshal(env)

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -21,14 +22,31 @@ type FleetRendering struct {
 	Details  []string
 }
 
+// RenderFleet renders a ticket identically on the broker and the gateway. It
+// fails when Details would exceed what a Details tap may send, so neither side
+// delivers a card whose Details could never be shown.
 func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
+	out, err := renderFleet(ticket)
+	// Auto notices send no Details, so their unused rendering is not limited.
+	if err == nil && ticket.Binding.TicketKind != fleetproto.AutoNotice && len(out.Details) > MaxDetailsParts {
+		return FleetRendering{}, fmt.Errorf("telegram: fleet details exceed %d parts", MaxDetailsParts)
+	}
+	return out, err
+}
+
+func renderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	d, b := ticket.Display, ticket.Binding
 	out := FleetRendering{}
 	if d.Report == nil {
 		in := ApprovalOnlyInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, Expiry: time.Unix(b.ExpiresAt, 0), Failures: d.AvailabilityHistory}
 		in.CapturedStdinKind = d.CapturedStdinKind
+		in.WithheldCount = fleetWithheldCount(d.Withholding)
 		var err error
 		out.Parts, err = RenderApprovalOnlySummaryParts(in)
+		if err != nil {
+			return out, err
+		}
+		out.Details, err = RenderApprovalOnlyDetails(in)
 		if err != nil {
 			return out, err
 		}
@@ -42,9 +60,8 @@ func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 			if err != nil {
 				return out, err
 			}
-			out.Parts = append(out.Parts, extra...)
+			out.Details = append(out.Details, extra...)
 		}
-		out.Details = out.Parts
 		var kb InlineKeyboardMarkup
 		out.Final, kb, err = RenderApprovalOnlyCard(in, b.Nonce)
 		out.Keyboard = &kb
@@ -58,10 +75,15 @@ func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	}
 	in := CardInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, Report: *d.Report, ReviewerModel: model, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, Expiry: time.Unix(b.ExpiresAt, 0)}
 	in.CapturedStdinKind = d.CapturedStdinKind
+	in.WithheldCount = fleetWithheldCount(d.Withholding)
 	// Withholding is display text rather than path references; escape all facts
 	// with the existing chunker rather than reinterpret them as filesystem paths.
 	var err error
 	out.Parts, err = RenderSummaryParts(in)
+	if err != nil {
+		return out, err
+	}
+	out.Details, err = RenderDetails(DetailsInput{CardInput: in, ModelHistory: d.ModelHistory})
 	if err != nil {
 		return out, err
 	}
@@ -74,24 +96,35 @@ func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 		if e != nil {
 			return out, e
 		}
-		out.Parts = append(extra, out.Parts...)
-	}
-	out.Details, err = RenderDetails(DetailsInput{CardInput: in, ModelHistory: d.ModelHistory})
-	if err != nil {
-		return out, err
+		out.Details = append(out.Details, extra...)
 	}
 	if b.TicketKind == fleetproto.AutoNotice {
 		score, e := strconv.Atoi(d.Report.Risk)
 		if e != nil {
 			return out, errors.New("telegram: invalid auto risk")
 		}
-		out.Final, err = RenderAutoNotice(string(b.JobID), score)
+		out.Final, err = RenderAutoNotice(in, score)
 	} else {
 		var kb InlineKeyboardMarkup
 		out.Final, kb, err = RenderReviewedCard(in, b.Nonce)
 		out.Keyboard = &kb
 	}
 	return out, err
+}
+
+// The existing frozen display encodes the broker's total before its bounded
+// reference list. Preserve that total without changing the fleet report wire.
+// Other display facts still get a visible withholding notice and full Details.
+func fleetWithheldCount(facts []string) int {
+	if len(facts) == 0 {
+		return 0
+	}
+	if total, ok := strings.CutSuffix(facts[0], " credential-like paths withheld"); ok {
+		if count, err := strconv.Atoi(total); err == nil && count > 0 && count <= 1000000 {
+			return count
+		}
+	}
+	return len(facts)
 }
 
 // ParseCallbackData exposes the exact a/d/v/r + lowercase nonce parser.

@@ -48,7 +48,7 @@ func TestMissingDirectReadStillGetsReviewedOperatorCard(t *testing.T) {
 	for _, message := range fake.Sent() {
 		texts += message.Text
 	}
-	if !strings.Contains(texts, "/usr/bin/id") || !strings.Contains(texts, "<b>Review summary</b>") || strings.Contains(texts, "LLM-selected review: completeness not mechanically checked") || strings.Contains(texts, "INCOMPLETE REVIEW") || strings.Contains(texts, "not_found 1") || strings.Contains(texts, "NO AI REVIEW") {
+	if !strings.Contains(texts, "/usr/bin/id") || !strings.Contains(texts, "Runs /usr/bin/true, which exits successfully without side effects.") || strings.Contains(texts, "LLM-selected review: completeness not mechanically checked") || strings.Contains(texts, "INCOMPLETE REVIEW") || strings.Contains(texts, "not_found 1") || strings.Contains(texts, "NO AI REVIEW") {
 		t.Fatalf("incorrect operator warning: %s", texts)
 	}
 	fake.QueueCallback(1, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
@@ -160,7 +160,7 @@ func TestMaskedBundleEntryStillNeedsHumanApproval(t *testing.T) {
 	for _, message := range fake.Sent() {
 		texts += message.Text
 	}
-	if !strings.Contains(texts, "Credential content withheld from AI review: 1") || !strings.Contains(texts, ".env") || strings.Contains(texts, "INCOMPLETE REVIEW") || len(executor.Snapshot()) != 0 {
+	if !strings.Contains(texts, "Content withheld from AI review: 1 item(s)") || !strings.Contains(texts, ".env") || strings.Contains(texts, "INCOMPLETE REVIEW") || len(executor.Snapshot()) != 0 {
 		t.Fatalf("masked entry warning/approval absent: %s", texts)
 	}
 	fake.QueueCallback(1, "approve", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))

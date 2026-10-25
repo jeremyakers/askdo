@@ -102,6 +102,7 @@ type ApprovalOnlyInput struct {
 	TargetUID, SubmitterUID                                       uint32
 	Expiry                                                        time.Time
 	Failures                                                      []proto.AvailabilityFailure
+	WithheldCount                                                 int
 }
 
 var safeProviderName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
@@ -148,6 +149,9 @@ func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
 		}
 		blocks = append(blocks, fmt.Sprintf("- <code>%s</code>: %s\n", esc(name), status))
 	}
+	if in.WithheldCount > 0 {
+		blocks = append(blocks, fmt.Sprintf("<b>Credential content withheld: %d</b>\n", in.WithheldCount))
+	}
 	blocks = append(blocks, fmt.Sprintf("<b>Host:</b> <code>%s / %s</code>\n", esc(in.Host), esc(in.JobID)))
 	if env := stripControls(in.Container); env != "" {
 		blocks = append(blocks, fmt.Sprintf("<b>Environment:</b> %s\n", esc(env)))
@@ -168,14 +172,21 @@ func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
 	if in.CapturedStdinBytes > 0 {
 		blocks = append(blocks, fmt.Sprintf("<b>Input:</b> captured script input (%d bytes); %s; review via bundle:stdin\n", in.CapturedStdinBytes, capturedDeliveryLabel(in.CapturedStdinKind)))
 	}
-	// No expiry here: summary parts are counted across hosts (see expiryText).
-	blocks = append(blocks, fmt.Sprintf("\nJob <code>%s</code>\n", esc(in.JobID)))
+	blocks = append(blocks, fmt.Sprintf("\nJob <code>%s</code> · expires %s\n", esc(in.JobID), esc(expiryText(in.Expiry))))
 	return blocks, nil
 }
 
-// RenderApprovalOnlySummaryParts posts all unreviewed warnings before any
-// potentially long command; every part precedes the actionable keyboard.
+// RenderApprovalOnlySummaryParts validates the facts but emits no initial
+// summary messages. The compact card is the whole request.
 func RenderApprovalOnlySummaryParts(in ApprovalOnlyInput) ([]string, error) {
+	if _, err := approvalOnlyBlocks(in); err != nil {
+		return nil, err
+	}
+	return []string{}, nil
+}
+
+// RenderApprovalOnlyDetails is informational, with no report or decision controls.
+func RenderApprovalOnlyDetails(in ApprovalOnlyInput) ([]string, error) {
 	blocks, err := approvalOnlyBlocks(in)
 	if err != nil {
 		return nil, err
@@ -187,7 +198,7 @@ func RenderApprovalOnlySummaryParts(in ApprovalOnlyInput) ([]string, error) {
 	warning := "<b>UNASSESSED:</b> No independent AI assessment took place. Consequences and risks, rollback, and dependency completeness were NOT assessed. Approving permits execution without an AI review.\n"
 	static := "<b>NO AI REVIEW</b>\n" + why + warning
 	parts, err := chunkBlocks(blocks, func(i, n int) string {
-		return static + fmt.Sprintf("Job %s — unreviewed summary part %d/%d:\n\n", esc(in.JobID), i, n)
+		return static + fmt.Sprintf("Job %s — unreviewed details part %d/%d:\n\n", esc(in.JobID), i, n)
 	})
 	if err != nil {
 		return nil, err
@@ -198,14 +209,12 @@ func RenderApprovalOnlySummaryParts(in ApprovalOnlyInput) ([]string, error) {
 	return parts, nil
 }
 
-// RenderApprovalOnlyDetails is informational, with no report or decision controls.
-func RenderApprovalOnlyDetails(in ApprovalOnlyInput) ([]string, error) {
-	return RenderApprovalOnlySummaryParts(in)
-}
-
 // RenderApprovalOnlyCard reuses the fixed nonce-bound controls but does not
 // imply that an expanded AI review exists behind Details.
 func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineKeyboardMarkup, error) {
+	if _, err := approvalOnlyBlocks(in); err != nil {
+		return "", InlineKeyboardMarkup{}, err
+	}
 	_, kb, err := RenderCard(in.JobID, nonce)
 	if err != nil {
 		return "", kb, err
@@ -214,7 +223,8 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 	if len(in.Failures) > 0 {
 		reason = "providers unavailable"
 	}
-	return fmt.Sprintf("<b>NO AI REVIEW</b> · %s. Consequences/risks, rollback and dependency completeness were NOT assessed. Job <code>%s</code> expires %s. Approve once executes exactly one time without AI review; Deny rejects; Details shows unreviewed facts only.", reason, esc(in.JobID), esc(expiryText(in.Expiry))), kb, nil
+	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
+	return "⚠️ <b>NO AI REVIEW</b> — " + reason + ". Risks NOT assessed.\n" + compactIdentity(facts, expiryText(in.Expiry)) + compactOperation(facts, "Details"), kb, nil
 }
 
 // expiryLayout shows an approval deadline as wall-clock time in the rendering
@@ -222,32 +232,19 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 // and year stay because approval windows have no maximum length. Minutes
 // truncate, so a card never shows a later deadline than the real one.
 //
-// Local text varies in length with the host's zone, so it appears only in the
-// single actionable card. Summary parts must render identically on every host:
-// in fleet mode the broker freezes their count and the gateway, in its own
-// zone, re-renders and rejects any mismatch.
+// Local text varies with the rendering host's zone. Initial summary parts are
+// always empty; fleet still freezes their count and rejects any mismatch.
 const expiryLayout = "Mon Jan 2, 2006, 3:04 PM MST"
 
 func expiryText(deadline time.Time) string { return deadline.Local().Format(expiryLayout) }
 
-// RenderSummaryParts renders the complete required summary as an ordered
-// sequence of HTML message texts. If the summary fits one message the
-// result is a single unnumbered part; otherwise parts are numbered
-// ("part i/n") and each is at most MaxMessageRunes AFTER entity parsing
-// (counted as escaped length), targeting TargetChunkRunes. Chunk
-// boundaries prefer section boundaries; each part carries complete,
-// balanced tags — a section longer than one part splits its escaped body
-// mid-section across re-opened continuation blocks. Warnings and
-// uncertainties are never dropped. Every part must be sent before the
-// approval card (SendApproval enforces the ordering and fails closed).
+// RenderSummaryParts validates the facts but emits no initial summaries.
+// The actionable card carries the compact review; Details holds its expansion.
 func RenderSummaryParts(in CardInput) ([]string, error) {
 	if err := validateCardInput(in); err != nil {
 		return nil, err
 	}
-	blocks := summaryBlocks(in)
-	return chunkBlocks(blocks, func(i, n int) string {
-		return fmt.Sprintf("Job %s — summary part %d/%d:\n\n", esc(in.JobID), i, n)
-	})
+	return []string{}, nil
 }
 
 // RenderCard builds the short approval-card text and the fixed
@@ -277,7 +274,7 @@ func RenderCard(jobID, nonce string) (string, InlineKeyboardMarkup, error) {
 		row = append(row, InlineKeyboardButton{Text: b.label, CallbackData: data})
 	}
 	kb.InlineKeyboard = [][]InlineKeyboardButton{row}
-	text := fmt.Sprintf("Approval required for job %s (details above). Approve once executes exactly one time; Deny rejects the job; Details shows the expanded review.", esc(jobID))
+	text := "Job " + esc(jobID)
 	return text, kb, nil
 }
 
@@ -288,23 +285,152 @@ func RenderReviewedCard(in CardInput, nonce string) (string, InlineKeyboardMarku
 	if err := validateCardInput(in); err != nil {
 		return "", kb, err
 	}
-	text, kb, err := RenderCard(in.JobID, nonce)
+	_, kb, err := RenderCard(in.JobID, nonce)
 	if err != nil {
 		return "", kb, err
 	}
 	// RenderCard already validated the nonce. Only reviewed cards offer advice.
 	kb.InlineKeyboard[0] = slices.Insert(kb.InlineKeyboard[0], 2, InlineKeyboardButton{Text: "Request changes", CallbackData: ActionRequestChanges + ":" + nonce})
-	text += " Request changes rejects execution and returns review feedback for a new submission."
-	return "Security risk: " + securityRiskScore(in.Report.Risk) + ". Expires " + esc(expiryText(in.Expiry)) + ". " + text, kb, nil
+	return riskHeading(in.Report.Risk) + " — " + verdict(in.Report, blankVerdict) + "\n" + compactIdentity(in, expiryText(in.Expiry)) + compactWarnings(in.Report, "Details") + compactOperation(in, "Details"), kb, nil
 }
 
 // RenderAutoNotice constructs a non-actionable policy notice from broker-frozen
 // numeric facts. It never claims an operator approved the operation.
-func RenderAutoNotice(jobID string, score int) (string, error) {
-	if jobID == "" || len(jobID) > 64 || stripControls(jobID) != jobID || score < 1 || score > 4 {
+func RenderAutoNotice(in CardInput, score int) (string, error) {
+	if err := validateCardInput(in); err != nil {
+		return "", err
+	}
+	if stripControls(in.JobID) != in.JobID || score < 1 || score > 4 {
 		return "", errors.New("telegram: invalid auto-approval notice")
 	}
-	return fmt.Sprintf("<b>Auto-approval policy notice</b> · job <code>%s</code> · Security risk: %d/5. Policy selected auto-execution after notification and prelaunch checks. No human approval was requested or recorded.", esc(jobID), score), nil
+	heading := strings.Replace(riskHeading(strconv.Itoa(score)), "<b>Risk", "<b>Auto-approved by policy · Risk", 1)
+	// The review log is root-only and defaults to the last day, so give the
+	// form that works whenever the notice is read.
+	rest := "<code>sudo askdo review log --job " + compactEsc(in.JobID, 384) + " --since 0</code> on " + compactEsc(in.Host, 160)
+	return heading + " — " + verdict(in.Report, blankAutoVerdict) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report, rest) + compactOperation(in, rest) + "\nNo human approval was requested.", nil
+}
+
+// blankVerdict replaces a summary with no words, so a card never shows a risk
+// score with nothing after it; the full report remains behind Details.
+const blankVerdict = "No verdict from the reviewer; check Details before approving."
+
+// blankAutoVerdict is the auto-notice form: the notice has no Details or
+// approval controls to point to.
+const blankAutoVerdict = "No verdict from the reviewer."
+
+func verdict(report proto.ReviewReport, fallback string) string {
+	if text := compactLine(report.Summary, 240); text != "" {
+		return text
+	}
+	return fallback
+}
+
+func riskHeading(risk string) string {
+	marker := "❔"
+	switch risk {
+	case "1", "2":
+		marker = "🟢"
+	case "3":
+		marker = "🟡"
+	case "4", "5":
+		marker = "🔴"
+	default:
+		return marker + " <b>Risk unknown</b>"
+	}
+	return marker + " <b>Risk " + risk + "/5</b>"
+}
+
+// Budgets count escaped runes, including entity spelling, not raw input. The
+// fixed field budgets plus tags/labels keep even a fully populated hostile card
+// below TargetChunkRunes. Truncate raw runes, then escape: never cut an entity.
+func compactEsc(text string, budget int) string {
+	text = stripControls(text)
+	if utf8.RuneCountInString(html.EscapeString(text)) <= budget {
+		return html.EscapeString(text)
+	}
+	used, cut := 0, 0
+	for i, r := range text {
+		cost := utf8.RuneCountInString(html.EscapeString(string(r)))
+		if used+cost > budget-1 {
+			break
+		}
+		used += cost
+		cut = i + utf8.RuneLen(r)
+	}
+	return html.EscapeString(text[:cut]) + "…"
+}
+
+func compactLine(text string, budget int) string {
+	return compactEsc(strings.Join(strings.Fields(text), " "), budget)
+}
+
+// compactIdentity names the server/job, submitter and target. deadline is the
+// decision deadline of an actionable card; auto notices pass "" because the
+// command does not wait for anyone.
+func compactIdentity(in CardInput, deadline string) string {
+	submitter := in.SubmitterName
+	if submitter == "" {
+		submitter = fmt.Sprintf("uid %d", in.SubmitterUID)
+	}
+	target := fmt.Sprintf("uid %d", in.TargetUID)
+	if in.TargetUID == 0 {
+		target = "root"
+	}
+	text := fmt.Sprintf("<code>%s / %s</code> · %s → %s", compactLine(in.Host, 160), compactLine(in.JobID, 384), compactLine(submitter, 80), target)
+	if deadline != "" {
+		text += " · expires " + compactLine(deadline, 96)
+	}
+	if container := compactLine(in.Container, 96); container != "" {
+		text += " · in " + container
+	}
+	return text
+}
+
+// compactWarnings and compactOperation name where the rest can be seen: the
+// Details button on actionable cards, or the host's review log for auto
+// notices, which have no buttons.
+func compactWarnings(report proto.ReviewReport, rest string) string {
+	var text strings.Builder
+	if report.IntentMatch == "inconsistent" {
+		text.WriteString("\n⚠️ Doesn&#39;t match the stated reason")
+	}
+	// Only warnings with visible words count: blank ones would render as empty
+	// bullets and push real warnings behind Details. Details still lists all.
+	var visible []string
+	for _, warning := range report.Warnings {
+		if line := compactLine(warning.Message, 220); line != "" {
+			visible = append(visible, line)
+		}
+	}
+	for _, line := range visible[:min(3, len(visible))] {
+		text.WriteString("\n• " + line)
+	}
+	if len(visible) > 3 {
+		fmt.Fprintf(&text, "\n+%d more in %s", len(visible)-3, rest)
+	}
+	return text.String()
+}
+
+func compactOperation(in CardInput, rest string) string {
+	command := compactEsc(in.Operation, 420)
+	text := "\n<b>Runs:</b> <code>" + command + "</code>"
+	if strings.HasSuffix(command, "…") && rest != "Details" {
+		// Auto notices have no Details, so say where the full command is.
+		text += " (full command: " + rest + ")"
+	}
+	if in.CapturedStdinBytes > 0 {
+		// The delivery kind is documented as visible before approval; the
+		// empty kind is the historical sealed_memfd default (capturedDeliveryLabel).
+		kind := proto.SealedMemfd
+		if in.CapturedStdinKind == proto.SocketStream {
+			kind = proto.SocketStream
+		}
+		text += fmt.Sprintf("\n<b>Input:</b> captured script input (%d bytes, %s)", in.CapturedStdinBytes, kind)
+	}
+	if in.WithheldCount > 0 {
+		text += fmt.Sprintf("\n⚠️ Content withheld from AI review: %d item(s) — see %s", in.WithheldCount, rest)
+	}
+	return text + "\n<b>Why:</b> " + compactLine(in.Reason, 220)
 }
 
 func securityRiskScore(risk string) string {
@@ -347,6 +473,11 @@ func RenderDetails(in DetailsInput) ([]string, error) {
 
 	add("<b>Details for job %s</b>\n", esc(in.JobID))
 	add("<b>Security risk: %s</b>\n", securityRiskScore(in.Report.Risk))
+	blocks = append(blocks, requestBlocks(in.CardInput)...)
+	add("\n<b>Review summary</b>\n")
+	add("%s\n", esc(in.Report.Summary))
+	add("<b>Intent match:</b> %s\n", esc(in.Report.IntentMatch))
+	add("Reviewer <code>%s</code> · expires %s\n", esc(in.ReviewerModel), esc(expiryText(in.Expiry)))
 	add("\n<b>Effects</b>\n")
 	if len(in.Report.Effects) == 0 {
 		add("- none reported\n")
@@ -435,29 +566,11 @@ func validateCardInput(in CardInput) error {
 	return nil
 }
 
-// summaryBlocks builds the required summary content as HTML section blocks
-// so chunking can prefer section boundaries. Every required design §9
-// element is present: heading with host/environment/risk, submitter,
-// working directory, command, reason, review summary, effects, ALL
-// warnings, uncertainties, reversibility, reviewer model, expiry
-// and job ID. All dynamic text is escaped before wrapping.
-func summaryBlocks(in CardInput) []string {
+// requestBlocks preserves full request facts for on-demand Details.
+func requestBlocks(in CardInput) []string {
 	var blocks []string
 	add := func(format string, args ...any) { blocks = append(blocks, fmt.Sprintf(format, args...)) }
 
-	add("<b>Privilege approval · Security risk: %s</b>\n", securityRiskScore(in.Report.Risk))
-	// Withheld credentials are an operator decision, never a reviewer one:
-	// the warning leads the summary (always before Approve/Deny, never only
-	// behind Details) with the count and every withheld reference. Refs are
-	// proto-bounded (validated in validateCardInput) and escaped/quoted here.
-	if in.WithheldCount > 0 {
-		add("<b>Credential content withheld from AI review: %d</b>\n", in.WithheldCount)
-		for _, ref := range in.WithheldRefs {
-			add("- ")
-			add("<code>%s</code>", esc(displayPath(ref)))
-			add("\n")
-		}
-	}
 	add("<b>Host:</b> <code>%s / %s</code>\n", esc(in.Host), esc(in.JobID))
 	if env := stripControls(in.Container); env != "" {
 		add("<b>Environment:</b> %s\n", esc(env))
@@ -488,49 +601,6 @@ func summaryBlocks(in CardInput) []string {
 
 	add("\n\n<b>Reason</b>\n")
 	add("%s\n", esc(in.Reason))
-	if s := stripControls(in.Report.Summary); s != "" {
-		add("\n<b>Review summary</b>\n")
-		add("%s\n", esc(s))
-	}
-
-	if len(in.Report.Effects) == 0 {
-		add("\n<b>Effects</b>\n- none reported\n")
-	} else {
-		add("\n<b>Effects</b>\n")
-		for _, e := range in.Report.Effects {
-			add("- %s\n", esc(e))
-		}
-	}
-
-	// All material warnings, always on the card path, never behind Details.
-	if len(in.Report.Warnings) == 0 {
-		add("\n<b>Warnings</b>\n- none reported\n")
-	} else {
-		add("\n<b>Warnings</b>\n")
-		for _, w := range in.Report.Warnings {
-			add("• %s\n", esc(w.Message))
-		}
-	}
-
-	if len(in.Report.MissingContext) == 0 {
-		add("\n<b>Uncertainties</b>\n- none reported\n")
-	} else {
-		add("\n<b>Uncertainties</b>\n")
-		for _, m := range in.Report.MissingContext {
-			add("• %s\n", esc(m))
-		}
-	}
-
-	if len(in.Report.Suggestions) > 0 {
-		add("\n<b>Suggestions (advice only)</b>\n")
-		for _, s := range in.Report.Suggestions {
-			add("• %s — %s (%s)\n", esc(s.Issue), esc(s.Action), esc(string(s.Actor)))
-		}
-	}
-	add("\n<b>Reversibility:</b> ")
-	add("%s\n", esc(in.Report.Reversibility))
-	// No expiry here: summary parts are counted across hosts (see expiryText).
-	add("\nReviewer <code>%s</code> · job <code>%s</code>\n", esc(in.ReviewerModel), esc(in.JobID))
 	return blocks
 }
 

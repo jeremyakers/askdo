@@ -151,7 +151,7 @@ func display(d Display) error {
 	if !text(d.Reason, 16384, false) || len(d.CWD) > 4096 || !utf8.ValidString(d.CWD) || strings.ContainsRune(d.CWD, 0) || (d.CWD != "" && (!path.IsAbs(d.CWD) || path.Clean(d.CWD) != d.CWD)) || d.CapturedStdinBytes < 0 || d.CapturedStdinBytes > proto.MaxCapturedStdinBytes {
 		return ErrProtocol
 	}
-	if !text(d.Operation, 16384, true) || !text(d.Identity.Hostname, 256, true) || !text(d.Identity.Username, 256, true) || d.SummaryParts < 1 || d.SummaryParts > 64 || d.Withholding == nil || len(d.Withholding) > 64 || d.ModelHistory == nil || len(d.ModelHistory) > MaxProfiles || !text(d.UnreviewedReason, 4096, false) {
+	if !text(d.Operation, 16384, true) || !text(d.Identity.Hostname, 256, true) || !text(d.Identity.Username, 256, true) || d.SummaryParts < 0 || d.SummaryParts > 64 || d.Withholding == nil || len(d.Withholding) > 64 || d.ModelHistory == nil || len(d.ModelHistory) > MaxProfiles || !text(d.UnreviewedReason, 4096, false) {
 		return ErrProtocol
 	}
 	for _, s := range d.Withholding {
@@ -268,7 +268,7 @@ func Validate[T Payload](value T) error {
 			if err := recipientValid(d.Recipient); err != nil {
 				return err
 			}
-			if d.Recipient.ChatID == 0 || chats[d.Recipient.ChatID] || len(d.SummaryMessageIDs) < 1 || len(d.SummaryMessageIDs) > 64 {
+			if d.Recipient.ChatID == 0 || chats[d.Recipient.ChatID] || d.SummaryMessageIDs == nil || len(d.SummaryMessageIDs) > 64 {
 				return ErrProtocol
 			}
 			chats[d.Recipient.ChatID] = true

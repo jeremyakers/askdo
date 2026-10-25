@@ -81,7 +81,7 @@ func TestMaintenanceConsumesEarlyCallbackWhenCompleteCommits(t *testing.T) {
 	go func() { defer close(done); d.maintenance() }()
 	t.Cleanup(func() { cancel(); awaitSignal(t, done) })
 	// The operator's answer outruns the card's own receipt. It must wait durably.
-	early := callback(10, 2, 1, 2, telegram.ActionDeny, binding.Nonce)
+	early := callback(10, 2, 1, int64(sub.Ticket.Display.SummaryParts+1), telegram.ActionDeny, binding.Nonce)
 	if err := store.Ingest(ctx, "token-hash", []telegram.Update{early}); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestDispatcherStartupReconcilesDurableWorkWithoutNewEvents(t *testing.T) {
 	// early approval, one already failed whose card cleanup is still owed.
 	queued, answered, failed := next(2), next(3), next(4)
 	delivered(answered)
-	if err := tickets.Ingest(ctx, f.service.dispatcher.aliases["bot"], []telegram.Update{callback(10, 2, 1, 2, telegram.ActionApprove, answered.Ticket.Binding.Nonce)}); err != nil {
+	if err := tickets.Ingest(ctx, f.service.dispatcher.aliases["bot"], []telegram.Update{callback(10, 2, 1, int64(answered.Ticket.Display.SummaryParts+1), telegram.ActionApprove, answered.Ticket.Binding.Nonce)}); err != nil {
 		t.Fatal(err)
 	}
 	delivered(failed)

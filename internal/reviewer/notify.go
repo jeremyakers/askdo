@@ -16,8 +16,6 @@ import (
 // Production always uses the client's standard Telegram endpoint.
 var TelegramBaseURL string
 
-const maxSummaryParts = 32
-
 // notifyAutoApproval only honors a validated broker-frozen plan. It never
 // creates a nonce, keyboard, poller, human decision, or execution request.
 func notifyAutoApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.Bootstrap, history []proto.ModelHistoryEntry, frozen *proto.Frozen) error {
@@ -50,10 +48,7 @@ func notifyAutoApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.
 	if err != nil {
 		return fmt.Errorf("render auto-approval summary: %w", err)
 	}
-	if len(parts) > maxSummaryParts {
-		return fmt.Errorf("auto-approval summary exceeds %d parts", maxSummaryParts)
-	}
-	notice, err := telegram.RenderAutoNotice(bootstrap.RequestID, frozen.AutoApproval.Score)
+	notice, err := telegram.RenderAutoNotice(input, frozen.AutoApproval.Score)
 	if err != nil {
 		return err
 	}

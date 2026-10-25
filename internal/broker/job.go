@@ -491,7 +491,9 @@ func (j *jobRuntime) run(ctx context.Context) {
 				j.fail("review report has no room for broker-observed captured stdin uncertainty")
 				return
 			}
-			review.Report.Warnings = append(review.Report.Warnings, proto.ReviewWarning{Message: "Broker cannot verify that the AI read all captured stdin script bytes; inspect before approval.", Evidence: "Broker-observed read_path bundle:stdin coverage for the final review was incomplete."})
+			// First, not last: the card shows only the top warnings, and this one
+			// is the broker's own evidence that the verdict may not cover the script.
+			review.Report.Warnings = append([]proto.ReviewWarning{{Message: "Broker cannot verify that the AI read all captured stdin script bytes; inspect before approval.", Evidence: "Broker-observed read_path bundle:stdin coverage for the final review was incomplete."}}, review.Report.Warnings...)
 			review.Report.MissingContext = append(review.Report.MissingContext, "Broker could not verify complete AI inspection of captured stdin script.")
 		}
 		// Validate the report before deciding whether the human card may be
@@ -564,7 +566,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 	if autoPlan != nil {
 		notification, ok := message.(*proto.AutoNotificationSent)
 		if !ok || notification.Digest != digest || (!j.namedRoute() && (notification.NoticeID <= 0 ||
-			len(notification.MessageIDs) == 0 || len(notification.MessageIDs) > 32)) {
+			notification.MessageIDs == nil || len(notification.MessageIDs) > 32)) {
 			j.fail("invalid auto notification")
 			return
 		}
@@ -606,7 +608,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 		changed, commitErr := j.daemon.store.CommitAutoStart(ctx, store.AutoStartAuthorization{
 			UID: j.uid, RequestID: j.req.RequestID, ManifestDigest: digest,
 			Score: autoPlan.Score, AdminMaxRisk: cap, NoticeID: notification.NoticeID,
-			SummaryMessageIDs: append([]int64(nil), notification.MessageIDs...),
+			SummaryMessageIDs: append([]int64{}, notification.MessageIDs...),
 			ChannelName:       j.selectedChannelName(), Targets: append([]proto.AutoNotificationTarget(nil), notification.Targets...),
 			NotifiedAtUTC: notified, NowUTC: time.Now().UTC(),
 		})
