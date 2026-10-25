@@ -37,6 +37,27 @@ func TestBlankVerdictSaysSoInsteadOfLeavingTheHeadlineEmpty(t *testing.T) {
 	}
 }
 
+func TestBlankWarningsDoNotTakeVisibleSlots(t *testing.T) {
+	// Given: three warnings with no visible words ahead of two real ones.
+	in := testCardInput()
+	in.Report.Warnings = []proto.ReviewWarning{{Message: ""}, {Message: "  \t"}, {Message: "\x00\x07"}, {Message: "Deletes the data volume."}, {Message: "Restarts the database."}}
+	// When: the card renders.
+	card, _, err := RenderReviewedCard(in, testNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Then: the real warnings are visible, no bullet is empty, and nothing
+	// meaningful is left hidden behind a "+N more" count.
+	for _, want := range []string{"• Deletes the data volume.", "• Restarts the database."} {
+		if !strings.Contains(card, want) {
+			t.Errorf("missing %q:\n%s", want, card)
+		}
+	}
+	if strings.Contains(card, "• \n") || strings.HasSuffix(card, "• ") || strings.Contains(card, "more in Details") {
+		t.Errorf("blank warning rendered or counted:\n%s", card)
+	}
+}
+
 func TestCompactReviewedCardLeadsWithVerdict(t *testing.T) {
 	for _, tc := range []struct{ risk, heading string }{
 		{"1", "🟢 <b>Risk 1/5</b>"}, {"2", "🟢 <b>Risk 2/5</b>"},

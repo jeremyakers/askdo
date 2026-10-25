@@ -384,11 +384,19 @@ func compactWarnings(report proto.ReviewReport) string {
 	if report.IntentMatch == "inconsistent" {
 		text.WriteString("\n⚠️ Doesn&#39;t match the stated reason")
 	}
-	for _, warning := range report.Warnings[:min(3, len(report.Warnings))] {
-		text.WriteString("\n• " + compactLine(warning.Message, 220))
+	// Only warnings with visible words count: blank ones would render as empty
+	// bullets and push real warnings behind Details. Details still lists all.
+	var visible []string
+	for _, warning := range report.Warnings {
+		if line := compactLine(warning.Message, 220); line != "" {
+			visible = append(visible, line)
+		}
 	}
-	if len(report.Warnings) > 3 {
-		fmt.Fprintf(&text, "\n+%d more in Details", len(report.Warnings)-3)
+	for _, line := range visible[:min(3, len(visible))] {
+		text.WriteString("\n• " + line)
+	}
+	if len(visible) > 3 {
+		fmt.Fprintf(&text, "\n+%d more in Details", len(visible)-3)
 	}
 	return text.String()
 }
