@@ -621,8 +621,8 @@ func DecodeForMutation(data []byte) (*Config, error) {
 	return decodeMutation(data, false)
 }
 
-// DecodeForFleetMutation additionally accepts explicit v5 documents for the
-// root-side enrollment operator. Ordinary section mutations remain v4-only.
+// DecodeForFleetMutation additionally accepts explicit v5 documents for
+// enrollment and local policy mutations. Credential mutations remain v4-only.
 func DecodeForFleetMutation(data []byte) (*Config, error) {
 	return decodeMutation(data, true)
 }
@@ -776,6 +776,12 @@ func (c *Config) Validate() error {
 // save (intra-section blocking is intended).
 func ValidateReviewSection(review ReviewConfig) error {
 	return validateReviewSection(review, false)
+}
+
+// ValidateReviewSection checks the review section in the document's mode,
+// accepting gateway profiles only for explicit fleet configurations.
+func (c *Config) ValidateReviewSection() error {
+	return validateReviewSection(c.Review, c.ConfigVersion == 5 && c.Fleet != nil)
 }
 
 func validateReviewSection(review ReviewConfig, fleet bool) error {

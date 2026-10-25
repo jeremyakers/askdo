@@ -49,7 +49,7 @@ func reviewMode(args []string, stdout, stderr io.Writer) int {
 	if mutating && !requireRoot("review mode", stderr) {
 		return 125
 	}
-	store, err := operator.LoadForMutation(path)
+	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
 		fmt.Fprintln(stderr, "review mode:", err)
 		return 1
@@ -102,7 +102,7 @@ func reviewExempt(args []string, stdout, stderr io.Writer) int {
 	if verb != "list" && !requireRoot("review exempt "+verb, stderr) {
 		return 125
 	}
-	store, err := operator.LoadForMutation(path)
+	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "review exempt %s: %v\n", verb, err)
 		return 1

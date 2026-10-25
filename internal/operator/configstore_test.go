@@ -275,6 +275,46 @@ func TestOptimisticConcurrency(t *testing.T) {
 	}
 }
 
+func TestReviewPolicyMutationPreservesConcurrencyAndDirectOnlyLoader(t *testing.T) {
+	for _, tc := range []struct {
+		name, document string
+	}{
+		{"v4", `{"config_version":4,"inspection":{},"review":{"mode":"approval_only","models":[]},"limits":{},"telegram":{}}`},
+		{"v5", `{"config_version":5,"inspection":{},"review":{"mode":"approval_only","gateway_profiles":[]},"limits":{},"fleet":{"url":"https://gateway.example","host_id":"host-a","enrollment_file":"/keys/enrollment","verification_key_file":"/keys/verify"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given policy tooling accepts both modes but credential tooling stays v4-only.
+			path := writeFixture(t, []byte(tc.document))
+			if _, err := LoadForMutation(path); (err == nil) != (tc.name == "v4") {
+				t.Fatalf("direct-only loader: %v", err)
+			}
+			store, err := LoadForReviewPolicyMutation(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			external := tc.document + "\n"
+			if err := os.WriteFile(path, []byte(external), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			// When another writer changes the file before a policy save.
+			err = store.Save(SectionReview)
+
+			// Then the optimistic hash check preserves the other writer's bytes.
+			if !errors.Is(err, ErrConfigChanged) {
+				t.Fatalf("want ErrConfigChanged, got %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != external {
+				t.Fatal("policy save overwrote concurrent change")
+			}
+		})
+	}
+}
+
 // namedFixtureConfig renders a whole-valid named-channel v4 document
 // (approval_only mode so the empty model list is legal): one "ops" channel
 // with one recipient, plus a route from the test runner's own login (which
