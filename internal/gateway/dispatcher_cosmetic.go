@@ -60,7 +60,7 @@ func (d *dispatcher) runCosmetic(job cosmeticJob) {
 	case cosmeticDetails:
 		rendering, err := telegram.RenderFleet(job.record.Submission.Ticket)
 		if err == nil {
-			ctx, cancel := d.cosmeticContext(5 * time.Second)
+			ctx, cancel := d.cosmeticContext(detailsBudget(len(rendering.Details)))
 			_, _ = telegram.SendDetails(ctx, job.bot.client, job.chat, rendering.Details)
 			cancel()
 		}
@@ -82,6 +82,14 @@ func (d *dispatcher) runCosmetic(job cosmeticJob) {
 			}
 		}
 	}
+}
+
+// detailsBudget is the deadline for sending a Details sequence. Details carries
+// the whole request and review, so a long one spans many messages sent one
+// after another: the first keeps the original 5s and each further message adds
+// 2s, rather than one fixed budget that could cut it short.
+func detailsBudget(parts int) time.Duration {
+	return 5*time.Second + time.Duration(max(0, parts-1))*2*time.Second
 }
 
 func (d *dispatcher) cosmeticContext(timeout time.Duration) (context.Context, context.CancelFunc) {
