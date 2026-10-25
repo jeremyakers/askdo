@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -208,12 +210,18 @@ func requestTelegramDetails(t *testing.T, fake *faketelegram.Server, card fakete
 	fake.QueueCallback(updateID, query, telegramOperator, telegramChat, card.ID, card.ButtonData("v:"))
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
+	// The tap is answered before Details are sent, so wait for both the answer
+	// and the whole sequence: one unnumbered message, or "part n/n".
+	partOf := regexp.MustCompile(`details part (\d+)/(\d+):`)
 	for {
 		changed := fake.Changed()
-		for _, answer := range fake.Answers() {
-			if answer == query {
+		answered := slices.Contains(fake.Answers(), query)
+		sent := fake.Sent()[before:]
+		if answered && len(sent) > 0 {
+			last := partOf.FindStringSubmatch(sent[len(sent)-1].Text)
+			if last == nil || last[1] == last[2] {
 				var text strings.Builder
-				for _, message := range fake.Sent()[before:] {
+				for _, message := range sent {
 					text.WriteString(message.Text)
 				}
 				return text.String()

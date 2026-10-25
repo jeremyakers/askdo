@@ -260,6 +260,19 @@ func TestPollerDetailsNeverGrants(t *testing.T) {
 	if p.consumed {
 		t.Fatal("details must never consume the pending decision")
 	}
+	// The tap is answered before the possibly long Details sequence is sent.
+	bot.mu.Lock()
+	first := ""
+	for _, r := range bot.requests {
+		if r.method == "answerCallbackQuery" || r.method == "sendMessage" {
+			first = r.method
+			break
+		}
+	}
+	bot.mu.Unlock()
+	if first != "answerCallbackQuery" {
+		t.Fatalf("first call after a Details tap = %q, want answerCallbackQuery", first)
+	}
 	sent := bot.byMethod("sendMessage")
 	if len(sent) != len(cfg.DetailsParts) {
 		t.Fatalf("details sends = %d, want %d", len(sent), len(cfg.DetailsParts))

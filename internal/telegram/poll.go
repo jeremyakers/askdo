@@ -244,10 +244,12 @@ func (p *Poller) processUpdate(ctx context.Context, u Update, now time.Time) (De
 			p.ack(ctx, cb.ID, ackNoDetail)
 			return Decision{}, false, nil
 		}
+		// Answer first: a long Details sequence must not leave the operator's
+		// Telegram spinner waiting on every message.
+		p.ack(ctx, cb.ID, "")
 		if _, err := SendDetails(ctx, p.client, target.ChatID, p.cfg.DetailsParts); err != nil {
 			return Decision{}, false, err
 		}
-		p.ack(ctx, cb.ID, "")
 		return Decision{}, false, nil
 	}
 
