@@ -20,9 +20,13 @@ type cancelHandle struct {
 	Host       string `json:"host"`
 }
 
-func privateHandleInfo(info os.FileInfo, mode os.FileMode) bool {
+func ownedByCaller(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == uint32(os.Geteuid()) && info.Mode().Perm() == mode && info.Mode()&os.ModeSymlink == 0
+	return ok && stat.Uid == uint32(os.Geteuid())
+}
+
+func privateHandleInfo(info os.FileInfo, mode os.FileMode) bool {
+	return ownedByCaller(info) && info.Mode().Perm() == mode && info.Mode()&os.ModeSymlink == 0
 }
 
 func writeCancelHandle(id, capability, socket string) (path string, err error) {
@@ -41,11 +45,31 @@ func writeCancelHandle(id, capability, socket string) (path string, err error) {
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	info, err := os.Lstat(dir)
+	// Some filesystems widen a new directory's mode through inherited ACLs.
+	// Open the owned directory itself, never a symlink, and repair only this
+	// dedicated leaf before any capability bytes are written beneath it.
+	directory, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return "", err
 	}
-	if !info.IsDir() || !privateHandleInfo(info, 0700) {
+	defer func() { _ = directory.Close() }()
+	info, err := directory.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || !ownedByCaller(info) {
+		return "", errors.New("cancellation directory is not private")
+	}
+	if info.Mode().Perm() != 0700 {
+		if err = directory.Chmod(0700); err != nil {
+			return "", err
+		}
+		info, err = directory.Stat()
+		if err != nil {
+			return "", err
+		}
+	}
+	if !privateHandleInfo(info, 0700) {
 		return "", errors.New("cancellation directory is not private")
 	}
 	socket, err = filepath.Abs(socket)
@@ -74,6 +98,16 @@ func writeCancelHandle(id, capability, socket string) (path string, err error) {
 			_ = os.Remove(createdPath)
 		}
 	}()
+	if err = f.Chmod(0600); err != nil {
+		return "", err
+	}
+	handleInfo, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !privateHandleInfo(handleInfo, 0600) {
+		return "", errors.New("cancellation handle is not private")
+	}
 	if _, err = f.Write(append(body, '\n')); err != nil {
 		return "", err
 	}
@@ -83,13 +117,7 @@ func writeCancelHandle(id, capability, socket string) (path string, err error) {
 	if err = f.Close(); err != nil {
 		return "", err
 	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return "", err
-	}
-	err = directory.Sync()
-	_ = directory.Close()
-	if err != nil {
+	if err = directory.Sync(); err != nil {
 		return "", err
 	}
 	ok = true
