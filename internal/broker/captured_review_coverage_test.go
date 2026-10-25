@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/user"
 	"strings"
@@ -27,13 +28,17 @@ func TestCapturedStdinReviewCoverageRequiresHuman(t *testing.T) {
 		spans  []span
 		unread bool
 		masked bool
+		// modelWarnings fills the card's visible warning slots before the broker
+		// adds its own coverage warning.
+		modelWarnings int
 	}{
-		{"unread", nil, true, false},
-		{"partial", []span{{0, 5}}, true, false},
-		{"withheld", []span{{0, len(script)}}, true, true},
-		{"complete sequential", []span{{0, 16}, {16, len(script) - 16}}, false, false},
-		{"complete out of order", []span{{16, len(script) - 16}, {0, 16}}, false, false},
-		{"overlap with gap", []span{{0, 16}, {8, 8}, {17, len(script) - 17}}, true, false},
+		{"unread", nil, true, false, 0},
+		{"partial", []span{{0, 5}}, true, false, 0},
+		{"withheld", []span{{0, len(script)}}, true, true, 0},
+		{"complete sequential", []span{{0, 16}, {16, len(script) - 16}}, false, false, 0},
+		{"complete out of order", []span{{16, len(script) - 16}, {0, 16}}, false, false, 0},
+		{"overlap with gap", []span{{0, 16}, {8, 8}, {17, len(script) - 17}}, true, false, 0},
+		{"unread with three model warnings", nil, true, false, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := faketelegram.New(t)
@@ -58,7 +63,12 @@ func TestCapturedStdinReviewCoverageRequiresHuman(t *testing.T) {
 					args, _ := json.Marshal(proto.ReadPathRequest{Base: "bundle", Path: "stdin", Offset: s.offset, MaxBytes: s.size})
 					calls = append(calls, reviewer.ToolCall{ID: string(rune('a' + i)), Name: "read_path", Arguments: args})
 				}
-				report := reviewer.ToolCall{ID: "report", Name: "submit_review", Arguments: json.RawMessage(`{"risk":"1","summary":"Model did not disclose an inspection gap.","effects":[],"warnings":[],"missing_context":[],"reversibility":"Unverified.","intent_match":"unverified"}`)}
+				warnings := make([]proto.ReviewWarning, tc.modelWarnings)
+				for i := range warnings {
+					warnings[i] = proto.ReviewWarning{Message: fmt.Sprintf("Model warning %d.", i+1), Evidence: "fixture"}
+				}
+				encoded, _ := json.Marshal(warnings)
+				report := reviewer.ToolCall{ID: "report", Name: "submit_review", Arguments: json.RawMessage(`{"risk":"1","summary":"Model did not disclose an inspection gap.","effects":[],"warnings":` + string(encoded) + `,"missing_context":[],"reversibility":"Unverified.","intent_match":"unverified"}`)}
 				steps := []fakemodel.Step{}
 				if len(calls) != 0 {
 					steps = append(steps, fakemodel.Step{Response: reviewer.ModelResponse{ToolCalls: calls}})

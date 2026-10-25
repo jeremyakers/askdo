@@ -491,7 +491,9 @@ func (j *jobRuntime) run(ctx context.Context) {
 				j.fail("review report has no room for broker-observed captured stdin uncertainty")
 				return
 			}
-			review.Report.Warnings = append(review.Report.Warnings, proto.ReviewWarning{Message: "Broker cannot verify that the AI read all captured stdin script bytes; inspect before approval.", Evidence: "Broker-observed read_path bundle:stdin coverage for the final review was incomplete."})
+			// First, not last: the card shows only the top warnings, and this one
+			// is the broker's own evidence that the verdict may not cover the script.
+			review.Report.Warnings = append([]proto.ReviewWarning{{Message: "Broker cannot verify that the AI read all captured stdin script bytes; inspect before approval.", Evidence: "Broker-observed read_path bundle:stdin coverage for the final review was incomplete."}}, review.Report.Warnings...)
 			review.Report.MissingContext = append(review.Report.MissingContext, "Broker could not verify complete AI inspection of captured stdin script.")
 		}
 		// Validate the report before deciding whether the human card may be
