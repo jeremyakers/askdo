@@ -7,6 +7,8 @@ import (
 	"html"
 	"io"
 	"reflect"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -529,20 +531,23 @@ func awaitCard(t *testing.T, fake *faketelegram.Server) faketelegram.Message {
 	return faketelegram.Message{}
 }
 
-// Wait for the Details callback acknowledgement, which follows all Details sends.
+// The tap is answered before Details are sent, so wait for both the answer and
+// the whole sequence: one unnumbered message, or the final "part n/n".
 // Callers use update ID 2 or later for their subsequent terminal decision.
 func requestNotifyDetails(t *testing.T, w *notifyWiring, n *proto.NotificationSent) []faketelegram.Message {
 	t.Helper()
 	card := awaitCard(t, w.fake)
 	before := len(w.fake.Sent())
 	w.fake.QueueCallback(1, "details", notifyOperator, notifyChat, n.CardID, card.ButtonData("v:"))
+	partOf := regexp.MustCompile(`details part (\d+)/(\d+):`)
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
 		changed := w.fake.Changed()
-		for _, answer := range w.fake.Answers() {
-			if answer == "details" {
-				return w.fake.Sent()[before:]
+		sent := w.fake.Sent()[before:]
+		if slices.Contains(w.fake.Answers(), "details") && len(sent) > 0 {
+			if last := partOf.FindStringSubmatch(sent[len(sent)-1].Text); last == nil || last[1] == last[2] {
+				return sent
 			}
 		}
 		select {
