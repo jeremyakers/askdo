@@ -27,7 +27,8 @@ type FleetRendering struct {
 // delivers a card whose Details could never be shown.
 func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	out, err := renderFleet(ticket)
-	if err == nil && len(out.Details) > MaxDetailsParts {
+	// Auto notices send no Details, so their unused rendering is not limited.
+	if err == nil && ticket.Binding.TicketKind != fleetproto.AutoNotice && len(out.Details) > MaxDetailsParts {
 		return FleetRendering{}, fmt.Errorf("telegram: fleet details exceed %d parts", MaxDetailsParts)
 	}
 	return out, err

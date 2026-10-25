@@ -208,3 +208,19 @@ func TestFleetRenderingRejectsDetailsOverTheSendLimit(t *testing.T) {
 		t.Fatalf("rendered %d Details parts without error", len(out.Details))
 	}
 }
+
+func TestFleetAutoNoticeIgnoresTheUnusedDetailsLimit(t *testing.T) {
+	// Given: an auto-approved ticket whose (never sent) Details would exceed the
+	// Details send limit.
+	warnings := make([]fleetproto.ReviewWarning, 32)
+	for i := range warnings {
+		warnings[i] = fleetproto.ReviewWarning{Message: strings.Repeat("<&>", 1300), Evidence: strings.Repeat("<&>", 1300)}
+	}
+	ticket := fleetproto.Ticket{Binding: fleetproto.TicketBinding{JobID: "2026-10-25_#2", Nonce: strings.Repeat("a", 32), TicketKind: fleetproto.AutoNotice, ExpiresAt: 2000000000}, Display: fleetproto.Display{Operation: "/usr/bin/true", Identity: fleetproto.Identity{Hostname: "host", Username: "agent"}, Report: &fleetproto.ReviewReport{Risk: "1", Summary: "Long review.", Effects: []string{}, Warnings: warnings, MissingContext: []string{}, Reversibility: "n/a", IntentMatch: "consistent"}, ModelHistory: []fleetproto.ModelHistoryEntry{{Name: "fixture", Outcome: "ok"}}}}
+	// When: it renders.
+	_, err := RenderFleet(ticket)
+	// Then: it is accepted, because auto notices send no Details.
+	if err != nil {
+		t.Fatalf("auto notice rejected for unused Details: %v", err)
+	}
+}
