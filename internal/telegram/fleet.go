@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,18 @@ type FleetRendering struct {
 	Details  []string
 }
 
+// RenderFleet renders a ticket identically on the broker and the gateway. It
+// fails when Details would exceed what a Details tap may send, so neither side
+// delivers a card whose Details could never be shown.
 func RenderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
+	out, err := renderFleet(ticket)
+	if err == nil && len(out.Details) > MaxDetailsParts {
+		return FleetRendering{}, fmt.Errorf("telegram: fleet details exceed %d parts", MaxDetailsParts)
+	}
+	return out, err
+}
+
+func renderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	d, b := ticket.Display, ticket.Binding
 	out := FleetRendering{}
 	if d.Report == nil {

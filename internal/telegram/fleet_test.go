@@ -192,3 +192,19 @@ func TestFleetWithholdingTotalStaysOnCardAndFactsMoveToDetails(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetRenderingRejectsDetailsOverTheSendLimit(t *testing.T) {
+	// Given: a reviewed ticket whose expanded Details would need more messages
+	// than a Details tap may send (32 long, entity-heavy warnings).
+	warnings := make([]fleetproto.ReviewWarning, 32)
+	for i := range warnings {
+		warnings[i] = fleetproto.ReviewWarning{Message: strings.Repeat("<&>", 1300), Evidence: strings.Repeat("<&>", 1300)}
+	}
+	ticket := fleetproto.Ticket{Binding: fleetproto.TicketBinding{JobID: "2026-10-25_#1", Nonce: strings.Repeat("a", 32), TicketKind: fleetproto.HumanReviewed, ExpiresAt: 2000000000}, Display: fleetproto.Display{Operation: "/usr/bin/true", Identity: fleetproto.Identity{Hostname: "host", Username: "agent"}, Report: &fleetproto.ReviewReport{Risk: "2", Summary: "Long review.", Effects: []string{}, Warnings: warnings, MissingContext: []string{}, Reversibility: "n/a", IntentMatch: "consistent"}, ModelHistory: []fleetproto.ModelHistoryEntry{{Name: "fixture", Outcome: "ok"}}}}
+	// When: the broker or gateway renders it.
+	out, err := RenderFleet(ticket)
+	// Then: rendering fails, so no card is delivered whose Details can't be sent.
+	if err == nil {
+		t.Fatalf("rendered %d Details parts without error", len(out.Details))
+	}
+}
