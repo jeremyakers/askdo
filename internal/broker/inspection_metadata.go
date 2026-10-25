@@ -37,7 +37,7 @@ func scopeCompatibility(p *inspection.Policy) *proto.ScopeCompatibility {
 }
 
 func (j *jobRuntime) inspectionCapabilities() proto.InspectionCapabilities {
-	c := j.daemon.cfg.Inspection
+	c := j.configuration().Inspection
 	return proto.InspectionCapabilities{HashPathEnabled: c.HashPathEnabled, ServiceStatusEnabled: c.ServiceStatusEnabled, SudoPolicyEnabled: c.SudoPolicyEnabled}
 }
 
@@ -74,7 +74,7 @@ func metadataStatusReason(status inspection.Status) string {
 }
 
 func (j *jobRuntime) hashLimits() (int64, int64) {
-	file, total := j.daemon.cfg.Limits.MaxHashFileBytes, j.daemon.cfg.Limits.MaxHashedBytesPerReview
+	file, total := j.configuration().Limits.MaxHashFileBytes, j.configuration().Limits.MaxHashedBytesPerReview
 	if file == 0 {
 		file = proto.MaxHashFileBytes
 	}
@@ -90,7 +90,7 @@ func (j *jobRuntime) authorizedSudoUIDs() []uint32 {
 		return uids
 	}
 	seen := map[uint32]bool{j.uid: true}
-	for _, uid := range j.daemon.cfg.Inspection.SudoPolicyUIDs {
+	for _, uid := range j.configuration().Inspection.SudoPolicyUIDs {
 		seen[uid] = true
 	}
 	for uid := range seen {
@@ -104,7 +104,7 @@ func (j *jobRuntime) authorizedSudoUIDs() []uint32 {
 // single descriptor-filtered snapshot; they contain no private root spelling.
 func (j *jobRuntime) inspectionScope(r proto.InspectRequest, args proto.InspectionScopeRequest) (proto.InspectResult, error) {
 	if !j.scopeSnapshot {
-		roots, _ := j.daemon.policy.VisibleReadRoots()
+		roots, _ := j.inspectionPolicy().VisibleReadRoots()
 		seen := make(map[string]bool, len(roots))
 		for _, root := range roots {
 			if !seen[root] {
@@ -123,7 +123,7 @@ func (j *jobRuntime) inspectionScope(r proto.InspectRequest, args proto.Inspecti
 		}
 	}
 	file, total := j.hashLimits()
-	v := proto.InspectionScopeResult{ReadRoots: []string{}, ExclusionsRemain: true, Capabilities: j.inspectionCapabilities(), MaxReadBytes: proto.MaxDirectReadBytes, MaxInspectedFiles: j.daemon.cfg.Limits.MaxInspectedFiles, MaxInspectedBytes: j.daemon.cfg.Limits.MaxInspectedBytes, MaxHashFileBytes: file, MaxHashedBytesPerReview: total, SudoPolicyUIDs: j.authorizedSudoUIDs(), Compatibility: scopeCompatibility(j.daemon.policy)}
+	v := proto.InspectionScopeResult{ReadRoots: []string{}, ExclusionsRemain: true, Capabilities: j.inspectionCapabilities(), MaxReadBytes: proto.MaxDirectReadBytes, MaxInspectedFiles: j.configuration().Limits.MaxInspectedFiles, MaxInspectedBytes: j.configuration().Limits.MaxInspectedBytes, MaxHashFileBytes: file, MaxHashedBytesPerReview: total, SudoPolicyUIDs: j.authorizedSudoUIDs(), Compatibility: scopeCompatibility(j.inspectionPolicy())}
 	if len(v.SudoPolicyUIDs) > 128 {
 		return metadataFailure(r, inspection.StatusLimitExceeded, "output_limit"), nil
 	}
@@ -162,12 +162,12 @@ func (j *jobRuntime) hashPath(ctx context.Context, r proto.InspectRequest, args 
 	}
 	// At most two attempts, including denied attempts. Retries and provider
 	// fallback never reset this counter; smaller file limits further restrict it.
-	if j.hashAttempts >= min(2, j.daemon.cfg.Limits.MaxInspectedFiles) {
+	if j.hashAttempts >= min(2, j.configuration().Limits.MaxInspectedFiles) {
 		return metadataFailure(r, inspection.StatusLimitExceeded, "file_count_limit"), nil
 	}
 	j.hashAttempts++
 	cap := min(file, remaining)
-	h, status := j.daemon.policy.HashExecutable(ctx, args.Path, cap)
+	h, status := j.inspectionPolicy().HashExecutable(ctx, args.Path, cap)
 	if h.WorkBytes < 0 || h.WorkBytes > cap+1 {
 		return proto.InspectResult{}, errors.New("invalid hash work accounting")
 	}
@@ -200,7 +200,7 @@ func (j *jobRuntime) serviceStatus(ctx context.Context, r proto.InspectRequest, 
 		return metadataFailure(r, inspection.StatusInspectionDenied, "disabled"), nil
 	}
 	if j.metadataReader == nil {
-		j.metadataReader = hostmeta.NewReader(j.daemon.policy)
+		j.metadataReader = hostmeta.NewReader(j.inspectionPolicy())
 	}
 	v, status, reason := j.metadataReader.ServiceStatus(ctx, args.Unit)
 	if ctx.Err() != nil {
@@ -217,14 +217,14 @@ func (j *jobRuntime) sudoPolicy(ctx context.Context, r proto.InspectRequest, arg
 		return metadataFailure(r, inspection.StatusInspectionDenied, "disabled"), nil
 	}
 	authorized := args.UID == j.uid
-	for _, uid := range j.daemon.cfg.Inspection.SudoPolicyUIDs {
+	for _, uid := range j.configuration().Inspection.SudoPolicyUIDs {
 		authorized = authorized || uid == args.UID
 	}
 	if !authorized {
 		return metadataFailure(r, inspection.StatusInspectionDenied, "unauthorized_uid"), nil
 	}
 	if j.metadataReader == nil {
-		j.metadataReader = hostmeta.NewReader(j.daemon.policy)
+		j.metadataReader = hostmeta.NewReader(j.inspectionPolicy())
 	}
 	v, status, reason := j.metadataReader.SudoPolicy(ctx, args.UID)
 	if ctx.Err() != nil {
@@ -275,7 +275,7 @@ func (j *jobRuntime) auditSelector(r proto.InspectRequest) *inspectionSelector {
 	default:
 		return nil
 	}
-	if j.daemon.policy.MatchesSensitive(path) {
+	if j.inspectionPolicy().MatchesSensitive(path) {
 		return nil
 	}
 	if base == "bundle" {
@@ -285,8 +285,8 @@ func (j *jobRuntime) auditSelector(r proto.InspectRequest) *inspectionSelector {
 		}
 		return &inspectionSelector{Source: "bundle_staged", Path: path}
 	}
-	m, status := j.daemon.policy.StatPath(path, true)
-	if status != inspection.StatusOK || j.daemon.policy.MatchesSensitive(m.ResolvedPath) {
+	m, status := j.inspectionPolicy().StatPath(path, true)
+	if status != inspection.StatusOK || j.inspectionPolicy().MatchesSensitive(m.ResolvedPath) {
 		return nil
 	}
 	return &inspectionSelector{Source: "host", Path: path, ResolvedPath: m.ResolvedPath}
@@ -302,7 +302,7 @@ func (j *jobRuntime) reviewDeadline() time.Time {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.inspectionDeadline.IsZero() {
-		j.inspectionDeadline = time.Now().Add(j.daemon.cfg.Review.TotalTimeout.Value())
+		j.inspectionDeadline = time.Now().Add(j.configuration().Review.TotalTimeout.Value())
 		if j.fleet != nil {
 			j.inspectionDeadline = j.fleet.reviewDeadline
 		}

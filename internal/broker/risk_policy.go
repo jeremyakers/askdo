@@ -153,7 +153,7 @@ func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 			return nil, err
 		}
 	}
-	if d.cfg.Review.HasGroupNotes() {
+	if j.configuration().Review.HasGroupNotes() {
 		lookup := d.accountGroups
 		if lookup == nil {
 			lookup = lookupAccountGroups
@@ -163,13 +163,13 @@ func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 			slog.Warn("risk policy group lookup failed", "request_id", j.req.RequestID, "submitter_uid", j.uid, "error", err)
 			return nil, fmt.Errorf("%w: account groups: %v", errRiskPolicyUnreadable, err)
 		}
-		for _, note := range d.cfg.Review.GroupNotesForGIDs(gids) {
+		for _, note := range j.configuration().Review.GroupNotesForGIDs(gids) {
 			if err := appendLayer(riskPolicyScopeGroup, note); err != nil {
 				return nil, err
 			}
 		}
 	}
-	if note, ok := d.cfg.Review.UserNoteForUID(j.uid); ok {
+	if note, ok := j.configuration().Review.UserNoteForUID(j.uid); ok {
 		if err := appendLayer(riskPolicyScopeUser, note); err != nil {
 			return nil, err
 		}

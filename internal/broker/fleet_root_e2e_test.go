@@ -1394,6 +1394,62 @@ func TestRootFleetAutoPolicyDeliveryGates(t *testing.T) {
 	}
 }
 
+func TestRootFleetLiveConfigAutoGrantRevocation(t *testing.T) {
+	requireRootTest(t)
+	// Given a fleet auto-approval job admitted with an administrator grant.
+	f := newRootFleetFixture(t, buildFleetReviewer(t), "1", true, false, false, rootFleetOptions{maxRisk: 4, secondRecipient: true, hostOutputTokens: 8192})
+	f.broker.daemon.reloadConfig = true
+	f.bot.FailSend(func(call int, text string, keyboard bool) *faketelegram.APIError {
+		if call != 2 || keyboard {
+			return nil
+		}
+		data, err := os.ReadFile(f.hostConfigFile)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		var document map[string]any
+		if err := json.Unmarshal(data, &document); err != nil {
+			t.Error(err)
+			return nil
+		}
+		delete(document["review"].(map[string]any), "auto_approve_grants")
+		updated, err := json.Marshal(document)
+		if err == nil {
+			err = os.WriteFile(f.hostConfigFile, updated, 0600)
+		}
+		if err != nil {
+			t.Error(err)
+		}
+		return nil
+	})
+	id := reserveForTest(t, f.broker.socket, 0)
+	request := submitRequest(id, "revoke fleet auto grant before dispatch")
+	request.Argv = []string{"/usr/bin/id", "-u"}
+	conn, err := net.Dial("unix", f.broker.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sendFrame(t, conn, request)
+	readFrame(t, conn)
+
+	// When the signed automatic notice completes after the config revocation.
+	job := awaitRootFleetState(t, conn, f.broker.daemon.store, id, store.StateFailed, store.StateFinished)
+
+	// Then the current grant blocks execution instead of the admission snapshot.
+	if job.State != store.StateFailed {
+		t.Fatalf("revoked fleet job state=%s", job.State)
+	}
+	output, err := os.ReadFile(filepath.Join(job.SpoolDir, "stdout.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != 0 || len(job.ApprovalJSON) != 0 {
+		t.Fatalf("revoked fleet job dispatched or gained approval: output=%q audit=%s", output, job.ApprovalJSON)
+	}
+}
+
 func awaitRootFleetState(t *testing.T, conn net.Conn, jobs *store.Store, id string, states ...store.State) store.Job {
 	t.Helper()
 	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {

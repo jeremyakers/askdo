@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/fleetclient"
 	"github.com/jeremyakers/askdo/internal/frozeninput"
 	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
@@ -27,10 +28,17 @@ import (
 )
 
 type jobRuntime struct {
-	inputMu            sync.Mutex
-	frozenInput        *frozeninput.Input
-	selectInput        func() (proto.DeliveryKind, error) // test-only capability probe
-	daemon             *daemon
+	inputMu     sync.Mutex
+	frozenInput *frozeninput.Input
+	selectInput func() (proto.DeliveryKind, error) // test-only capability probe
+	daemon      *daemon
+	// Reloaded submissions own immutable config and inspection/fleet resources.
+	// A nil cfg keeps the shared daemon resources used by cfg-injected tests.
+	cfg                *config.Config
+	policy             *inspection.Policy
+	fleetClient        *fleetclient.Client
+	releaseResources   func()
+	releaseOnce        sync.Once
 	uid                uint32
 	route              config.TelegramRoute // detached at admission from authenticated peer UID
 	namedTelegram      bool
@@ -46,11 +54,12 @@ type jobRuntime struct {
 	handoffReady       chan proto.ForegroundReadyEvent // original submit follower only
 	handoffHash        [32]byte
 
-	mu      sync.Mutex
-	creator creatorCancellation
-	state   store.State
-	done    chan struct{}
-	closed  bool
+	mu        sync.Mutex
+	creator   creatorCancellation
+	state     store.State
+	done      chan struct{}
+	closed    bool
+	runActive bool
 	// models is the projected model list computed at review start by
 	// projectModels (codex refresh-at-review-start); nil until then.
 	models                 []proto.ProjectedModel
@@ -145,6 +154,52 @@ func newJobRuntime(d *daemon, uid uint32, req proto.SubmitRequest, spool spoolFi
 		host = "localhost"
 	}
 	return &jobRuntime{daemon: d, uid: uid, route: d.cfg.Telegram.RouteForUID(uid), namedTelegram: len(d.cfg.Telegram.Channels) != 0, req: req, spool: spool, identity: identity, submitterName: submitterName, cwd: cwd, executionHost: host, executionContainer: d.containerEnvironment(), state: store.StateQueued, done: make(chan struct{}), handoffReady: make(chan proto.ForegroundReadyEvent, 1), subscribers: make(map[chan []byte]struct{})}
+}
+
+func (j *jobRuntime) configuration() *config.Config {
+	if j.cfg != nil {
+		return j.cfg
+	}
+	return j.daemon.cfg
+}
+
+func (j *jobRuntime) inspectionPolicy() *inspection.Policy {
+	if j.cfg != nil {
+		return j.policy
+	}
+	return j.daemon.policy
+}
+
+func (j *jobRuntime) fleetConnection() *fleetclient.Client {
+	if j.cfg != nil {
+		return j.fleetClient
+	}
+	return j.daemon.fleet
+}
+
+func (j *jobRuntime) startRun() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return false
+	}
+	j.runActive = true
+	return true
+}
+
+func (j *jobRuntime) finishRun() {
+	j.mu.Lock()
+	j.runActive = false
+	j.mu.Unlock()
+	j.releaseJobResources()
+}
+
+func (j *jobRuntime) releaseJobResources() {
+	j.releaseOnce.Do(func() {
+		if j.releaseResources != nil {
+			j.releaseResources()
+		}
+	})
 }
 
 func (j *jobRuntime) subscribe() (chan []byte, func()) {
@@ -363,10 +418,10 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	// Explicit policy exemptions never construct a provider. Codex preparation
 	// failures are typed availability outcomes, not raw provider diagnostics.
-	approvalOnly := !j.daemon.cfg.Review.RequiresReview(j.uid, j.req.ForceReview)
+	approvalOnly := !j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)
 	models := []proto.ProjectedModel{}
 	preflight := []proto.AvailabilityFailure{}
-	if j.daemon.cfg.Fleet != nil {
+	if j.configuration().Fleet != nil {
 		var fleetErr error
 		models, fleetErr = j.prepareFleet(ctx, approvalOnly)
 		if fleetErr != nil {
@@ -381,7 +436,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 			return
 		}
 		if len(models) == 0 {
-			if j.req.ForceReview || len(preflight) != len(j.daemon.cfg.Review.Models) {
+			if j.req.ForceReview || len(preflight) != len(j.configuration().Review.Models) {
 				j.fail("AI review required but no model is available")
 				return
 			}
@@ -474,7 +529,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 		}
 		reason := "AI review skipped by configured approval-only policy"
 		history := []proto.AvailabilityFailure{}
-		if j.daemon.cfg.Review.RequiresReview(j.uid, j.req.ForceReview) {
+		if j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
 			reason = "AI review unavailable for all configured models"
 			history = j.orderedAvailabilityHistory(unavailable)
 		} else if len(preflight) != 0 {
@@ -592,14 +647,18 @@ func (j *jobRuntime) run(ctx context.Context) {
 			j.fail("pre-launch validation: " + err.Error())
 			return
 		}
+		cap, grantErr := j.currentAutoRisk()
+		if grantErr != nil {
+			j.fail("auto-approval grant unavailable")
+			return
+		}
 		j.mu.Lock()
 		if j.state != store.StateReviewing {
 			j.mu.Unlock()
 			return
 		}
-		// The current preference is checked atomically by the store. The cap
-		// is read again here so a replaced root policy cannot reuse the plan.
-		cap := j.daemon.cfg.Review.MaxAutoRisk(j.uid)
+		// The store checks the current preference atomically; the administrator
+		// grant is re-read at this no-human dispatch gate, not pinned at admission.
 		if cap != autoPlan.MaxRisk || cap < autoPlan.Score || cap < 1 || cap > 4 {
 			j.mu.Unlock()
 			j.fail("auto-approval grant revoked")
@@ -661,6 +720,14 @@ func (j *jobRuntime) run(ctx context.Context) {
 
 // autoPlanFor selects a broker-authored plan only for a validated reviewed
 // report. A zero cap or preference always preserves the human approval path.
+func (j *jobRuntime) currentAutoRisk() (int, error) {
+	cfg, err := j.daemon.currentConfig()
+	if err != nil {
+		return 0, err
+	}
+	return cfg.Review.MaxAutoRisk(j.uid), nil
+}
+
 func (j *jobRuntime) autoPlanFor(report proto.ReviewReport) (*proto.AutoApprovalPlan, error) {
 	if j.req.Lifecycle == proto.LifecycleForeground || j.req.CapturedStdinBase64 != "" {
 		return nil, nil
@@ -669,7 +736,7 @@ func (j *jobRuntime) autoPlanFor(report proto.ReviewReport) (*proto.AutoApproval
 	if err != nil || score < 1 || score > 4 {
 		return nil, nil
 	}
-	cap := j.daemon.cfg.Review.MaxAutoRisk(j.uid)
+	cap := j.configuration().Review.MaxAutoRisk(j.uid)
 	if cap < score || cap < 1 || cap > 4 {
 		return nil, nil
 	}
@@ -739,7 +806,7 @@ func (j *jobRuntime) recordApproval(ctx context.Context, notification *proto.Not
 		CardID:         notification.CardID,
 		MessageIDs:     append([]int64{}, notification.MessageIDs...),
 		Digest:         notification.Digest,
-		OperatorUserID: j.daemon.cfg.Telegram.OperatorUserID,
+		OperatorUserID: j.configuration().Telegram.OperatorUserID,
 		ExpiryUnixMS:   notification.ExpiryUnixMS,
 	}
 	if j.fleet != nil {
@@ -773,7 +840,7 @@ func (j *jobRuntime) recordApproval(ctx context.Context, notification *proto.Not
 		digest:         notification.Digest,
 		cardID:         notification.CardID,
 		messageIDs:     append([]int64{}, notification.MessageIDs...),
-		operatorUserID: j.daemon.cfg.Telegram.OperatorUserID,
+		operatorUserID: j.configuration().Telegram.OperatorUserID,
 		expiry:         expiry,
 	}
 	j.mu.Unlock()
@@ -1216,9 +1283,9 @@ func (j *jobRuntime) orderedAvailabilityHistory(unavailable *proto.ReviewUnavail
 	if j.fleet != nil {
 		return append([]proto.AvailabilityFailure{}, j.fleet.failures...)
 	}
-	all := make([]proto.AvailabilityFailure, 0, len(j.daemon.cfg.Review.Models))
+	all := make([]proto.AvailabilityFailure, 0, len(j.configuration().Review.Models))
 	workerIndex, preflightIndex := 0, 0
-	for _, model := range j.daemon.cfg.Review.Models {
+	for _, model := range j.configuration().Review.Models {
 		if preflightIndex < len(j.preflightFailures) && j.preflightFailures[preflightIndex].Name == model.Name {
 			all = append(all, j.preflightFailures[preflightIndex])
 			preflightIndex++
@@ -1242,7 +1309,7 @@ func (j *jobRuntime) execute(ctx context.Context) {
 	// Dispatch is already committed: shutdown joins this execution rather than
 	// cancelling it, including its running transition and durable result writes.
 	ctx = context.WithoutCancel(ctx)
-	recorder, err := openOutputRecorder(j.spool.stdout, j.spool.stderr, j.daemon.cfg.Limits.MaxLogBytesPerStream)
+	recorder, err := openOutputRecorder(j.spool.stdout, j.spool.stderr, j.configuration().Limits.MaxLogBytesPerStream)
 	if err != nil {
 		j.recordLaunchFailure(ctx)
 		return
@@ -1394,7 +1461,13 @@ func (j *jobRuntime) finishTerminal(state store.State, result store.Result) {
 		}
 		j.subscribers = nil
 	}
+	release := !j.runActive
 	j.mu.Unlock()
+	// A terminal result may race the worker's final inspection or unwind.
+	// Only the runQueue join (or terminalization before run) may release these.
+	if release {
+		j.releaseJobResources()
+	}
 	// Evict the runtime: terminal state lives in the store, and status,
 	// attach and cancel all fall back to the durable record when no runtime
 	// is registered, so a long-lived daemon does not accumulate jobRuntime
@@ -1456,8 +1529,8 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		// Defensive: run() always installs the refresh-prepared projection
 		// before bootstrap(); a directly-constructed job (tests) falls back
 		// to the plain key-file projection.
-		models = make([]proto.ProjectedModel, 0, len(j.daemon.cfg.Review.Models))
-		for _, model := range j.daemon.cfg.Review.Models {
+		models = make([]proto.ProjectedModel, 0, len(j.configuration().Review.Models))
+		for _, model := range j.configuration().Review.Models {
 			models = append(models, proto.ProjectedModel{Name: model.Name, API: model.API, BaseURL: model.BaseURL, Model: model.Model, APIKeyFile: model.APIKeyFile, RequestTimeoutMS: model.RequestTimeout.Value().Milliseconds()})
 		}
 	}
@@ -1495,7 +1568,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		RiskPolicy: riskPolicy, AccountNotes: accountNotes,
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
-			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.daemon.cfg.Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.daemon.cfg.Review.WebfetchEnabled, InspectionCaps: j.inspectionCapabilities()},
+			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.configuration().Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.configuration().Review.WebfetchEnabled, InspectionCaps: j.inspectionCapabilities()},
 			Telegram: j.workerTelegram(),
 		},
 	}

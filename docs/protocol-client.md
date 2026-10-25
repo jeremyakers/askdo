@@ -87,8 +87,10 @@ opt-in still receives exactly the old two-field reply, with no new grant.
 Before sending any operation, the CLI durably writes an exclusive random-named
 0600 receipt under `$XDG_STATE_HOME/askdo/cancel-handles` (default
 `~/.local/state/askdo/cancel-handles`, directory 0700), syncing file and directory.
-It contains only the bearer, job ID, absolute socket path and informative host
-name. Only `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...` are printed, never the
+The client creates and secures this directory automatically, including when
+inherited permissions left an earlier directory world-writable; no pre-creation
+or manual `chmod` is needed. It contains only the bearer, job ID, absolute
+socket path and informative host name. Only `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...` are printed, never the
 bearer. If the private file cannot be saved, nothing is submitted. The receipt
 survives interruption, timeout, disconnect and client exit. Automatic removal
 requires an observed terminal result on that submitting/cancelling client;

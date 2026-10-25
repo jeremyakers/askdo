@@ -51,6 +51,27 @@ askdo config check --live  # additionally probes each model endpoint
                            # with a synthetic fixture (never host files)
 ```
 
+The host broker reloads and validates the selected config for each **new
+submission**. Reviewer, channel, review-policy, inspection and limit changes
+apply without `systemctl restart askdo`, a signal or a file watcher. Each admitted
+job keeps its own config, inspection policy and fleet connection through review
+and execution; queued and pending jobs are not reassigned to new reviewers or
+approval routes. Auto-approval grants are re-read at the final no-human dispatch
+gate, so a revocation still blocks an already-reviewed job. Keep referenced
+credential files available until admitted jobs end.
+Invalid config or unusable inspection/fleet initialization rejects new submissions
+with a generic broker error rather than using stale policy. Existing jobs,
+status and cancellation continue; auto-approval preference requests also validate
+the current config and grant.
+
+The selected config pathname, socket, store and spool locations remain
+startup-only. The incoming frame ceiling is also fixed at startup:
+`min(limits.max_inspected_bytes + 1 MiB, protocol maximum)`. Job inspection and
+capture limits reload, but raising that byte limit does not enlarge the running
+broker's frame ceiling. Frame parsing precedes config loading so invalid config
+cannot block cancellation or status. These reload semantics concern the host
+broker, not the separate gateway service.
+
 ## Field reference
 
 "Required" means the key must be present in the file. Defaults apply only
@@ -580,7 +601,8 @@ migration of a configured legacy bot**: `askdo channel add telegram NAME`
 refuses that case rather than dropping a working channel. To convert one by
 hand, back up `/etc/askdo/config.json`; create one token file per bot; move
 the legacy flat fields into a `channels` entry; set `default_channel`; then
-run `askdo config check` and restart the service when the new config is ready.
+run `askdo config check`. New submissions use the new channels automatically;
+already-admitted jobs keep their original routes.
 
 The CLI also refuses a channel name that could not file a token: one
 path-safe component (no `/` or `\`, not `.` or `..`), because the wizard
