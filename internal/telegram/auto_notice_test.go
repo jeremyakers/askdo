@@ -53,9 +53,27 @@ func TestAutoNoticeNeverPointsToDetails(t *testing.T) {
 	if strings.Contains(notice, "Details") {
 		t.Errorf("auto notice refers to Details:\n%s", notice)
 	}
-	for _, want := range []string{"+2 more", "askdo review log --job " + in.JobID, "Content withheld from AI review: 2 item(s)"} {
+	for _, want := range []string{"+2 more", "sudo askdo review log --job " + in.JobID + " --since 0", "Content withheld from AI review: 2 item(s)"} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("auto notice lacks %q:\n%s", want, notice)
 		}
+	}
+}
+
+func TestTruncatedAutoNoticeCommandPointsToTheFullCommand(t *testing.T) {
+	// Given: an auto-approved command too long for the notice, with no extra
+	// warnings or withheld content that would otherwise add a pointer.
+	in := testCardInput()
+	in.Operation = "/usr/bin/printf " + strings.Repeat("x", 600)
+	in.Report.Warnings = []proto.ReviewWarning{}
+	in.WithheldCount, in.WithheldRefs = 0, nil
+	// When: the auto notice renders.
+	notice, err := RenderAutoNotice(in, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Then: the cut-off command says where the full command is.
+	if !strings.Contains(notice, "…") || !strings.Contains(notice, "full command: <code>sudo askdo review log --job "+in.JobID+" --since 0</code>") {
+		t.Errorf("truncated command has no pointer:\n%s", notice)
 	}
 }

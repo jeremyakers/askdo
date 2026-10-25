@@ -304,7 +304,9 @@ func RenderAutoNotice(in CardInput, score int) (string, error) {
 		return "", errors.New("telegram: invalid auto-approval notice")
 	}
 	heading := strings.Replace(riskHeading(strconv.Itoa(score)), "<b>Risk", "<b>Auto-approved by policy · Risk", 1)
-	rest := "<code>askdo review log --job " + compactEsc(in.JobID, 384) + "</code> on " + compactEsc(in.Host, 160)
+	// The review log is root-only and defaults to the last day, so give the
+	// form that works whenever the notice is read.
+	rest := "<code>sudo askdo review log --job " + compactEsc(in.JobID, 384) + " --since 0</code> on " + compactEsc(in.Host, 160)
 	return heading + " — " + verdict(in.Report, blankAutoVerdict) + "\n" + compactIdentity(in, "") + compactWarnings(in.Report, rest) + compactOperation(in, rest) + "\nNo human approval was requested.", nil
 }
 
@@ -410,7 +412,12 @@ func compactWarnings(report proto.ReviewReport, rest string) string {
 }
 
 func compactOperation(in CardInput, rest string) string {
-	text := "\n<b>Runs:</b> <code>" + compactEsc(in.Operation, 420) + "</code>"
+	command := compactEsc(in.Operation, 420)
+	text := "\n<b>Runs:</b> <code>" + command + "</code>"
+	if strings.HasSuffix(command, "…") && rest != "Details" {
+		// Auto notices have no Details, so say where the full command is.
+		text += " (full command: " + rest + ")"
+	}
 	if in.CapturedStdinBytes > 0 {
 		// The delivery kind is documented as visible before approval; the
 		// empty kind is the historical sealed_memfd default (capturedDeliveryLabel).
