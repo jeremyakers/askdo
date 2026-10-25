@@ -14,8 +14,6 @@ import (
 	"github.com/jeremyakers/askdo/internal/telegram"
 )
 
-const maxDetailsParts = 32
-
 // Transport binds one immutable client snapshot to notification and decision
 // delivery. Legacy workers use the direct poller; the broker supplies Subscribe
 // to its single network consumer and records OnSent durably before activation.
@@ -141,14 +139,16 @@ func NotifyUnreviewed(ctx context.Context, transport Transport, facts Unreviewed
 	if err != nil {
 		return nil, fmt.Errorf("render approval-only details: %w", err)
 	}
-	if len(card.details) > maxDetailsParts {
-		return nil, fmt.Errorf("approval-only details exceed %d parts", maxDetailsParts)
-	}
 	card.notifying = "sending unreviewed approval request"
 	return notify(ctx, transport, card)
 }
 
 func notify(ctx context.Context, transport Transport, card renderedCard) (*proto.Decision, error) {
+	// Check before any delivery or durable binding: a card whose Details can
+	// never be sent must not reach the operator.
+	if len(card.details) > telegram.MaxDetailsParts {
+		return nil, fmt.Errorf("approval details exceed %d parts", telegram.MaxDetailsParts)
+	}
 	var sub *telegram.Subscription
 	if transport.Subscribe != nil {
 		var err error

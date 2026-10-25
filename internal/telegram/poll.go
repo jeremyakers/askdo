@@ -14,9 +14,10 @@ const DefaultPollTimeoutSeconds = 25
 // maxPollTimeoutSeconds bounds the long-poll timeout.
 const maxPollTimeoutSeconds = 600
 
-// maxDetailsParts retains the combined former 32-part summary + 32-part Details
+// MaxDetailsParts retains the combined former 32-part summary + 32-part Details
 // budget now that all expanded request and review facts live behind Details.
-const maxDetailsParts = 64
+// Callers check it before delivering a card whose Details could not be sent.
+const MaxDetailsParts = 64
 
 // Callback acknowledgement texts. Acks are best-effort cleanup (design §9
 // step 5), never the authorization mechanism.
@@ -133,8 +134,8 @@ func NewPoller(client *Client, cfg PollerConfig) (*Poller, error) {
 		return nil, errors.New("telegram: poller requires an expiry time")
 	case cfg.PollTimeoutSec < 0 || cfg.PollTimeoutSec > maxPollTimeoutSeconds:
 		return nil, fmt.Errorf("telegram: poll timeout must be 0-%d seconds", maxPollTimeoutSeconds)
-	case len(cfg.DetailsParts) > maxDetailsParts:
-		return nil, fmt.Errorf("telegram: details exceed %d parts", maxDetailsParts)
+	case len(cfg.DetailsParts) > MaxDetailsParts:
+		return nil, fmt.Errorf("telegram: details exceed %d parts", MaxDetailsParts)
 	}
 	for i, part := range cfg.DetailsParts {
 		if part == "" || runeCount(part) > MaxMessageRunes {
