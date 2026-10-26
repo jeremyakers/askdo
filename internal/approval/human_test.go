@@ -42,8 +42,11 @@ func TestOversizedReviewedDetailsFailBeforeAnythingIsSent(t *testing.T) {
 
 func waitForFakePollRetirement(t *testing.T, fake *faketelegram.Server) {
 	t.Helper()
-	for fake.PollStats().Active != 0 {
+	for {
 		changed := fake.Changed()
+		if fake.PollStats().Active == 0 {
+			return
+		}
 		select {
 		case <-changed:
 		case <-time.After(2 * time.Second):
