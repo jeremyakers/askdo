@@ -189,8 +189,9 @@ func TestTimeoutKillsForkedProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Grandchildren are reaped by their adopting init, not by Go's Wait. A
-	// zombie is already dead; no live member may remain after cancellation.
+	// Grandchildren are reaped by their adopting init, not by Go's Wait. Both
+	// zombie (Z) and dead (X) tasks have already exited; no live member may
+	// remain after cancellation.
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	// Linux can also lose the task after procfs open but before the stat read.
 	if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
@@ -200,7 +201,8 @@ func TestTimeoutKillsForkedProcessGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, tail, ok := strings.Cut(string(stat), ") ")
-	if !ok || !strings.HasPrefix(tail, "Z ") {
+	state, _, _ := strings.Cut(tail, " ")
+	if !ok || state != "Z" && state != "X" {
 		t.Fatalf("forked child still live: %s", stat)
 	}
 }

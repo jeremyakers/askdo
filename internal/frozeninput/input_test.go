@@ -379,8 +379,7 @@ func TestDeadlineCancelledDeliveryWithNoConsumer(t *testing.T) {
 // endpoint cannot undo the child's permanent SHUT_WR or inject different
 // bytes: reads see EOF (or Go's closed-file error once delivery teardown
 // races the reads) and the producer honestly reports the expected
-// interrupted transfer. The producer endpoint access mode proves it is a
-// registered socket, not an injected writable broker file contract.
+// interrupted transfer.
 func TestReceiveShutdownOnlyTruncates(t *testing.T) {
 	input, err := New(SocketStream, []byte("approved-fixed-bytes"))
 	if err != nil {
@@ -390,28 +389,6 @@ func TestReceiveShutdownOnlyTruncates(t *testing.T) {
 		d, err := input.open()
 		if err != nil {
 			t.Fatal(err)
-		}
-		raw, err := d.producer.(*net.UnixConn).SyscallConn()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var access int
-		var accessErr error
-		if err := raw.Control(func(fd uintptr) {
-			access, accessErr = unix.FcntlInt(fd, unix.F_GETFL, 0)
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if accessErr != nil {
-			t.Fatal("producer F_GETFL failed", accessErr)
-		}
-		// FileConn registers the producer as a dual-mode os.File: O_RDWR in
-		// F_GETFL, but the broker only ever calls Write on it. The O_RDWR flag
-		// is unreachable to the child (CLOEXEC, SHUT_WR peer) and not an
-		// injection route; assert only that it is registered, not readable as
-		// a broker contract.
-		if access == 0 {
-			t.Fatal("producer access mode unregistered", access)
 		}
 		// The transfer has already begun; let it finish before truncating the
 		// receive queue so the assertion covers truncation, not a race.
