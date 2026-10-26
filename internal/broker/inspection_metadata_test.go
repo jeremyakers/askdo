@@ -68,10 +68,32 @@ func TestRootMetadataDisabledAndUIDAuthorizationBeforeReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "private-guess") || strings.Contains(string(data), "999") {
-		t.Fatal("unauthorized selector persisted")
+	seenUnauthorized, seenDisabled := false, false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var obs inspectionObservation
+		if err := json.Unmarshal([]byte(line), &obs); err != nil {
+			t.Fatal(err)
+		}
+		if obs.Selector != nil && obs.Status != "ok" || strings.Contains(string(obs.Metadata), "private-guess") {
+			t.Fatal("unauthorized selector persisted")
+		}
+		if obs.Operation == "sudo_policy" && len(obs.Metadata) != 0 {
+			var result proto.SudoPolicyResult
+			if err := json.Unmarshal(obs.Metadata, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.UID == 999 {
+				t.Fatal("unauthorized UID persisted")
+			}
+		}
+		switch obs.Reason {
+		case "unauthorized_uid":
+			seenUnauthorized = true
+		case "disabled":
+			seenDisabled = true
+		}
 	}
-	if !strings.Contains(string(data), "unauthorized_uid") || !strings.Contains(string(data), "disabled") {
+	if !seenUnauthorized || !seenDisabled {
 		t.Fatal("denial distinctions lost")
 	}
 	info, err := os.Stat(filepath.Join(j.spool.dir, "inspection-evidence.jsonl"))
