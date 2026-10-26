@@ -33,6 +33,9 @@ type Options struct {
 	SocketPath string
 	Stdout     io.Writer
 	Stderr     io.Writer
+	// Verbose restores lifecycle diagnostics for interactive foreground jobs.
+	// Detached and other non-interactive jobs always retain them.
+	Verbose bool
 	// Stdin overrides the process stdin for capture; only regular files and
 	// pipes are read. The caller retains ownership of this descriptor.
 	Stdin     *os.File
@@ -126,6 +129,7 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	var sensitive stringList
 	var review forceReviewFlag
 	var detach bool
+	flags.BoolVar(&options.Verbose, "verbose", false, "show job lifecycle diagnostics")
 	flags.DurationVar(&timeout, "timeout", 0, "maximum time to wait")
 	flags.StringVar(&reason, "reason", "privileged command", "reason for privileged operation")
 	flags.BoolVar(&detach, "detach", false, "run detached without a terminal")
@@ -335,9 +339,12 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 		fmt.Fprintln(options.Stderr, "askdo:", err)
 		return 125
 	}
-	jobLine := "JOB_ID=" + requestID + "\nCANCEL_HANDLE_FILE=" + handleFile + "\n"
-	if n, err := options.Stderr.Write([]byte(jobLine)); err != nil || n != len(jobLine) {
-		return 125
+	options.detached = request.Lifecycle == proto.LifecycleDetached
+	if options.Verbose || options.detached {
+		jobLine := "JOB_ID=" + requestID + "\nCANCEL_HANDLE_FILE=" + handleFile + "\n"
+		if n, err := options.Stderr.Write([]byte(jobLine)); err != nil || n != len(jobLine) {
+			return 125
+		}
 	}
 	submitCtx := ctx
 	if !deadline.IsZero() {
@@ -362,7 +369,6 @@ func runSubmit(ctx context.Context, args []string, options Options) int {
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
 	stopSubmit()
-	options.detached = request.Lifecycle == proto.LifecycleDetached
 	return eventLoop(ctx, conn, requestID, deadline, true, options)
 }
 
@@ -775,7 +781,11 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 			return 125, true, ""
 		}
 		if event.State == "queued" {
-			fmt.Fprintln(options.Stderr, "queued: broker accepted; review/notification pending")
+			if options.Verbose || options.detached {
+				fmt.Fprintln(options.Stderr, "queued: broker accepted; review/notification pending")
+			} else {
+				fmt.Fprintf(options.Stderr, "Job %s: check Telegram for the review card\n", requestID)
+			}
 		}
 		return 0, false, event.State
 	case "progress":
@@ -783,7 +793,9 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil {
 			return 125, true, ""
 		}
-		fmt.Fprintf(options.Stderr, "%s: %s\n", event.Stage, event.Detail)
+		if options.Verbose || options.detached {
+			fmt.Fprintf(options.Stderr, "%s: %s\n", event.Stage, event.Detail)
+		}
 		return 0, false, event.Stage
 	case "stdout", "stderr":
 		var event proto.OutputEvent
