@@ -2,9 +2,9 @@
 
 **Start here:**
 
-- [`../README.md`](../README.md) — requirements, install and onboarding.
-- [`installation.md`](installation.md) — installer asset pinning and advanced
-  Synology DSM behavior.
+- [`../README.md`](../README.md) — requirements, install, onboarding and
+  synchronous submissions (automatic no-TTY detached execution or original-TTY
+  foreground execution).
 - [`clean-cutover.md`](clean-cutover.md) — install alongside another service,
   coordinate Telegram bot use, and plan an operator-approved handoff; no live
   cutover is claimed.
@@ -27,7 +27,7 @@
   optional webfetch, the report schema, inspection boundaries, and the
   `compatibility` snapshot of the host's actual inspection backend.
 
-**Optional fleet mode:**
+**Optional fleet mode (implemented in source; not in the `v1.0.0-rc.1` release binaries):**
 
 - [`fleet-setup.md`](fleet-setup.md) — concrete gateway/host operations:
   TLS, enrollment, revocation, checks, cutover and rollback.
