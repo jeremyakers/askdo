@@ -90,8 +90,10 @@ Before sending any operation, the CLI durably writes an exclusive random-named
 The client creates and secures this directory automatically, including when
 inherited permissions left an earlier directory world-writable; no pre-creation
 or manual `chmod` is needed. It contains only the bearer, job ID, absolute
-socket path and informative host name. Only `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...` are printed, never the
-bearer. If the private file cannot be saved, nothing is submitted. The receipt
+socket path and informative host name. The bearer is never printed. Detached
+submissions print `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...`; interactive
+foreground success instead shows one review prompt and the command output.
+`--verbose` restores those identity and lifecycle lines. If the private file cannot be saved, nothing is submitted. The receipt
 survives interruption, timeout, disconnect and client exit. Automatic removal
 requires an observed terminal result on that submitting/cancelling client;
 otherwise keep it, or explicitly remove it yourself after checking status.

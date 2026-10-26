@@ -17,7 +17,7 @@ func isHelpWord(arg string) bool {
 }
 
 func writeTopHelp(w io.Writer) {
-	fmt.Fprint(w, `usage: askdo [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] -- COMMAND [ARG...]
+	fmt.Fprint(w, `usage: askdo [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] -- COMMAND [ARG...]
        askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
        askdo [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
        askdo status|attach JOB_ID
@@ -40,9 +40,11 @@ ARGs go to the script. No executable bit is required. Sensitive basenames need
 dependencies. --script cannot be combined with --bundle, --entry, or captured
 stdin. Ordinary COMMAND argv stays raw/live; scripts there are not snapshotted.
 
-Submission prints JOB_ID and a private CANCEL_HANDLE_FILE path. Keep that file
-to interrupt your own running command; --force requests SIGKILL explicitly.
-A stop acknowledgment is not proof of exit. Use status or attach to confirm.
+Foreground jobs print one review prompt and only the command's output.
+Use --verbose for lifecycle diagnostics and JOB_ID/CANCEL_HANDLE_FILE; detached
+jobs always print them. Keep the handle file to interrupt your own running
+command; --force requests SIGKILL explicitly. A stop acknowledgment is not
+proof of exit. Use status or attach to confirm.
 
 Operator commands (root):
   askdo fleet join https://gateway[:port] [--ca-file PATH]

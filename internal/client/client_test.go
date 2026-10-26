@@ -292,7 +292,7 @@ func TestAcceptedEventOnlyReportsMatchingQueuedState(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stdout, stderr bytes.Buffer
-			code, terminal, state := handleEvent(body, requestID, Options{Stdout: &stdout, Stderr: &stderr})
+			code, terminal, state := handleEvent(body, requestID, Options{Stdout: &stdout, Stderr: &stderr, detached: true})
 			if code != tc.code || terminal != tc.terminal || stderr.String() != tc.want || stdout.Len() != 0 {
 				t.Fatalf("code=%d terminal=%v stdout=%q stderr=%q", code, terminal, stdout.String(), stderr.String())
 			}
