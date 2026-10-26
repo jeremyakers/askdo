@@ -34,7 +34,7 @@ type containerPTY struct {
 func startContainerPTY(t *testing.T) *containerPTY {
 	t.Helper()
 	cmd := exec.Command("/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/bash --noprofile --norc -i", "/dev/null")
-	cmd.Env = append(os.Environ(), "TERM=xterm", "PS1=ASKDO_PROMPT> ")
+	cmd.Env = append(os.Environ(), "TERM=xterm", "PS1=ASKDO_PROMPT> ", "XDG_STATE_HOME=/home/askdo-human/.local/state")
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestForegroundSudoContainer(t *testing.T) {
 		ctx, stop := context.WithTimeout(context.Background(), timeout)
 		defer stop()
 		cmd := exec.CommandContext(ctx, command, args...)
-		cmd.Env = append(os.Environ(), "TERM=xterm")
+		cmd.Env = append(os.Environ(), "TERM=xterm", "XDG_STATE_HOME=/home/askdo-human/.local/state")
 		output, err := cmd.CombinedOutput()
 		if ctx.Err() != nil {
 			t.Fatalf("timeout: %s %v: %s", command, args, output)
@@ -203,7 +203,7 @@ func TestForegroundSudoContainer(t *testing.T) {
 	}
 	// script allocates a real controlling PTY; runuser retains the session and
 	// supplies actual unprivileged SO_PEERCRED to the broker.
-	good := "tty; id -u; set -- $(/bin/cat /proc/$$/stat); echo PGRP_SID_TTY=$5,$6,$7; /usr/local/bin/askdo --reason container-foreground -- /usr/bin/id -u; code=$?; echo ASKDO_EXIT=$code; exit $code"
+	good := "tty; id -u; set -- $(/bin/cat /proc/$$/stat); echo PGRP_SID_TTY=$5,$6,$7; /usr/local/bin/askdo --verbose --reason container-foreground -- /usr/bin/id -u; code=$?; echo ASKDO_EXIT=$code; exit $code"
 	output, status := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+good+"'", "/dev/null")
 	t.Logf("original PTY / UID / root child / CLI exit: %q status=%d", output, status)
 	if status != 0 || !strings.Contains(output, "/dev/pts/") || !strings.Contains(output, "ASKDO_EXIT=0") || !strings.Contains(output, "\r\n0\r\n") || !strings.Contains(output, "\r\n1001\r\n") {
@@ -215,7 +215,7 @@ func TestForegroundSudoContainer(t *testing.T) {
 	t.Run("ctrl-c", func(t *testing.T) {
 		p := startContainerPTY(t)
 		p.until(t, "ASKDO_PROMPT> ")
-		p.send(t, "/usr/local/bin/askdo --reason interrupt -- /bin/sh -c 'echo INTERRUPT_READY; exec /bin/sleep 30'; echo INTERRUPT_EXIT=$?\n")
+		p.send(t, "/usr/local/bin/askdo --verbose --reason interrupt -- /bin/sh -c 'echo INTERRUPT_READY; exec /bin/sleep 30'; echo INTERRUPT_EXIT=$?\n")
 		p.until(t, "INTERRUPT_READY\r\n")
 		id := containerJobID(t, p.snapshot())
 		p.send(t, "\x03")
@@ -239,7 +239,7 @@ func TestForegroundSudoContainer(t *testing.T) {
 	t.Run("ctrl-z-fg", func(t *testing.T) {
 		p := startContainerPTY(t)
 		p.until(t, "ASKDO_PROMPT> ")
-		p.send(t, "/usr/local/bin/askdo --reason stop-resume -- /bin/sh -c 'echo STOP_READY; read answer; echo STOP_RESUMED'\n")
+		p.send(t, "/usr/local/bin/askdo --verbose --reason stop-resume -- /bin/sh -c 'echo STOP_READY; read answer; echo STOP_RESUMED'\n")
 		p.until(t, "STOP_READY\r\n")
 		id := containerJobID(t, p.snapshot())
 		p.send(t, "\x1a")
@@ -271,7 +271,7 @@ func TestForegroundSudoContainer(t *testing.T) {
 		p := startContainerPTY(t)
 		p.until(t, "ASKDO_PROMPT> ")
 		marker := filepath.Join(root, "disconnect-dispatches")
-		p.send(t, "/usr/local/bin/askdo --reason disconnect -- /bin/sh -c 'echo once >> "+marker+"; echo DISCONNECT_READY:$$; exec /bin/sleep 30'\n")
+		p.send(t, "/usr/local/bin/askdo --verbose --reason disconnect -- /bin/sh -c 'echo once >> "+marker+"; echo DISCONNECT_READY:$$; exec /bin/sleep 30'\n")
 		match := p.untilMatch(t, `DISCONNECT_READY:([0-9]+)\r\n`)
 		pid, err := strconv.Atoi(match[1])
 		if err != nil {
@@ -365,7 +365,7 @@ func TestForegroundSudoContainer(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	out, code = run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /usr/local/bin/askdo --reason wrong-pty -- /usr/bin/id -u", "/dev/null")
+	out, code = run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /usr/local/bin/askdo --verbose --reason wrong-pty -- /usr/bin/id -u", "/dev/null")
 	t.Logf("use_pty mismatch: exit=%d output=%q", code, out)
 	if code == 0 || strings.Contains(out, "\r\n0\r\n") {
 		t.Fatalf("PTY mismatch executed: %q (exit %d)", out, code)
