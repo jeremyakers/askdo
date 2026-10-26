@@ -24,9 +24,14 @@ func writeTopHelp(w io.Writer) {
        askdo cancel --handle-file PATH [--force]
        askdo cancel JOB_ID                 legacy jobs, before dispatch only
        askdo auto-approve status | set N | off
+       askdo upgrade [--release TAG] [--operation ID]
 
 Run COMMAND with privilege after approval. Put -- before COMMAND so its own
 flags are passed to it unchanged.
+
+Upgrade requires human approval and needs no sudo. Without --release, it selects
+the newest stable release, or a prerelease if none exists. --operation resumes
+observing an upgrade without resubmitting.
 
 --script captures only PATH, preserving its basename and bytes, as a one-file
 bundle. Like --bundle, it runs with /bin/bash from the invocation directory;
