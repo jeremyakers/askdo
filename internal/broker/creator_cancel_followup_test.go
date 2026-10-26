@@ -23,6 +23,19 @@ import (
 
 // A real leader exits 0 while its ordinary same-group child retains both output
 // pipes. No setsid/setpgid escape and no direct-file output shortcut is involved.
+func writeCreatorFixtureFile(t *testing.T, path string, body []byte) {
+	t.Helper()
+	// Publication is atomic: the reader must never parse an empty or partial
+	// identity and strand the real process before the kill cleanup is armed.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExitedLeaderPipeHelper(t *testing.T) {
 	index := -1
 	for i, arg := range os.Args {
@@ -36,9 +49,7 @@ func TestExitedLeaderPipeHelper(t *testing.T) {
 	}
 	mode, dir := os.Args[index+1], os.Args[index+2]
 	if mode == "leader" {
-		if err := os.WriteFile(filepath.Join(dir, "leader"), []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
-			t.Fatal(err)
-		}
+		writeCreatorFixtureFile(t, filepath.Join(dir, "leader"), []byte(strconv.Itoa(os.Getpid())))
 		child := exec.Command(os.Args[0], "-test.run=^TestExitedLeaderPipeHelper$", "--", "--pipe-holder", os.Args[index+3], dir)
 		child.Stdout, child.Stderr = os.Stdout, os.Stderr
 		if err := child.Start(); err != nil {
@@ -54,9 +65,7 @@ func TestExitedLeaderPipeHelper(t *testing.T) {
 		signal.Notify(interrupt, os.Interrupt)
 		defer signal.Stop(interrupt)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "holder"), []byte(fmt.Sprintf("%d %d", os.Getpid(), unix.Getpgrp())), 0600); err != nil {
-		t.Fatal(err)
-	}
+	writeCreatorFixtureFile(t, filepath.Join(dir, "holder"), []byte(fmt.Sprintf("%d %d", os.Getpid(), unix.Getpgrp())))
 	fmt.Println("HOLDER_READY")
 	if mode == "ignore" {
 		<-time.NewTimer(600 * time.Second).C
@@ -92,10 +101,6 @@ func TestCreatorCancelAfterLeaderExitWhileOwnedOutputDrains(t *testing.T) {
 			holderFields := strings.Fields(string(waitCreatorFile(t, filepath.Join(dir, "holder"))))
 			holder, _ := strconv.Atoi(holderFields[0])
 			group, _ := strconv.Atoi(holderFields[1])
-			leader, _ := strconv.Atoi(string(waitCreatorFile(t, filepath.Join(dir, "leader"))))
-			if group != leader {
-				t.Fatal("fixture child escaped the job's group")
-			}
 			finished := false
 			defer func() {
 				if !finished {
@@ -107,6 +112,10 @@ func TestCreatorCancelAfterLeaderExitWhileOwnedOutputDrains(t *testing.T) {
 					waitForState(t, h.daemon.store, testUID, id, store.StateFinished)
 				}
 			}()
+			leader, _ := strconv.Atoi(string(waitCreatorFile(t, filepath.Join(dir, "leader"))))
+			if group != leader {
+				t.Fatal("fixture child escaped the job's group")
+			}
 			leaderZombie := fixtureEventually(3*time.Second, func() bool {
 				body, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", leader))
 				if err != nil {
@@ -295,6 +304,9 @@ func TestCreatorCancelCloseJoinsDeliveryBeforeClosingStore(t *testing.T) {
 
 func TestCreatorCancelCloseRetiresIdleUnpublishedActor(t *testing.T) {
 	h := newBrokerHarness(t, nil, nil)
+	// Wait for the accept loop before racing Close with daemon shutdown. Closing
+	// during serve startup is a different, invalid lifecycle for this fixture.
+	autoPreferenceRequest(t, h, testUID, `{"op":"auto_approval","action":"get"}`)
 	j := &jobRuntime{daemon: h.daemon, done: make(chan struct{})}
 	defer close(j.done)
 	j.requestOwnedCancel(store.CancelInterrupt)
