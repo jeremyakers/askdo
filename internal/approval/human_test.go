@@ -40,17 +40,18 @@ func TestOversizedReviewedDetailsFailBeforeAnythingIsSent(t *testing.T) {
 	}
 }
 
-func waitForFakePollRetirement(t *testing.T, fake *faketelegram.Server) {
+func waitForFakePollRetirement(t *testing.T, fake *faketelegram.Server, previousPolls int) {
 	t.Helper()
 	for {
 		changed := fake.Changed()
-		if fake.PollStats().Active == 0 {
+		stats := fake.PollStats()
+		if stats.Active == 0 && len(stats.Offsets) > previousPolls {
 			return
 		}
 		select {
 		case <-changed:
 		case <-time.After(2 * time.Second):
-			t.Fatal("fake Telegram poll did not retire")
+			t.Fatal("fake Telegram poll did not enter and retire")
 		}
 	}
 }
@@ -77,6 +78,7 @@ func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.
 	failure := errors.New("fixture durable write failed")
 	transport := Transport{Client: client, Subscribe: hub.Subscribe, Progress: func(proto.Progress) error { return nil }, OnSent: func(proto.NotificationSent) error { return failure }}
 	// When delivery succeeds but durable notification recording fails.
+	pollsBefore := len(fake.PollStats().Offsets)
 	decision, err := NotifyUnreviewed(context.Background(), transport, facts)
 	// Then no callback acquires authority, only that card is cleaned, and no resend occurs.
 	if decision != nil || !errors.Is(err, failure) {
@@ -97,7 +99,7 @@ func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.
 	}
 	// A later operation on the same bot can still approve its own card. Wait for
 	// the canceled request's fake handler to retire before starting it.
-	waitForFakePollRetirement(t, fake)
+	waitForFakePollRetirement(t, fake, pollsBefore)
 	fake.OnSend(nil)
 	facts.Bootstrap.RequestID = "2026-10-19_#2"
 	facts.Frozen.ManifestDigest = strings.Repeat("b", 64)
