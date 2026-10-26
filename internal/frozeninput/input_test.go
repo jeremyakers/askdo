@@ -382,7 +382,9 @@ func TestDeadlineCancelledDeliveryWithNoConsumer(t *testing.T) {
 // interrupted transfer. The producer endpoint access mode proves it is a
 // registered socket, not an injected writable broker file contract.
 func TestReceiveShutdownOnlyTruncates(t *testing.T) {
-	input, err := New(SocketStream, []byte("approved-fixed-bytes"))
+	// Exceed the socket buffer so the producer cannot finish and close before
+	// the access-mode check. The reader drains it fully before shutdown below.
+	input, err := New(SocketStream, bytes.Repeat([]byte("x"), 1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
