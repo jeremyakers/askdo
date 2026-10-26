@@ -57,7 +57,6 @@ type Server struct {
 	token  string
 	server *httptest.Server
 
-	pollMu      sync.Mutex // serialize long polls while an earlier handler unwinds
 	mu          sync.Mutex
 	nextID      int64
 	sent        []Message
@@ -296,8 +295,6 @@ func (s *Server) handle(ctx context.Context, method string, body map[string]any)
 		return map[string]any{"message_id": id}, nil
 	case "getUpdates":
 		offset := int64(number(body["offset"]))
-		s.pollMu.Lock()
-		defer s.pollMu.Unlock()
 		s.mu.Lock()
 		if s.activePolls != 0 {
 			s.conflicts++

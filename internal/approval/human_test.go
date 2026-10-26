@@ -40,6 +40,18 @@ func TestOversizedReviewedDetailsFailBeforeAnythingIsSent(t *testing.T) {
 	}
 }
 
+func waitForFakePollRetirement(t *testing.T, fake *faketelegram.Server) {
+	t.Helper()
+	for fake.PollStats().Active != 0 {
+		changed := fake.Changed()
+		select {
+		case <-changed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("fake Telegram poll did not retire")
+		}
+	}
+}
+
 func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.T) {
 	// Given an early click before onSent, followed by a failed durable binding.
 	fake := faketelegram.New(t)
@@ -80,7 +92,9 @@ func TestFailedDurableNotificationDiscardsEarlyDecisionAndOwnButtons(t *testing.
 	if len(fake.Answers()) != 0 {
 		t.Fatalf("provisional click was consumed: %v", fake.Answers())
 	}
-	// A later operation on the same bot can still approve its own card.
+	// A later operation on the same bot can still approve its own card. Wait for
+	// the canceled request's fake handler to retire before starting it.
+	waitForFakePollRetirement(t, fake)
 	fake.OnSend(nil)
 	facts.Bootstrap.RequestID = "2026-10-19_#2"
 	facts.Frozen.ManifestDigest = strings.Repeat("b", 64)
