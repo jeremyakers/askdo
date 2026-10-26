@@ -15,7 +15,6 @@ import (
 	"github.com/jeremyakers/askdo/internal/fleetclient"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/gateway"
-	"github.com/jeremyakers/askdo/internal/operator"
 	"github.com/jeremyakers/askdo/internal/providers"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 )
@@ -49,7 +48,7 @@ func checkFleetHost(cfg *config.Config, live bool, out, stderr io.Writer) int {
 		connectionFiles = append(connectionFiles, cfg.Fleet.CAFile)
 	}
 	for _, p := range connectionFiles {
-		if err := operator.TrustedDirectory(filepath.Dir(p), false); err != nil {
+		if err := fleetTrustedDirectory(filepath.Dir(p), false); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}

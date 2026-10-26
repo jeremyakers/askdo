@@ -20,24 +20,26 @@ import (
 // Server owns volatile model sessions. EnrollmentStore remains caller-owned.
 // Wave 3 can register ticket/event handlers directly on this service's mux.
 type Server struct {
-	cfg        Config
-	store      *EnrollmentStore
-	key        ed25519.PrivateKey
-	botIDs     map[string]int64
-	mux        *http.ServeMux
-	mu         sync.Mutex
-	sessions   map[sessionKey]*modelSession
-	capacity   int
-	ctx        context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
-	tickets    *TicketStore
-	dispatcher *dispatcher
-	lock       *os.File
-	closeOnce  sync.Once
-	requestMu  sync.Mutex
-	requests   sync.WaitGroup
-	stopping   bool
+	cfg           Config
+	store         *EnrollmentStore
+	key           ed25519.PrivateKey
+	botIDs        map[string]int64
+	mux           *http.ServeMux
+	mu            sync.Mutex
+	sessions      map[sessionKey]*modelSession
+	capacity      int
+	ctx           context.Context
+	cancel        context.CancelFunc
+	done          chan struct{}
+	tickets       *TicketStore
+	joins         *JoinStore
+	dispatcher    *dispatcher
+	joinCooldowns joinCooldowns
+	lock          *os.File
+	closeOnce     sync.Once
+	requestMu     sync.Mutex
+	requests      sync.WaitGroup
+	stopping      bool
 	// Private deterministic fixture checkpoint; set before model requests start.
 	beforeModelCompletion func()
 }
@@ -76,7 +78,7 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{cfg: cfg, store: store, key: append(ed25519.PrivateKey(nil), key...), botIDs: ids, mux: http.NewServeMux(), sessions: map[sessionKey]*modelSession{}, capacity: capacity, ctx: ctx, cancel: cancel, done: make(chan struct{})}
-	s.lock, err = serviceLock(store.path)
+	s.lock, err = serviceLockOwned(store.path, store.owner)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -89,6 +91,18 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	if err = s.tickets.Recover(ctx); err != nil {
 		return fail(err)
 	}
+	s.joins, err = NewJoinStore(store)
+	if err != nil {
+		return fail(err)
+	}
+	// Card delivery state lives in this process alone, so no card sent before
+	// a restart may approve afterwards: pending joins expire fail closed.
+	if err = s.joins.ExpirePending(ctx); err != nil {
+		return fail(err)
+	}
+	// The ticket poll's one transaction also ingests join callbacks, so the
+	// join inbox shares the ticket store from here on.
+	s.tickets.joins = s.joins
 	var option dispatcherOptions
 	if len(options) > 0 {
 		option = options[0]
@@ -97,10 +111,13 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	if err != nil {
 		return fail(err)
 	}
+	s.dispatcher.joins = s.joins
 	s.mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
 	s.mux.HandleFunc("POST /v1/model-turns", s.handleModelTurn)
 	s.mux.HandleFunc("PUT /v1/tickets/{job}", s.handleTicket)
 	s.mux.HandleFunc("GET /v1/tickets/{job}/events", s.handleEvents)
+	s.mux.HandleFunc("POST /v1/join", s.handleJoinPost)
+	s.mux.HandleFunc("GET /v1/join/{host}", s.handleJoinGet)
 	s.dispatcher.start()
 	go s.reap()
 	return s, nil

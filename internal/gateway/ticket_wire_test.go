@@ -26,6 +26,7 @@ import (
 type botWire struct {
 	mu          sync.Mutex
 	sends       int
+	sent        []botSentMessage
 	failSend    int
 	pollActive  int
 	pollMax     int
@@ -35,6 +36,23 @@ type botWire struct {
 	sendBlock   <-chan struct{}
 	sendEntered chan struct{}
 	cosmetic    func(context.Context, string)
+}
+
+// botSentMessage records one sendMessage request for join-card assertions.
+// Failed is true when the fake rejected that send, so tests can find the
+// message identity the gateway actually observed.
+type botSentMessage struct {
+	Chat    int64
+	Text    string
+	Buttons []telegram.InlineKeyboardButton
+	Failed  bool
+}
+
+// Sent returns the recorded sendMessage requests, in order.
+func (b *botWire) Sent() []botSentMessage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]botSentMessage(nil), b.sent...)
 }
 
 func (b *botWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +98,11 @@ func (b *botWire) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		b.mu.Lock()
 		b.sends++
+		var buttons []telegram.InlineKeyboardButton
+		if req.Markup != nil && len(req.Markup.InlineKeyboard) > 0 {
+			buttons = req.Markup.InlineKeyboard[0]
+		}
+		b.sent = append(b.sent, botSentMessage{Chat: req.Chat, Text: req.Text, Buttons: buttons, Failed: b.sends == b.failSend})
 		id := int64(b.sends)
 		fail := b.sends == b.failSend
 		block, entered := b.sendBlock, b.sendEntered

@@ -77,7 +77,36 @@ sudo systemctl enable --now askdo-gateway
 `gateway check` validates offline; `--live` additionally probes the
 configured provider endpoints with a synthetic fixture (never host files).
 
-## 2. Enroll and connect a host (human approvals, no model)
+## 2. Join a host (recommended)
+
+With askdo installed, run **on the joining host**:
+
+```sh
+sudo askdo fleet join https://gateway.example.com:8443
+# For a private CA, add --ca-file /path/to/root-owned-read-only-ca.pem
+```
+
+Match the printed request code to the dedicated **fleet enrollment** card in
+Telegram, then tap **Approve**. No server-side host command, bundle copy,
+profile flag or channel flag is needed. Join automatically allows/selects the
+gateway's configured profiles (up to the existing 16-profile selection limit)
+and uses the channel literally named `default`; no profiles means approval-only.
+The host generates its bearer locally; the gateway stores only its hash.
+
+Join preflights local policy before sending a card, installs the root-private
+v5 config and credentials, validates them offline, adds the invoking non-root
+`SUDO_USER` to `askdo` if needed (Linux or DSM), and enables/starts `askdo`.
+Log out and back in **once**, then test askdo. Direct root invocations skip
+the group add with an explanation. A setup failure keeps a valid enrollment
+and reports which local step is incomplete; it does not undo the config.
+
+Requests expire after ten minutes. Denial/expiry never creates an enrollment.
+Pending cards expire fail-closed when the gateway restarts; request a fresh
+card by rerunning join. An approved status response can be retried until its
+expiry, so a lost reply does not lose enrollment. Already-fleet hosts refuse
+join without sending another card. Older gateways must be upgraded first.
+
+### Manual bundle enrollment (advanced/compatibility)
 
 On the gateway, mint one enrollment per host against the channel `init`
 created (individual credentials; one fleet-wide key would lose isolation and

@@ -115,6 +115,8 @@ func (t *gatewayFiles) rollback() error {
 	return errors.Join(errs...)
 }
 
+func (t *gatewayFiles) commit() { t.done = true }
+
 func gatewayInit(args []string, out io.Writer) (err error) {
 	f := gatewayFlags("init")
 	path := f.String("config", defaultGatewayConfig, "root-private gateway configuration")
@@ -473,7 +475,7 @@ func gatewayConnect(args []string, out io.Writer) (err error) {
 	if e != nil {
 		return e
 	}
-	store, e := operator.LoadForFleetMutation(*path)
+	store, e := loadFleetConfig(*path)
 	if e != nil {
 		return e
 	}
@@ -497,6 +499,21 @@ func gatewayConnect(args []string, out io.Writer) (err error) {
 	if len(selected) == 0 && old.Review.Mode != "approval_only" && len(old.Review.ApprovalOnlyUsers) == 0 && !*approval {
 		return errors.New("empty profile selection requires explicit --approval-only")
 	}
+	return connectFleet(store, bundle, selected, *approval, fleetConnectOptions{configPath: *path, credentialsDir: *creds, bundleFile: *enrollment, force: *force}, out)
+}
+
+// connectFleet is the common in-memory credential/config transaction for both
+// bundle connect and fleet join. A join has no bundleFile, so no provenance
+// path is invented. Existing connect selection and force semantics stay above.
+func connectFleet(store fleetConfigStore, bundle gateway.EnrollmentBundle, selected []string, approval bool, opts fleetConnectOptions, out io.Writer) (err error) {
+	if e := bundle.Validate(); e != nil {
+		return e
+	}
+	if e := bundle.ValidateSelection(selected); e != nil {
+		return e
+	}
+	old := store.Config()
+	var e error
 	// Retained owner bundles contain the same active bearer as the installed
 	// credential. Preserve all known prior imports, not merely the current host.
 	protectedBundles := []string{}
@@ -505,41 +522,29 @@ func gatewayConnect(args []string, out io.Writer) (err error) {
 	}
 	alreadyRecorded := false
 	for _, path := range protectedBundles {
-		if path == *enrollment {
+		if path == opts.bundleFile {
 			alreadyRecorded = true
 			break
 		}
 	}
-	if !alreadyRecorded {
-		protectedBundles = append(protectedBundles, *enrollment)
+	if opts.bundleFile != "" && !alreadyRecorded {
+		protectedBundles = append(protectedBundles, opts.bundleFile)
 	}
 	if e = (config.FleetConfig{EnrollmentBundleFiles: protectedBundles}).ValidateEnrollmentBundleFiles(); e != nil {
 		return e
 	}
-	if *creds == "" {
-		*creds = filepath.Join(filepath.Dir(*path), "credentials")
+	if opts.credentialsDir == "" {
+		opts.credentialsDir = filepath.Join(filepath.Dir(opts.configPath), "credentials")
 	}
-	if e = operator.TrustedDirectory(*creds, true); e != nil {
+	if e = fleetTrustedDirectory(opts.credentialsDir, true); e != nil {
 		return e
 	}
-	ttl := int64(7200)
-	if old.Fleet != nil {
-		ttl = old.Fleet.ApprovalTTL
-	} else if old.Telegram.ApprovalTTL.Value() > 0 {
-		ttl = int64(old.Telegram.ApprovalTTL.Value() / time.Second)
-	}
-	if old.Fleet == nil {
-		for _, ch := range old.Telegram.Channels {
-			if ch.Name == old.Telegram.DefaultChannel && ch.ApprovalTTL.Value() > 0 {
-				ttl = int64(ch.ApprovalTTL.Value() / time.Second)
-			}
-		}
-	}
-	fleet := config.FleetConfig{URL: bundle.URL, HostID: bundle.HostID, EnrollmentFile: filepath.Join(*creds, bundle.HostID+".bearer"), VerificationKeyFile: filepath.Join(*creds, bundle.HostID+".pub"), ApprovalTTL: ttl, EnrollmentBundleFiles: protectedBundles}
-	tx := new(gatewayFiles)
+	ttl := old.FleetConversionApprovalTTL()
+	fleet := config.FleetConfig{URL: bundle.URL, HostID: bundle.HostID, EnrollmentFile: filepath.Join(opts.credentialsDir, bundle.HostID+".bearer"), VerificationKeyFile: filepath.Join(opts.credentialsDir, bundle.HostID+".pub"), ApprovalTTL: ttl, EnrollmentBundleFiles: protectedBundles}
+	tx := newFleetFiles()
 	defer func() { err = errors.Join(err, tx.rollback()) }()
 	install := func(path string, bytes []byte, kind operator.CredentialKind) error {
-		if _, e := os.Lstat(path); e == nil && *force {
+		if _, e := os.Lstat(path); e == nil && opts.force {
 			secret := kind == operator.CredentialGatewaySecret
 			if e = config.ValidateRootFile(path, secret); e != nil {
 				return e
@@ -574,17 +579,23 @@ func gatewayConnect(args []string, out io.Writer) (err error) {
 		return e
 	}
 	if bundle.CAPEM != "" {
-		fleet.CAFile = filepath.Join(*creds, bundle.HostID+".ca.pem")
+		fleet.CAFile = filepath.Join(opts.credentialsDir, bundle.HostID+".ca.pem")
 		if e = install(fleet.CAFile, []byte(bundle.CAPEM), operator.CredentialTrust); e != nil {
 			return e
 		}
 	}
-	next := old.WithFleet(fleet, selected, *approval)
+	next := old.WithFleet(fleet, selected, approval)
+	if opts.join && approval {
+		// No gateway profiles explicitly means human approval for every user.
+		// Per-user human-only exemptions are then redundant and incompatible
+		// with global approval_only. Other policy and grants remain unchanged.
+		next.Review.ApprovalOnlyUsers = nil
+	}
 	if e = store.SaveFleet(next); e != nil {
 		return e
 	}
-	tx.done = true
-	fmt.Fprintf(out, "connected %s\nconfiguration: %s\nenrollment: %s\nverification key: %s\n", bundle.HostID, *path, fleet.EnrollmentFile, fleet.VerificationKeyFile)
+	tx.commit()
+	fmt.Fprintf(out, "connected %s\nconfiguration: %s\nenrollment: %s\nverification key: %s\n", bundle.HostID, opts.configPath, fleet.EnrollmentFile, fleet.VerificationKeyFile)
 	return nil
 }
 

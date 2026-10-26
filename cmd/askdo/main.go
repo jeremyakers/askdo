@@ -108,6 +108,8 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 		return runConfig(args[1:], os.Stdout, os.Stderr)
 	case "gateway":
 		return runGateway(args[1:], os.Stdout, os.Stderr)
+	case "fleet":
+		return runFleet(args[1:], os.Stdout, os.Stderr)
 	case "inspection":
 		return runInspection(args[1:], os.Stdout, os.Stderr)
 	case "auth":
