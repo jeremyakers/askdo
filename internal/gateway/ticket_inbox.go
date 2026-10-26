@@ -81,6 +81,34 @@ func (s *TicketStore) Ingest(ctx context.Context, token string, updates []telegr
 	if err != nil {
 		return err
 	}
+	// Join candidates ride the same transaction: advancing the durable offset
+	// can never drop either the ticket or the join callbacks.
+	// Empty polls cannot match a join and must not cause dispatcher scans.
+	var joinCandidates []joinCandidate
+	if s.joins != nil && len(updates) != 0 {
+		rows, err = tx.QueryContext(ctx, "SELECT host_id,nonce,targets_json FROM gateway_pending_joins WHERE token_hash=? AND state='pending' AND expires_at>?", token, time.Now().Unix())
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var c joinCandidate
+			var targets []byte
+			if err = rows.Scan(&c.host, &c.nonce, &targets); err != nil {
+				rows.Close()
+				return err
+			}
+			if err = json.Unmarshal(targets, &c.targets); err != nil {
+				rows.Close()
+				return err
+			}
+			joinCandidates = append(joinCandidates, c)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+	}
 	original := offset
 	retained := false
 	for _, u := range updates {
@@ -130,6 +158,48 @@ func (s *TicketStore) Ingest(ctx context.Context, token string, updates []telegr
 			}
 			data, _ := json.Marshal(facts)
 			result, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO gateway_callback_inbox(token_hash,update_id,host_id,job_id,facts) VALUES(?,?,?,?,?)", token, u.UpdateID, c.key.host, c.key.job, data)
+			if err != nil {
+				return err
+			}
+			if n, err := result.RowsAffected(); err != nil || n > 0 {
+				retained = true
+			}
+		}
+		for _, c := range joinCandidates {
+			if nonce != c.nonce {
+				continue
+			}
+			// Retain only callbacks from a configured chat's operator: the
+			// actual card identity is validated at consume time, once the
+			// card exists to compare against.
+			valid := false
+			for _, target := range c.targets {
+				if target.ChatID != facts.Chat {
+					continue
+				}
+				for _, id := range target.OperatorUserIDs {
+					if id == facts.Operator {
+						valid = true
+					}
+				}
+			}
+			if !valid {
+				continue
+			}
+			// Early callbacks are retained independently; overflow confers
+			// no authority and cannot monopolize the shared token queue.
+			var total, perJoin int
+			if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM gateway_join_inbox WHERE token_hash=?", token).Scan(&total); err != nil {
+				return err
+			}
+			if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM gateway_join_inbox WHERE host_id=?", c.host).Scan(&perJoin); err != nil {
+				return err
+			}
+			if total >= 4096 || perJoin >= 128 {
+				continue
+			}
+			data, _ := json.Marshal(facts)
+			result, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO gateway_join_inbox(token_hash,update_id,host_id,facts) VALUES(?,?,?,?)", token, u.UpdateID, c.host, string(data))
 			if err != nil {
 				return err
 			}

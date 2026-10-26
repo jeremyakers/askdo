@@ -118,8 +118,9 @@ func (p EnrollmentPolicy) validate() error {
 }
 
 type EnrollmentStore struct {
-	db   *sql.DB
-	path string
+	db    *sql.DB
+	path  string
+	owner func(os.FileInfo) bool
 	// changes wakes the dispatcher after this process commits work for it. Other
 	// processes' commits reach it through dataVersion instead.
 	changes wakeHub
@@ -137,6 +138,10 @@ const gatewayApplicationID = 0x41534757 // ASGW; never adopt a local jobs DB.
 // symlinks, ownership and application/schema identity are checked, never fixed
 // silently. New databases are created 0600 in an existing trusted directory.
 func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
+	return openEnrollmentStore(path, enrollmentOwner)
+}
+
+func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*EnrollmentStore, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("gateway database path must be absolute and clean")
 	}
@@ -144,7 +149,7 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !parent.IsDir() || !enrollmentOwner(parent) || parent.Mode().Perm()&0022 != 0 {
+	if !parent.IsDir() || !owner(parent) || parent.Mode().Perm()&0022 != 0 {
 		return nil, errors.New("gateway database directory must be root-owned and not group/world writable")
 	}
 	fresh := false
@@ -161,7 +166,7 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !enrollmentOwner(info) || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !owner(info) || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return nil, errors.New("gateway database must be a root:root nonsymlink regular file mode 0600")
 	}
 	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
@@ -172,12 +177,14 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !artifact.Mode().IsRegular() || artifact.Mode().Perm() != 0600 || !enrollmentOwner(artifact) || artifact.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		if !artifact.Mode().IsRegular() || artifact.Mode().Perm() != 0600 || !owner(artifact) || artifact.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 			return nil, errors.New("unsafe gateway database sidecar")
 		}
 	}
 	// Check the header before opening SQLite: even a PRAGMA can trigger hot
 	// journal recovery, which must never mutate an unrelated local job store.
+	// The header's user-version word is the same one the open path validates;
+	// both v1 and v2 databases are opened further below.
 	if !fresh {
 		fd, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
@@ -186,7 +193,8 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 		var header [100]byte
 		_, readErr := io.ReadFull(fd, header[:])
 		closeErr := fd.Close()
-		if readErr != nil || closeErr != nil || string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != gatewayApplicationID || binary.BigEndian.Uint32(header[60:64]) != 1 {
+		headerVersion := binary.BigEndian.Uint32(header[60:64])
+		if readErr != nil || closeErr != nil || string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != gatewayApplicationID || headerVersion != 1 && headerVersion != 2 {
 			return nil, errors.New("not a supported gateway enrollment database")
 		}
 	}
@@ -217,13 +225,13 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 			return fail(err)
 		}
 		_, err = tx.Exec(`PRAGMA application_id = 1095976791;
-   PRAGMA user_version = 1;
+   PRAGMA user_version = 2;
    CREATE TABLE gateway_enrollments (
     host_id TEXT PRIMARY KEY,
     bearer_hash BLOB NOT NULL CHECK(length(bearer_hash)=32),
     enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
     policy_json TEXT NOT NULL
-   );`)
+   );` + joinSchemaSQL)
 		if err != nil {
 			tx.Rollback()
 			return fail(err)
@@ -231,8 +239,39 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 		if err = tx.Commit(); err != nil {
 			return fail(err)
 		}
-	} else if appID != gatewayApplicationID || version != 1 {
+	} else if appID != gatewayApplicationID || version != 1 && version != 2 {
 		return fail(errors.New("not a supported gateway enrollment database"))
+	} else if version == 1 {
+		// v1 -> v2 adds the join tables in one transaction. Existing
+		// enrollments, tickets and cursors are preserved byte for byte; old
+		// binaries keep refusing v2.
+		tx, err := db.Begin()
+		if err != nil {
+			return fail(err)
+		}
+		_, err = tx.Exec(joinSchemaSQL + `
+   PRAGMA user_version = 2;`)
+		if err != nil {
+			tx.Rollback()
+			return fail(err)
+		}
+		if err = tx.Commit(); err != nil {
+			return fail(err)
+		}
+	} else {
+		// Existing v2 databases predate lifecycle indexes. This additive,
+		// idempotent upgrade does not change their schema generation or data.
+		tx, err := db.Begin()
+		if err != nil {
+			return fail(err)
+		}
+		if _, err = tx.Exec(joinLifecycleIndexes); err != nil {
+			tx.Rollback()
+			return fail(err)
+		}
+		if err = tx.Commit(); err != nil {
+			return fail(err)
+		}
 	}
 	rows, err := db.Query("SELECT host_id,bearer_hash,enabled,policy_json FROM gateway_enrollments LIMIT 0")
 	if err != nil {
@@ -243,7 +282,7 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 	if err != nil || !os.SameFile(info, current) {
 		return fail(errors.New("gateway database path changed during open"))
 	}
-	return &EnrollmentStore{db: db, path: path}, nil
+	return &EnrollmentStore{db: db, path: path, owner: owner}, nil
 }
 
 func (s *EnrollmentStore) Close() error { return s.db.Close() }

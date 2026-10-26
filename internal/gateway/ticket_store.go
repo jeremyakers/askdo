@@ -18,9 +18,12 @@ var ErrTicketState = errors.New("ticket transition unavailable")
 
 // TicketStore shares only the independent gateway enrollment database. All
 // authorization transitions and signed events commit together in SQLite.
+// The server wires the join store in so one Ingest transaction covers both
+// callback streams behind one durable offset.
 type TicketStore struct {
 	enrollment *EnrollmentStore
 	key        ed25519.PrivateKey
+	joins      *JoinStore
 }
 type TicketRecord struct {
 	Submission fleetproto.TicketSubmission
@@ -51,7 +54,7 @@ func NewTicketStore(e *EnrollmentStore, key ed25519.PrivateKey) (*TicketStore, e
 	if err != nil {
 		return nil, fmt.Errorf("initialize ticket schema: %w", err)
 	}
-	return &TicketStore{e, append(ed25519.PrivateKey(nil), key...)}, nil
+	return &TicketStore{enrollment: e, key: append(ed25519.PrivateKey(nil), key...)}, nil
 }
 
 func enabled(ctx context.Context, tx *sql.Tx, host string) error {

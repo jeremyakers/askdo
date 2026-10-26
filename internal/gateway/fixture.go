@@ -6,7 +6,19 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"os"
+	"syscall"
 )
+
+// OpenFixtureEnrollmentStore is the disposable integration fixture's ownership
+// seam. Only this fixture-tag build can use the current unprivileged UID; all
+// SQLite identity, mode, symlink, schema and transaction checks stay real.
+func OpenFixtureEnrollmentStore(path string) (*EnrollmentStore, error) {
+	return openEnrollmentStore(path, func(info os.FileInfo) bool {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		return ok && stat.Uid == uint32(os.Geteuid()) && stat.Gid == uint32(os.Getegid())
+	})
+}
 
 // NewFixtureServer is compiled only for disposable fleet integration QA. Normal
 // builds have no exported Telegram endpoint override. All production config,

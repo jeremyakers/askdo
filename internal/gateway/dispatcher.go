@@ -37,8 +37,13 @@ const recheckInterval = time.Second
 // cleanupBatch bounds one cleanup query; a full batch means more may be owed.
 const cleanupBatch = 32
 
+// maxJoinCardAttempts bounds one in-process card delivery's retries; past it
+// the join stays pending until its own expiry retires it fail closed.
+const maxJoinCardAttempts = 5
+
 type dispatcher struct {
 	store           *TicketStore
+	joins           *JoinStore
 	ctx             context.Context
 	bots            map[string]*dispatchBot
 	aliases         map[string]string
@@ -69,6 +74,10 @@ func newDispatcher(ctx context.Context, store *TicketStore, cfg Config, ids map[
 	return d, nil
 }
 func (d *dispatcher) start() {
+	if d.joins != nil {
+		d.wg.Add(1)
+		go func() { defer d.wg.Done(); d.deliverJoinCards() }()
+	}
 	for i := 0; i < cosmeticWorkerCount; i++ {
 		d.wg.Add(1)
 		go func() { defer d.wg.Done(); d.cosmeticWorker() }()
@@ -247,6 +256,96 @@ func (d *dispatcher) deliver(r TicketRecord) error {
 	}
 	return d.store.Complete(ctx, string(b.HostID), string(b.JobID))
 }
+
+// deliverJoinCards claims and delivers pending enrollment cards. Each join
+// is claimed exclusively so the worker pool never duplicates a card, and a
+// transient Telegram failure retries with backoff until the attempt budget
+// is spent; the join's own expiry then retires it fail closed.
+func (d *dispatcher) deliverJoinCards() {
+	for d.ctx.Err() == nil {
+		wake := d.store.enrollment.changes.listen()
+		cards, err := d.joins.CardsDue(d.ctx)
+		failed := err != nil
+		for _, card := range cards {
+			bot := d.bots[card.Token]
+			if bot == nil || !bot.healthy() {
+				continue
+			}
+			won, err := d.joins.ClaimCard(d.ctx, card.HostID)
+			if err != nil {
+				failed = true
+				continue
+			}
+			if !won {
+				continue
+			}
+			// One owner retains its bounded retry state until delivery ends.
+			// This worker never holds up ticket sends or either callback inbox.
+			ctx, cancel := context.WithDeadline(d.ctx, time.Unix(card.ExpiresAt, 0))
+			for attempt := 0; attempt < maxJoinCardAttempts; attempt++ {
+				err = d.deliverJoinCard(bot, card)
+				if err == nil || ctx.Err() != nil {
+					break
+				}
+				if attempt+1 < maxJoinCardAttempts && !pause(ctx, time.Second<<attempt) {
+					break
+				}
+			}
+			cancel()
+			// Exhausted sends remain unapprovable (not delivered) until expiry.
+			// A restart expires them along with every other pending join.
+			if err != nil && d.ctx.Err() == nil {
+				d.pollLog().WarnContext(d.ctx, "fleet enrollment card delivery failed", "host_id", card.HostID)
+			}
+		}
+		var retry time.Time
+		if failed {
+			retry = time.Now().Add(recheckInterval)
+		}
+		if !waitFor(d.ctx, wake, retry, time.Now) {
+			return
+		}
+	}
+}
+
+// deliverJoinCard sends one dedicated enrollment card per configured chat,
+// recording each delivered message before proceeding, and marks the join's
+// cards complete only once every chat holds one.
+func (d *dispatcher) deliverJoinCard(bot *dispatchBot, card JoinCard) error {
+	text, keyboard, err := telegram.RenderJoinCard(telegram.JoinCardInput{
+		Hostname: card.Hostname,
+		Code:     fleetproto.JoinRequestCode(fleetproto.ID(card.HostID)),
+		Profiles: card.Profiles,
+		Channel:  card.Channel,
+		Expiry:   time.Unix(card.ExpiresAt, 0),
+	}, card.Nonce)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithDeadline(d.ctx, time.Unix(card.ExpiresAt, 0))
+	defer cancel()
+	for _, target := range card.Targets {
+		if !bot.healthy() {
+			return errors.New("delivery bot unavailable")
+		}
+		id, err := d.joins.CardID(ctx, card.HostID, target.ChatID)
+		if err != nil {
+			return err
+		}
+		if id > 0 {
+			continue
+		}
+		id, err = bot.client.SendHTMLMessage(ctx, target.ChatID, text, &keyboard)
+		if err != nil {
+			return err
+		}
+		if err = d.joins.CardSent(ctx, card.HostID, target.ChatID, id); err != nil {
+			return err
+		}
+	}
+	return d.joins.CardComplete(ctx, card.HostID, len(card.Targets))
+}
+
 func (d *dispatcher) maintenance() {
 	for d.ctx.Err() == nil {
 		// Listen before reading, as in deliverWorker.
@@ -311,6 +410,52 @@ func (d *dispatcher) maintenance() {
 					kind = cosmeticDetails
 				}
 				d.enqueueCosmetic(cosmeticJob{kind: kind, bot: bot, record: r, chat: entry.facts.Chat, callback: entry.facts.CallbackID})
+			}
+		}
+		if d.joins != nil {
+			joinEntries, err := d.joins.Inbox(d.ctx)
+			if err != nil {
+				return
+			}
+			for _, entry := range joinEntries {
+				decision, err := d.joins.Consume(d.ctx, entry)
+				if err != nil {
+					failed = true
+					continue
+				}
+				if decision == nil {
+					continue
+				}
+				// Authority is already durably committed; the ack and button
+				// cleanup are cosmetics and must never block other hosts.
+				bot := d.bots[entry.token]
+				if bot == nil {
+					continue
+				}
+				d.enqueueCosmetic(cosmeticJob{kind: cosmeticJoin, bot: bot, callback: entry.facts.CallbackID, join: decision})
+			}
+			if err = d.joins.SweepExpired(d.ctx); err != nil {
+				failed = true
+			}
+			for {
+				jobs, err := d.joins.Cleanup(d.ctx)
+				if err != nil {
+					failed = true
+					break
+				}
+				for _, job := range jobs {
+					if bot := d.bots[job.Token]; bot != nil {
+						d.enqueueCosmetic(cosmeticJob{kind: cosmeticJoin, bot: bot, join: job})
+					}
+				}
+				if len(jobs) < cleanupBatch {
+					break
+				}
+			}
+			if expiry, ok, err := d.joins.NextExpiry(d.ctx); err != nil {
+				failed = true
+			} else if ok {
+				soonest(expiry)
 			}
 		}
 		for more := true; more; {

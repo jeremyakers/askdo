@@ -40,6 +40,7 @@ to interrupt your own running command; --force requests SIGKILL explicitly.
 A stop acknowledgment is not proof of exit. Use status or attach to confirm.
 
 Operator commands (root):
+  askdo fleet join https://gateway[:port] [--ca-file PATH]
   askdo auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]
   askdo config check [--config PATH] [--live] | config install FILE [--config PATH] [--force]
   askdo gateway ...        askdo channel ...        askdo reviewer ...

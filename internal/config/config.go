@@ -245,8 +245,8 @@ func (c *Config) validateMode() error {
 	if _, err := fleetproto.ParseID(f.HostID); err != nil {
 		return fmt.Errorf("fleet.host_id: %w", err)
 	}
-	if f.ApprovalTTL < 30 || f.ApprovalTTL > int64((1<<63-1)/time.Second) {
-		return errors.New("fleet.approval_ttl must be at least 30 seconds and fit a duration")
+	if err := validateFleetTTL(f.ApprovalTTL); err != nil {
+		return err
 	}
 	for _, file := range []struct {
 		name, path string
@@ -258,6 +258,13 @@ func (c *Config) validateMode() error {
 		if err := ValidateRootFile(file.path, file.secret); err != nil {
 			return fmt.Errorf("fleet.%s: %w", file.name, err)
 		}
+	}
+	return nil
+}
+
+func validateFleetTTL(ttl int64) error {
+	if ttl < 30 || ttl > int64((1<<63-1)/time.Second) {
+		return errors.New("fleet.approval_ttl must be at least 30 seconds and fit a duration")
 	}
 	return nil
 }
@@ -680,6 +687,55 @@ func (c *Config) ValidateFleetConversionPolicy() error {
 	return c.ValidateInspection()
 }
 
+// ValidateFleetJoinPolicy checks retained local policy before enrollment asks
+// the operator anything. The gateway selection is not known yet; a prospective
+// profile satisfies required-review's selection rule without checking discarded
+// direct provider/Telegram placeholders. No connection files are read or written.
+// The actual selection and connection still undergo full Validate on SaveFleet.
+func (c *Config) ValidateFleetJoinPolicy() error {
+	if c.Fleet != nil {
+		return errors.New("host is already connected to a fleet")
+	}
+	if err := c.ValidateFleetConversionPolicy(); err != nil {
+		return err
+	}
+	if err := validateFleetTTL(c.FleetConversionApprovalTTL()); err != nil {
+		return err
+	}
+	next := c.WithFleet(FleetConfig{}, []string{"join-preflight"}, false)
+	if err := next.validatePresence(); err != nil {
+		return err
+	}
+	if err := validateReviewSection(next.Review, true); err != nil {
+		return err
+	}
+	if err := next.Review.ResolveApprovalOnlyUsers(); err != nil {
+		return err
+	}
+	if err := next.Review.ResolveAutoApproveGrants(); err != nil {
+		return err
+	}
+	return next.validateLimits()
+}
+
+// FleetConversionApprovalTTL preserves the previous connection's approval
+// lifetime when converting to fleet mode, defaulting to two hours.
+func (c *Config) FleetConversionApprovalTTL() int64 {
+	if c.Fleet != nil {
+		return c.Fleet.ApprovalTTL
+	}
+	ttl := int64(7200)
+	if c.Telegram.ApprovalTTL.Value() > 0 {
+		ttl = int64(c.Telegram.ApprovalTTL.Value() / time.Second)
+	}
+	for _, ch := range c.Telegram.Channels {
+		if ch.Name == c.Telegram.DefaultChannel && ch.ApprovalTTL.Value() > 0 {
+			ttl = int64(ch.ApprovalTTL.Value() / time.Second)
+		}
+	}
+	return ttl
+}
+
 // WithFleet preserves all local policy, budgets and retained decode presence,
 // clearing only incompatible direct credential fields on independent maps.
 func (c Config) WithFleet(f FleetConfig, profiles []string, approvalOnly bool) Config {
@@ -751,6 +807,16 @@ func (c *Config) Validate() error {
 	if err := validateReviewSection(c.Review, c.Fleet != nil); err != nil {
 		return err
 	}
+	if err := c.validateLimits(); err != nil {
+		return err
+	}
+	if c.Fleet != nil {
+		return nil
+	}
+	return ValidateTelegramSection(c.Telegram)
+}
+
+func (c *Config) validateLimits() error {
 	if c.Limits.MaxInspectedFiles < 1 {
 		return errors.New("limits.max_inspected_files must be at least 1")
 	}
@@ -763,10 +829,7 @@ func (c *Config) Validate() error {
 	if c.Limits.MaxLogBytesPerStream < 4096 {
 		return errors.New("limits.max_log_bytes_per_stream must be at least 4096")
 	}
-	if c.Fleet != nil {
-		return nil
-	}
-	return ValidateTelegramSection(c.Telegram)
+	return nil
 }
 
 // ValidateReviewSection checks the review section in isolation: the model

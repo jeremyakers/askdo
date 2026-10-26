@@ -10,6 +10,10 @@ import (
 // The stable sidecar is never unlinked; locking the SQLite inode would not
 // survive replacement. Administrative enrollment connections remain unlocked.
 func serviceLock(path string) (*os.File, error) {
+	return serviceLockOwned(path, enrollmentOwner)
+}
+
+func serviceLockOwned(path string, owner func(os.FileInfo) bool) (*os.File, error) {
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil, err
@@ -19,7 +23,7 @@ func serviceLock(path string) (*os.File, error) {
 		return nil, err
 	}
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !enrollmentOwner(info) || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || !owner(info) || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		file.Close()
 		return nil, errors.New("unsafe gateway service lock")
 	}

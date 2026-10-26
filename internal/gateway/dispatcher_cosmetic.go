@@ -17,6 +17,7 @@ const (
 	cosmeticDetails cosmeticKind = iota
 	cosmeticAck
 	cosmeticCleanup
+	cosmeticJoin
 )
 
 type cosmeticJob struct {
@@ -25,6 +26,7 @@ type cosmeticJob struct {
 	record   *TicketRecord
 	chat     int64
 	callback string
+	join     *JoinDecision
 }
 
 // This queue is intentionally lossy: no cosmetic operation grants authority or
@@ -57,6 +59,15 @@ func (d *dispatcher) cosmeticWorker() {
 
 func (d *dispatcher) runCosmetic(job cosmeticJob) {
 	switch job.kind {
+	case cosmeticJoin:
+		ctx, cancel := d.cosmeticContext(2 * time.Second)
+		defer cancel()
+		if job.callback != "" {
+			_ = job.bot.client.AnswerCallbackQuery(ctx, job.callback, job.join.Ack)
+		}
+		for _, card := range job.join.Cards {
+			_ = job.bot.client.EditMessageReplyMarkup(ctx, card.Chat, card.Message)
+		}
 	case cosmeticDetails:
 		// Answer the tap first: a long Details sequence must not leave the
 		// operator's Telegram spinner waiting on every message.
