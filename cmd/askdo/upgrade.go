@@ -59,8 +59,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	if options.receiptRoot == "" {
 		options.receiptRoot = defaultUpgradeReceiptRoot
 	}
-	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+2*time.Minute)
-	defer cancel()
+	ctx := parent // download/review/approval retain their existing workflow deadlines.
 	if err := ctx.Err(); err != nil {
 		fmt.Fprintln(stderr, "Upgrade stopped; no command submitted:", err)
 		if operationSet {
@@ -161,13 +160,12 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", "/usr/local/bin/askdo", "upgrade-helper", "--operation", *operation, "--source", source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
+	// The root operation's activation budget starts only after scheduling, not
+	// while the user is downloading, reviewing or waiting for human approval.
+	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+2*time.Minute)
+	defer cancel()
 	lastState := ""
 	for {
-		if err := ctx.Err(); err != nil {
-			fmt.Fprintln(stderr, "Upgrade observation stopped:", err)
-			upgradeResumeHint(stderr, *operation)
-			return 125
-		}
 		receipt, err := upgrade.ReadReceipt(options.receiptRoot, *operation)
 		if err != nil {
 			fmt.Fprintf(stderr, "Cannot read upgrade receipt for %s: %v\n", *operation, err)
@@ -175,6 +173,11 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			if errors.Is(err, os.ErrNotExist) && clientCode != 0 {
 				return clientCode
 			}
+			return 125
+		}
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(stderr, "Upgrade observation stopped:", err)
+			upgradeResumeHint(stderr, *operation)
 			return 125
 		}
 		removeSource = true // Root already copied and re-verified the source.

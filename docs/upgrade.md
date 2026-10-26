@@ -6,8 +6,8 @@ Run this as an askdo user; no sudo password is needed:
 askdo upgrade
 ```
 
-The command selects the newest stable release, or the newest prerelease when no
-stable release exists. To choose an exact release:
+The command selects the newest stable release by publication date, or the newest
+published prerelease when no stable release exists. To choose an exact release:
 
 ```sh
 askdo upgrade --release v1.0.0-rc.21
@@ -21,6 +21,20 @@ After approval, askdo stages the verified files, drains new work while existing
 jobs finish, backs up the broker and gateway data, installs the release, and
 verifies the restarted services and gateway catalog. The result is not called
 successful until those checks pass.
+
+## Supported topology and timing
+
+A standalone broker without a local gateway can self-upgrade. If a local gateway
+config exists, the host broker must have a usable local fleet enrollment for that
+gateway. A standalone gateway with an unenrolled broker (`cfg.Fleet == nil`) is
+not supported: preflight rejects it before staging, receipts, manager acceptance,
+service stops or installation. Enrollment remains necessary to verify the local
+gateway's authenticated catalog after restart.
+
+Download, review and human approval use their normal workflow time limits; the
+upgrade observation budget does not cancel them. After the scheduling client
+returns, receipt observation has the activation deadline plus two minutes. If it
+times out, use `--operation` to reconnect without submitting another upgrade.
 
 ## Reconnect to an upgrade
 

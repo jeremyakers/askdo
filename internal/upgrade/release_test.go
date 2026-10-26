@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,31 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestResolveNewestReleaseUsesPublicationDateNotCommitDate(t *testing.T) {
+	for _, prerelease := range []bool{false, true} {
+		t.Run(fmt.Sprint(prerelease), func(t *testing.T) {
+			// Given: publication order deliberately opposes target-commit creation order.
+			older, newer := "v3.2.0", "v3.2.1"
+			if prerelease {
+				older, newer = "v3.2.1-rc.1", "v3.2.1-rc.2"
+			}
+			body := fmt.Sprintf(`[{"tag_name":%q,"prerelease":%t,"created_at":"2026-10-26T00:00:00Z","published_at":"2026-10-26T01:00:00Z"},{"tag_name":%q,"prerelease":%t,"created_at":"2025-01-01T00:00:00Z","published_at":"2026-10-27T01:00:00Z"}]`, older, prerelease, newer, prerelease)
+			calls := 0
+			client := &http.Client{Transport: releaseMemoryTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+			base, _ := url.Parse("https://github.com/jeremyakers/askdo")
+			// When
+			got, err := resolveNewestRelease(t.Context(), client, base)
+			// Then: stable priority/prerelease fallback are unchanged; publication date wins.
+			if err != nil || got != newer || calls != 1 {
+				t.Fatalf("release=%q want=%q calls=%d err=%v", got, newer, calls, err)
+			}
+		})
+	}
+}
 
 // rc21Manifest is the verbatim install-manifest.v1 published with
 // v1.0.0-rc.21: its schema, digests and sizes must keep parsing.
@@ -587,8 +613,8 @@ func TestDownloadReleaseResolvesNewestStableRelease(t *testing.T) {
 	prereleaseTag, stableTag := "v1.2.4-rc.1", "v1.2.3"
 	manifest, assets := downloadFixture(t, stableTag, rc21SourceCommit, runtime.GOARCH, elfImage(0x3e), elfImage(0x3e))
 	prerelease := strings.Replace(manifest, "release "+stableTag+"\n", "release "+prereleaseTag+"\n", 1)
-	releases := "[{\"tag_name\":\"" + prereleaseTag + "\",\"prerelease\":true,\"created_at\":\"2026-01-03T00:00:00Z\"}," +
-		"{\"tag_name\":\"" + stableTag + "\",\"prerelease\":false,\"created_at\":\"2026-01-01T00:00:00Z\"}]"
+	releases := "[{\"tag_name\":\"" + prereleaseTag + "\",\"prerelease\":true,\"published_at\":\"2026-01-03T00:00:00Z\"}," +
+		"{\"tag_name\":\"" + stableTag + "\",\"prerelease\":false,\"published_at\":\"2026-01-01T00:00:00Z\"}]"
 	server := newReleaseServer(t, releases, map[string]string{stableTag: manifest, prereleaseTag: prerelease}, assets)
 	base := server.URL + "/jeremyakers/askdo"
 	dir := filepath.Join(t.TempDir(), "staging")
@@ -616,10 +642,10 @@ func TestDownloadReleaseResolvesNewestPrereleaseWhenNoStable(t *testing.T) {
 	// Then: the newest non-draft entry (a prerelease) is resolved.
 	tag := "v1.3.0-rc.2"
 	manifest, assets := downloadFixture(t, tag, rc21SourceCommit, runtime.GOARCH, elfImage(0x3e), elfImage(0x3e))
-	releases := "[{\"tag_name\":\"v2.0.0\",\"draft\":true,\"prerelease\":false,\"created_at\":\"2026-02-01T00:00:00Z\"}," +
-		"{\"tag_name\":\"" + tag + "\",\"prerelease\":true,\"created_at\":\"2026-01-05T00:00:00Z\"}," +
-		"{\"tag_name\":\"v1.3.0-rc.1\",\"prerelease\":true,\"created_at\":\"2026-01-04T00:00:00Z\"}," +
-		"{\"tag_name\":\"latest\",\"created_at\":\"2026-01-06T00:00:00Z\"}]"
+	releases := "[{\"tag_name\":\"v2.0.0\",\"draft\":true,\"prerelease\":false,\"published_at\":\"2026-02-01T00:00:00Z\"}," +
+		"{\"tag_name\":\"" + tag + "\",\"prerelease\":true,\"published_at\":\"2026-01-05T00:00:00Z\"}," +
+		"{\"tag_name\":\"v1.3.0-rc.1\",\"prerelease\":true,\"published_at\":\"2026-01-04T00:00:00Z\"}," +
+		"{\"tag_name\":\"latest\",\"published_at\":\"2026-01-06T00:00:00Z\"}]"
 	server := newReleaseServer(t, releases, map[string]string{tag: manifest}, assets)
 	dir := filepath.Join(t.TempDir(), "staging")
 	fetched, err := DownloadRelease(context.Background(), nil, server.URL+"/jeremyakers/askdo", "", dir)
@@ -637,7 +663,7 @@ func TestDownloadReleaseRejectsNoPublishedRelease(t *testing.T) {
 	// Then: it fails and never reaches the asset endpoints.
 	for _, releases := range []string{
 		"[]",
-		"[{\"tag_name\":\"v2.0.0\",\"draft\":true,\"created_at\":\"2026-02-01T00:00:00Z\"}]",
+		"[{\"tag_name\":\"v2.0.0\",\"draft\":true,\"published_at\":\"2026-02-01T00:00:00Z\"}]",
 	} {
 		server := newReleaseServer(t, releases, nil, nil)
 		dir := filepath.Join(t.TempDir(), "staging")

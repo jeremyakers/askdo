@@ -594,10 +594,10 @@ func getLimited(ctx context.Context, client *http.Client, target *url.URL, limit
 }
 
 type githubRelease struct {
-	TagName    string    `json:"tag_name"`
-	Draft      bool      `json:"draft"`
-	Prerelease bool      `json:"prerelease"`
-	CreatedAt  time.Time `json:"created_at"`
+	TagName     string    `json:"tag_name"`
+	Draft       bool      `json:"draft"`
+	Prerelease  bool      `json:"prerelease"`
+	PublishedAt time.Time `json:"published_at"`
 }
 
 // releasesAPIURL derives the GitHub release-list URL for the repository base:
@@ -636,10 +636,10 @@ func resolveNewestRelease(ctx context.Context, client *http.Client, base *url.UR
 		if release.Draft || release.TagName == "" || !tagFormatRE.MatchString(release.TagName) || forbiddenTag(release.TagName) {
 			continue
 		}
-		if newest.TagName == "" || release.CreatedAt.After(newest.CreatedAt) {
+		if newest.TagName == "" || release.PublishedAt.After(newest.PublishedAt) {
 			newest = release
 		}
-		if !release.Prerelease && (newestStable.TagName == "" || release.CreatedAt.After(newestStable.CreatedAt)) {
+		if !release.Prerelease && (newestStable.TagName == "" || release.PublishedAt.After(newestStable.PublishedAt)) {
 			newestStable = release
 		}
 	}

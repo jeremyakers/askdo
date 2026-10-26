@@ -117,6 +117,8 @@ type Helper struct {
 	BackupRoot, ReceiptRoot string
 	Manager                 ActivationManager
 	Host                    ActivationHost
+	// Read-only host checks that must pass before staging/receipt/manager effects.
+	Preflight func(context.Context) error
 	// Tests substitute trust rooted in their private temporary directory.
 	TrustDirectory func(string, bool) error
 	Now            func() time.Time
@@ -169,6 +171,11 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	plan, manifest, manifestBytes, err := verifiedSourceWithPlan(source, id, capturedPlan)
 	if err != nil {
 		return "", err
+	}
+	if h.Preflight != nil {
+		if err := h.Preflight(ctx); err != nil {
+			return "", err
+		}
 	}
 	if h.Manager == nil {
 		return "", errors.New("activation manager is required")

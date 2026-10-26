@@ -41,7 +41,9 @@ func runUpgradeHelper(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 	defer cancel()
 	return runUpgradeHelperWith(ctx, args, getEUID(), func() upgrade.Helper {
 		tools := upgradeSystemTools{}
-		return upgrade.Helper{BackupRoot: "/var/backups/askdo", ReceiptRoot: defaultUpgradeReceiptRoot, Manager: upgradeSystemdManager{tools: tools}, Host: &upgradeLocalHost{tools: tools}}
+		return upgrade.Helper{BackupRoot: "/var/backups/askdo", ReceiptRoot: defaultUpgradeReceiptRoot, Manager: upgradeSystemdManager{tools: tools}, Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
+			return preflightUpgradeTopology(defaultConfigPath, defaultGatewayConfig)
+		}}
 	}, stdin, stdout, stderr)
 }
 
@@ -174,9 +176,28 @@ type upgradeDrainMode struct {
 	legacy bool
 }
 
+func preflightUpgradeTopology(hostConfig, gatewayConfig string) error {
+	if _, err := os.Lstat(gatewayConfig); errors.Is(err, os.ErrNotExist) {
+		return nil // standalone broker: no local gateway is being upgraded.
+	} else if err != nil {
+		return fmt.Errorf("inspect local gateway topology: %w", err)
+	}
+	cfg, err := config.Load(hostConfig)
+	if err != nil {
+		return fmt.Errorf("load host config for local gateway preflight: %w", err)
+	}
+	if cfg.Fleet == nil {
+		return errors.New("local gateway self-upgrade requires local fleet enrollment in the host config; standalone gateway topology is unsupported")
+	}
+	return nil
+}
+
 func (upgradeLocalHost) Layout(context.Context) (upgrade.Layout, error) {
 	layout := upgrade.Layout{CLI: "/usr/local/bin/askdo", Launch: "/usr/local/libexec/askdo-launch", Config: defaultConfigPath, JobsDB: "/var/lib/askdo/jobs.sqlite3", ProcRoot: "/proc"}
 	if _, err := operator.ReadRootPrivate(layout.Config, 1<<20); err != nil {
+		return upgrade.Layout{}, err
+	}
+	if err := preflightUpgradeTopology(layout.Config, defaultGatewayConfig); err != nil {
 		return upgrade.Layout{}, err
 	}
 	for _, path := range []string{layout.CLI, layout.Launch} {

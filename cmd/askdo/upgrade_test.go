@@ -76,8 +76,8 @@ visudo-LICENSE visudo-SOURCE visudo-linux-amd64 visudo-linux-arm64`)
 func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 	for _, tc := range []struct{ name, release, selected, list string }{
 		{"exact", "v3.2.1", "v3.2.1", ""},
-		{"stable first", "", "v3.2.1", `[{"tag_name":"v4.0.0-rc.2","prerelease":true,"created_at":"2026-10-02T00:00:00Z"},{"tag_name":"v3.2.1","created_at":"2026-10-01T00:00:00Z"}]`},
-		{"prerelease fallback", "", "v4.0.0-rc.2", `[{"tag_name":"v4.0.0-rc.1","prerelease":true,"created_at":"2026-10-01T00:00:00Z"},{"tag_name":"v4.0.0-rc.2","prerelease":true,"created_at":"2026-10-02T00:00:00Z"}]`},
+		{"stable first", "", "v3.2.1", `[{"tag_name":"v4.0.0-rc.2","prerelease":true,"published_at":"2026-10-02T00:00:00Z"},{"tag_name":"v3.2.1","published_at":"2026-10-01T00:00:00Z"}]`},
+		{"prerelease fallback", "", "v4.0.0-rc.2", `[{"tag_name":"v4.0.0-rc.1","prerelease":true,"published_at":"2026-10-01T00:00:00Z"},{"tag_name":"v4.0.0-rc.2","prerelease":true,"published_at":"2026-10-02T00:00:00Z"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given: real release verification against a fake HTTP transport.
@@ -423,4 +423,47 @@ func TestUpgradeRoutesAndPublicHelp(t *testing.T) {
 	if !strings.Contains(help.String(), "askdo upgrade") || strings.Contains(help.String(), "upgrade-helper") {
 		t.Fatalf("public help: %s", &help)
 	}
+}
+
+func TestUpgradeCLISlowApprovalPrecedesObservationDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Given: download and human approval each take longer than the observation budget.
+		root, temps := t.TempDir(), t.TempDir()
+		clientFinished := false
+		var scheduledAt time.Time
+		waitWorkflow := func(ctx context.Context, duration time.Duration) error {
+			if _, exists := ctx.Deadline(); exists {
+				t.Error("upgrade observation deadline leaked into pre-dispatch workflow")
+			}
+			timer := time.NewTimer(duration)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}
+		deps := upgradeCLIOptions{receiptRoot: root, tempRoot: temps, random: bytes.NewReader(bytes.Repeat([]byte{0x12}, 16)), download: func(ctx context.Context, _, _ string) (upgrade.Manifest, error) {
+			if err := waitWorkflow(ctx, 13*time.Minute); err != nil {
+				return upgrade.Manifest{}, err
+			}
+			raw, _ := cliReleaseFixture("v3.2.1")
+			return upgrade.ParseManifest(strings.NewReader(raw), "v3.2.1")
+		}, runClient: func(ctx context.Context, _ []string, _ client.Options) int {
+			if err := waitWorkflow(ctx, 20*time.Minute); err != nil {
+				return 125
+			}
+			writeCLIReceipt(t, root, cliUpgradeID, "v3.2.1", "scheduled")
+			clientFinished, scheduledAt = true, time.Now()
+			return 0
+		}}
+		var stdout, stderr bytes.Buffer
+		// When: activation itself remains scheduled and never reaches a terminal receipt.
+		code := runUpgradeWith(t.Context(), nil, deps, &stdout, &stderr)
+		// Then: pre-dispatch workflow completes; a NEW bounded watch starts afterward.
+		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+			t.Fatalf("slow approval: client=%v code=%d observation=%s stderr=%s", clientFinished, code, time.Since(scheduledAt), &stderr)
+		}
+	})
 }
