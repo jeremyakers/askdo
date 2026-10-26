@@ -895,7 +895,7 @@ func TestForegroundFleetSudoContainer(t *testing.T) {
 	f := newRootFleetFixture(t, "/usr/local/bin/askdo", "1", true, false, false, rootFleetOptions{foreground: true})
 	p := startContainerPTY(t)
 	p.until(t, "ASKDO_PROMPT> ")
-	p.send(t, "/usr/local/bin/askdo --reason fleet-foreground -- /usr/bin/id -u; echo FLEET_FOREGROUND_EXIT=$?\n")
+	p.send(t, "/usr/local/bin/askdo --verbose --reason fleet-foreground -- /usr/bin/id -u; echo FLEET_FOREGROUND_EXIT=$?\n")
 	p.until(t, "awaiting-human: awaiting decision")
 	id := containerJobID(t, p.snapshot())
 	card, ok := f.bot.Card()
