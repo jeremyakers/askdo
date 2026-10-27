@@ -107,7 +107,7 @@ type ActivationHost interface {
 	Observe(context.Context, string) (Unit, error)
 	SetDraining(context.Context, Layout, string, Unit, bool) error
 	LegacyDraining(string) bool
-	Stop(context.Context, string) error
+	Stop(context.Context, string, Unit) error
 	Start(context.Context, string) error
 	BackupDatabase(context.Context, string, string) error
 	Verify(context.Context, Layout) error
@@ -514,7 +514,7 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 			return err
 		}
 		effects = true // publication succeeded; Host.Stop can now issue effects.
-		if err := h.Host.Stop(ctx, name); err != nil {
+		if err := h.Host.Stop(ctx, name, before[name]); err != nil {
 			return err
 		}
 		u, err = h.Host.Observe(ctx, name)

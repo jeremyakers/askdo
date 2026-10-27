@@ -25,21 +25,22 @@ func (f activationManagerFunc) Start(ctx context.Context, id, stage string) erro
 // The fake models service state and preserves real temp-file preimages. It
 // never executes candidates, invokes a system tool, or opens a network socket.
 type activationHost struct {
-	layout       Layout
-	units        map[string]Unit
-	busy         bool
-	events       []string
-	startErr     error
-	verifyErr    error
-	beforeStart  func()
-	afterBackup  func(string, string)
-	beforeVerify func()
-	draining     map[string]bool
-	quietErr     error
-	beforeStop   func(string) error
-	drainErr     func(string, bool) error
-	legacy       map[string]bool
-	beforeQuiet  func()
+	layout          Layout
+	units           map[string]Unit
+	busy            bool
+	events          []string
+	startErr        error
+	verifyErr       error
+	beforeStart     func()
+	afterBackup     func(string, string)
+	beforeVerify    func()
+	draining        map[string]bool
+	quietErr        error
+	beforeStop      func(string) error
+	drainErr        func(string, bool) error
+	legacy          map[string]bool
+	beforeQuiet     func()
+	beforeStopCheck func(string)
 }
 
 func (h *activationHost) Layout(context.Context) (Layout, error) { return h.layout, nil }
@@ -86,7 +87,13 @@ func (h *activationHost) SetDraining(ctx context.Context, _ Layout, name string,
 func (h *activationHost) Observe(_ context.Context, name string) (Unit, error) {
 	return h.units[name], nil
 }
-func (h *activationHost) Stop(_ context.Context, name string) error {
+func (h *activationHost) Stop(_ context.Context, name string, expected Unit) error {
+	if h.beforeStopCheck != nil {
+		h.beforeStopCheck(name)
+	}
+	if current := h.units[name]; current.MainPID != expected.MainPID || current.StartTime != expected.StartTime {
+		return errors.New("replacement service refused before Stop")
+	}
 	if h.legacy[name] {
 		h.events = append(h.events, "kill:"+name)
 	}
@@ -998,5 +1005,28 @@ func TestHelperStopIntentWriteFailureResumesAllDrainsWithoutStop(t *testing.T) {
 	}
 	if activationReceipt(t, f).State != "failed" {
 		t.Fatalf("failure receipt=%+v", activationReceipt(t, f))
+	}
+}
+
+func TestHelperReplacementAfterFinalQuietCheckIsNotStopped(t *testing.T) {
+	// Given: the unit is replaced at the host boundary after its final quiet observation.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+	f.host.beforeStopCheck = func(name string) {
+		u := f.host.units[name]
+		u.MainPID, u.StartTime = 999, 456
+		f.host.units[name] = u
+		f.host.draining[name] = false // the replacement has already admitted new work.
+	}
+	// When
+	err := f.helper.Activate(t.Context(), f.stage)
+	// Then: the expected original identity is passed through to Stop; no kill/stop follows.
+	if err == nil || !strings.Contains(err.Error(), "replacement") || activationReceipt(t, f).State == "succeeded" {
+		t.Fatalf("replacement accepted: %v receipt=%+v", err, activationReceipt(t, f))
+	}
+	for _, event := range f.host.events {
+		if strings.HasPrefix(event, "stop:") || strings.HasPrefix(event, "kill:") {
+			t.Fatalf("replacement's new work was interrupted: %v", f.host.events)
+		}
 	}
 }

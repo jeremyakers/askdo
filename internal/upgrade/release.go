@@ -36,7 +36,7 @@ const (
 	validatorVersion = "1.9.5p2"
 	validatorLevel   = "48"
 
-	// Cap for the GitHub release-list API response.
+	// Cap for each GitHub release-list API page response.
 	apiListMaxBytes = 4 << 20
 )
 
@@ -617,30 +617,38 @@ func releasesAPIURL(base *url.URL) *url.URL {
 	return &api
 }
 
-// resolveNewestRelease makes exactly one GitHub release-list API call to
-// resolve the newest published non-draft release: the newest stable tag when
-// one exists, else the newest prerelease. Draft releases are never selected.
+// resolveNewestRelease scans every release-list page on the owned API URL.
+// Stable publications take priority; otherwise the newest prerelease wins.
 func resolveNewestRelease(ctx context.Context, client *http.Client, base *url.URL) (string, error) {
 	apiURL := releasesAPIURL(base)
-	data, err := getLimited(ctx, client, apiURL, apiListMaxBytes, "application/vnd.github+json")
-	if err != nil {
-		return "", fmt.Errorf("resolve newest release: %w", err)
-	}
-	var releases []githubRelease
-	if err := json.Unmarshal(data, &releases); err != nil {
-		return "", fmt.Errorf("resolve newest release: %w", err)
-	}
 	var newest, newestStable githubRelease
-	for _, release := range releases {
-		release := release
-		if release.Draft || release.TagName == "" || !tagFormatRE.MatchString(release.TagName) || forbiddenTag(release.TagName) {
-			continue
+	seen := make(map[string]bool)
+	for page := 1; ; page++ {
+		query := apiURL.Query()
+		query.Set("page", strconv.Itoa(page))
+		apiURL.RawQuery = query.Encode()
+		data, err := getLimited(ctx, client, apiURL, apiListMaxBytes, "application/vnd.github+json")
+		if err != nil {
+			return "", fmt.Errorf("resolve newest release page %d: %w", page, err)
 		}
-		if newest.TagName == "" || release.PublishedAt.After(newest.PublishedAt) {
-			newest = release
+		var releases []githubRelease
+		if err := json.Unmarshal(data, &releases); err != nil {
+			return "", fmt.Errorf("resolve newest release page %d: %w", page, err)
 		}
-		if !release.Prerelease && (newestStable.TagName == "" || release.PublishedAt.After(newestStable.PublishedAt)) {
-			newestStable = release
+		for _, release := range releases {
+			if release.Draft || release.TagName == "" || !tagFormatRE.MatchString(release.TagName) || forbiddenTag(release.TagName) || seen[release.TagName] {
+				continue
+			}
+			seen[release.TagName] = true
+			if newest.TagName == "" || release.PublishedAt.After(newest.PublishedAt) {
+				newest = release
+			}
+			if !release.Prerelease && (newestStable.TagName == "" || release.PublishedAt.After(newestStable.PublishedAt)) {
+				newestStable = release
+			}
+		}
+		if len(releases) < 100 {
+			break
 		}
 	}
 	switch {

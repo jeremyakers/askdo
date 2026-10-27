@@ -165,6 +165,7 @@ type upgradeLocalHost struct {
 	procRoot     string
 	kill         func(int, syscall.Signal) error
 	dial         func(context.Context, string, string) (net.Conn, error)
+	gatewayDial  func(context.Context, string, string) (net.Conn, error)
 	drains       map[string]upgradeDrainMode
 	runtimeRoot  string
 	runtimeTrust func(string, bool) error
@@ -476,9 +477,15 @@ func (h *upgradeLocalHost) signalLegacy(ctx context.Context, name string, expect
 	}
 }
 
-func (h *upgradeLocalHost) Stop(ctx context.Context, name string) error {
+func (h *upgradeLocalHost) Stop(ctx context.Context, name string, expected upgrade.Unit) error {
 	if mode, ok := h.drains[name]; ok && mode.legacy {
-		return h.stopLegacy(ctx, name, mode.unit)
+		if mode.unit.MainPID != expected.MainPID || mode.unit.StartTime != expected.StartTime {
+			return errors.New("legacy stop identity differs from the drained process")
+		}
+		return h.stopLegacy(ctx, name, expected)
+	}
+	if err := h.checkProcess(ctx, name, expected); err != nil {
+		return err
 	}
 	_, err := h.tools.Run(ctx, fleetSystemctlTool, "stop", name)
 	return err
@@ -755,6 +762,7 @@ func (h upgradeLocalHost) Verify(parent context.Context, layout upgrade.Layout) 
 		return nil
 	}
 	fleet := *cfg.Fleet
+	var localDial func(context.Context, string, string) (net.Conn, error)
 	if layout.GatewayConfig != "" {
 		data, err := os.ReadFile(layout.GatewayConfig)
 		if err != nil {
@@ -767,8 +775,26 @@ func (h upgradeLocalHost) Verify(parent context.Context, layout upgrade.Layout) 
 		// Enrollment identity and trust remain unchanged; only the endpoint
 		// becomes the local gateway whose process is being upgraded.
 		fleet.URL = local.PublicURL
+		host, port, err := net.SplitHostPort(local.Listen)
+		if err != nil {
+			return fmt.Errorf("local gateway listen address: %w", err)
+		}
+		if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
+			host = "127.0.0.1"
+			if ip != nil && ip.To4() == nil {
+				host = "::1"
+			}
+		}
+		address := net.JoinHostPort(host, port)
+		dial := h.gatewayDial
+		if dial == nil {
+			dial = (&net.Dialer{}).DialContext
+		}
+		localDial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dial(ctx, network, address)
+		}
 	}
-	client, err := fleetclient.New(fleet)
+	client, err := fleetclient.NewWithDial(fleet, localDial)
 	if err != nil {
 		return fmt.Errorf("gateway enrollment verification: %w", err)
 	}

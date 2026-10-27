@@ -1,10 +1,12 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +41,43 @@ func TestResolveNewestReleaseUsesPublicationDateNotCommitDate(t *testing.T) {
 			// Then: stable priority/prerelease fallback are unchanged; publication date wins.
 			if err != nil || got != newer || calls != 1 {
 				t.Fatalf("release=%q want=%q calls=%d err=%v", got, newer, calls, err)
+			}
+		})
+	}
+}
+
+func TestResolveNewestReleasePaginatesOwnedURLAndDeduplicates(t *testing.T) {
+	for _, prerelease := range []bool{false, true} {
+		t.Run(fmt.Sprint(prerelease), func(t *testing.T) {
+			// Given: page one is full and publication order differs from API/commit order.
+			first := make([]map[string]any, 100)
+			for i := range first {
+				first[i] = map[string]any{"tag_name": fmt.Sprintf("v3.1.%d", i), "prerelease": prerelease, "created_at": "2026-10-26T00:00:00Z", "published_at": "2026-10-26T01:00:00Z"}
+			}
+			second := []map[string]any{first[0], {"tag_name": "v2.9.9", "prerelease": prerelease, "created_at": "2025-01-01T00:00:00Z", "published_at": "2026-10-27T01:00:00Z"}}
+			calls := 0
+			client := &http.Client{Transport: releaseMemoryTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Host != "api.github.com" || r.URL.Path != "/repos/jeremyakers/askdo/releases" || r.URL.Query().Get("per_page") != "100" || r.URL.Query().Get("page") != fmt.Sprint(calls) {
+					return nil, fmt.Errorf("unowned or duplicate pagination URL: %s", r.URL)
+				}
+				var data []byte
+				if calls == 1 {
+					data, _ = json.Marshal(first)
+				} else if calls == 2 {
+					data, _ = json.Marshal(second)
+				} else {
+					return nil, fmt.Errorf("continued after a short page")
+				}
+				// A response-provided foreign Link is never a pagination authority.
+				return &http.Response{StatusCode: 200, Header: http.Header{"Link": {`<https://untrusted.invalid/releases?page=2>; rel="next"`}}, Body: io.NopCloser(bytes.NewReader(data))}, nil
+			})}
+			base, _ := url.Parse("https://github.com/jeremyakers/askdo")
+			// When
+			got, err := resolveNewestRelease(t.Context(), client, base)
+			// Then: the duplicate does not add a candidate and the newer page-two publication wins.
+			if err != nil || got != "v2.9.9" || calls != 2 {
+				t.Fatalf("paginated release=%s calls=%d err=%v", got, calls, err)
 			}
 		})
 	}

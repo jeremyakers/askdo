@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -62,6 +63,12 @@ type Client struct {
 }
 
 func New(cfg config.FleetConfig) (*Client, error) {
+	return NewWithDial(cfg, nil)
+}
+
+// NewWithDial changes only connection routing. URL hostname/SNI, credentials,
+// trust, signed proof validation and redirect policy are identical to New.
+func NewWithDial(cfg config.FleetConfig, dial func(context.Context, string, string) (net.Conn, error)) (*Client, error) {
 	if err := config.ValidateHTTPSURL(cfg.URL); err != nil {
 		return nil, &Error{fleetproto.ErrCodeProtocol}
 	}
@@ -110,6 +117,12 @@ func New(cfg config.FleetConfig) (*Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	if dial != nil {
+		transport.DialContext = dial
+		// A cloned default TLS dial hook must not bypass the selected listener
+		// or normal certificate/hostname verification.
+		transport.DialTLS, transport.DialTLSContext = nil, nil
+	}
 	base, err := url.Parse(cfg.URL)
 	if err != nil {
 		return nil, &Error{fleetproto.ErrCodeProtocol}

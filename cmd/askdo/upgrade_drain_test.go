@@ -273,7 +273,7 @@ func TestUpgradeLegacyStopKillsWithoutThawing(t *testing.T) {
 		t.Fatal("missing marker did not select legacy mode")
 	}
 	queued = true // arrives after the last quiet snapshot, immediately before Stop.
-	if err := host.Stop(t.Context(), "askdo.service"); err != nil {
+	if err := host.Stop(t.Context(), "askdo.service", expected); err != nil {
 		t.Fatal(err)
 	}
 	// Then: successful Kill alone was insufficient; state verification precedes each step.
@@ -422,7 +422,7 @@ func TestUpgradeLegacyStopFailureUsesBoundedUncancelledCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 				// When
-				err = host.Stop(ctx, "askdo.service")
+				err = host.Stop(ctx, "askdo.service", expected)
 				// Then: errors remain errors; a live stopped process receives exactly one CONT.
 				want := failure
 				if scenario == "cancelled observation" {
@@ -521,7 +521,7 @@ func TestUpgradeLegacyStopRefusesManagerThatWouldThaw(t *testing.T) {
 		t.Fatal(err)
 	}
 	// When / Then: reject BEFORE asking the manager to stop, then recover safely.
-	err = host.Stop(t.Context(), "askdo.service")
+	err = host.Stop(t.Context(), "askdo.service", expected)
 	if err == nil || !strings.Contains(err.Error(), "KillSignal") || managerStops != 0 || len(signals) != 2 || signals[1] != syscall.SIGCONT {
 		t.Fatalf("unsafe manager semantics: err=%v stops=%d signals=%v", err, managerStops, signals)
 	}
@@ -530,13 +530,47 @@ func TestUpgradeLegacyStopRefusesManagerThatWouldThaw(t *testing.T) {
 func TestUpgradeCooperativeStopStillUsesSystemctl(t *testing.T) {
 	// Given: a cooperative service, not a legacy frozen process.
 	called := false
-	host := upgradeLocalHost{tools: upgradeToolFunc(func(_ context.Context, path string, args ...string) (string, error) {
+	proc := t.TempDir()
+	writeUpgradeProcess(t, proc, 101, 123)
+	host := upgradeLocalHost{procRoot: proc, tools: upgradeToolFunc(func(_ context.Context, path string, args ...string) (string, error) {
+		if args[0] == "show" {
+			return "MainPID=101\nActiveState=active\nSubState=running\nControlGroup=/system.slice/askdo.service\n", nil
+		}
 		called = path == fleetSystemctlTool && len(args) == 2 && args[0] == "stop" && args[1] == "askdo.service"
 		return "", nil
 	}), kill: func(int, syscall.Signal) error { t.Fatal("cooperative stop sent a direct signal"); return nil }}
 	// When / Then
-	if err := host.Stop(t.Context(), "askdo.service"); err != nil || !called {
+	expected := upgrade.Unit{MainPID: 101, StartTime: 123}
+	if err := host.Stop(t.Context(), "askdo.service", expected); err != nil || !called {
 		t.Fatalf("cooperative stop changed: %v called=%v", err, called)
+	}
+}
+
+func TestUpgradeCooperativeStopRefusesUndrainedReplacement(t *testing.T) {
+	for _, changed := range []string{"pid", "start time"} {
+		t.Run(changed, func(t *testing.T) {
+			// Given: a replacement appears after quietness but before systemctl stop.
+			proc := t.TempDir()
+			pid, start := 101, uint64(123)
+			if changed == "pid" {
+				pid = 202
+			} else {
+				start = 456
+			}
+			writeUpgradeProcess(t, proc, pid, start)
+			stopped, killed := false, false
+			host := upgradeLocalHost{procRoot: proc, tools: upgradeToolFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+				if args[0] == "stop" {
+					stopped = true
+				}
+				return fmt.Sprintf("MainPID=%d\nActiveState=active\nSubState=running\nControlGroup=/system.slice/askdo.service\n", pid), nil
+			}), kill: func(int, syscall.Signal) error { killed = true; return nil }}
+			// When / Then
+			err := host.Stop(t.Context(), "askdo.service", upgrade.Unit{MainPID: 101, StartTime: 123})
+			if err == nil || stopped || killed {
+				t.Fatalf("replacement interrupted: err=%v stopped=%v killed=%v", err, stopped, killed)
+			}
+		})
 	}
 }
 
