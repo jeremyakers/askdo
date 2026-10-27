@@ -193,28 +193,57 @@ func newUpgradeTestDB(t *testing.T, path, schema string) *sql.DB {
 
 func TestUpgradeQuietnessWaitsForAllUIDJobsAndUnexpiredGatewayTickets(t *testing.T) {
 	for _, scenario := range []struct {
-		name, jobs, tickets string
-		quiet               bool
+		name, jobs, tickets, joins string
+		quiet                      bool
 	}{
-		{"scheduler running", "INSERT INTO jobs VALUES(9999, 'running')", "", false},
-		{"another user reviewing", "INSERT INTO jobs VALUES(1234, 'reviewing')", "", false},
-		{"scheduler terminal", "INSERT INTO jobs VALUES(9999, 'finished')", "", true},
-		{"pending gateway ticket", "", "INSERT INTO gateway_tickets VALUES('pending', 200)", false},
-		{"expired pending gateway ticket", "", "INSERT INTO gateway_tickets VALUES('pending', 99)", true},
-		{"decided gateway ticket", "", "INSERT INTO gateway_tickets VALUES('decided', 200)", true},
+		{"scheduler running", "INSERT INTO jobs VALUES(9999, 'running')", "", "", false},
+		{"another user reviewing", "INSERT INTO jobs VALUES(1234, 'reviewing')", "", "", false},
+		{"scheduler terminal", "INSERT INTO jobs VALUES(9999, 'finished')", "", "", true},
+		{"pending gateway ticket", "", "INSERT INTO gateway_tickets VALUES('pending', 200)", "", false},
+		{"expired pending gateway ticket", "", "INSERT INTO gateway_tickets VALUES('pending', 99)", "", true},
+		{"decided gateway ticket", "", "INSERT INTO gateway_tickets VALUES('decided', 200)", "", true},
+		{"pending host join", "", "", "INSERT INTO gateway_pending_joins VALUES('pending', 200)", false},
+		{"denied host join", "", "", "INSERT INTO gateway_pending_joins VALUES('denied', 200)", true},
+		{"approved host join", "", "", "INSERT INTO gateway_pending_joins VALUES('approved', 200)", true},
+		{"expired host join", "", "", "INSERT INTO gateway_pending_joins VALUES('pending', 99)", true},
+		{"join at expiry boundary", "", "", "INSERT INTO gateway_pending_joins VALUES('pending', 100)", true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			// Given: private fixtures, not the installed stores.
 			root := t.TempDir()
 			layout := upgrade.Layout{JobsDB: filepath.Join(root, "jobs.db"), GatewayDB: filepath.Join(root, "gateway.db")}
 			newUpgradeTestDB(t, layout.JobsDB, "CREATE TABLE jobs(uid INTEGER, state TEXT);"+scenario.jobs)
-			newUpgradeTestDB(t, layout.GatewayDB, "CREATE TABLE gateway_tickets(state TEXT, expires_at INTEGER);"+scenario.tickets)
+			newUpgradeTestDB(t, layout.GatewayDB, "CREATE TABLE gateway_tickets(state TEXT, expires_at INTEGER); CREATE TABLE gateway_pending_joins(state TEXT, expires_at INTEGER);"+scenario.tickets+";"+scenario.joins)
 			host := upgradeLocalHost{now: func() time.Time { return time.Unix(100, 0) }}
 			// When
 			quiet, err := host.Quiet(t.Context(), layout)
 			// Then
 			if err != nil || quiet != scenario.quiet {
 				t.Fatalf("quiet=%v want=%v err=%v", quiet, scenario.quiet, err)
+			}
+		})
+	}
+}
+
+func TestUpgradeQuietnessResumesAfterJoinDenialOrExpiry(t *testing.T) {
+	for _, change := range []string{"UPDATE gateway_pending_joins SET state='denied'", "UPDATE gateway_pending_joins SET expires_at=100"} {
+		t.Run(change, func(t *testing.T) {
+			// Given: an active enrollment approval blocks the frozen quiet snapshot.
+			root := t.TempDir()
+			layout := upgrade.Layout{JobsDB: filepath.Join(root, "jobs.db"), GatewayDB: filepath.Join(root, "gateway.db")}
+			newUpgradeTestDB(t, layout.JobsDB, "CREATE TABLE jobs(state TEXT)")
+			db := newUpgradeTestDB(t, layout.GatewayDB, "CREATE TABLE gateway_tickets(state TEXT, expires_at INTEGER); CREATE TABLE gateway_pending_joins(state TEXT, expires_at INTEGER); INSERT INTO gateway_pending_joins VALUES('pending', 200)")
+			host := upgradeLocalHost{now: func() time.Time { return time.Unix(100, 0) }}
+			if quiet, err := host.Quiet(t.Context(), layout); err != nil || quiet {
+				t.Fatalf("pending join failed to block: quiet=%v err=%v", quiet, err)
+			}
+			// When: the existing approval reaches denial or its live expiry boundary.
+			if _, err := db.Exec(change); err != nil {
+				t.Fatal(err)
+			}
+			// Then
+			if quiet, err := host.Quiet(t.Context(), layout); err != nil || !quiet {
+				t.Fatalf("terminal join kept restart blocked: quiet=%v err=%v", quiet, err)
 			}
 		})
 	}
