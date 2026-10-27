@@ -30,6 +30,11 @@ const (
 	OperationTimeout = 10 * time.Minute
 )
 
+// ErrStopNotIssued is returned only when a host refused Stop before issuing a
+// manager stop or termination. It permits admission recovery if no EARLIER Stop
+// has issued effects; it must never label an uncertain/post-effect failure.
+var ErrStopNotIssued = errors.New("stop not issued")
+
 // Plan is the data-only approval binding, alongside install-manifest.v1 and
 // the current architecture's two binaries and their checksum records.
 type Plan struct {
@@ -513,8 +518,12 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		if err := update(stateActivating, "stop-intent "+name); err != nil {
 			return err
 		}
+		previousEffects := effects
 		effects = true // publication succeeded; Host.Stop can now issue effects.
 		if err := h.Host.Stop(ctx, name, before[name]); err != nil {
+			if errors.Is(err, ErrStopNotIssued) {
+				effects = previousEffects
+			}
 			return err
 		}
 		u, err = h.Host.Observe(ctx, name)

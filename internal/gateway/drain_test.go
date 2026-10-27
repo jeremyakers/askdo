@@ -144,3 +144,78 @@ func TestDrainLetsInflightModelFinishWithoutAdmittingAnother(t *testing.T) {
 		t.Fatalf("existing cached outcome blocked while draining: %+v", recovered)
 	}
 }
+
+func TestDrainRejectsNewJoinButExistingApprovalAndRetryFinish(t *testing.T) {
+	// Given: a pending enrollment through the real HTTP handler and join store.
+	s, _, _ := drainGatewayFixture(t)
+	s.cfg.PublicURL = "https://gateway.invalid"
+	s.cfg.Channels[0].Name = "default"
+	var err error
+	s.joins, err = NewJoinStore(s.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mux.HandleFunc("POST /v1/join", s.handleJoinPost)
+	s.mux.HandleFunc("GET /v1/join/{host}", s.handleJoinGet)
+	request, secret := joinFixtureRequest(joinFixtureID())
+	wire, err := fleetproto.MarshalJoinRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(body []byte, ip string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "https://gateway.invalid/v1/join", bytes.NewReader(body))
+		r.TLS = &tls.ConnectionState{}
+		r.RemoteAddr = ip + ":1234"
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	if response := post(wire, "192.0.2.1"); response.Code != 200 {
+		t.Fatal("initial join:", response.Code, response.Body.String())
+	}
+	enrollment, err := s.joinEnrollment(request.HostID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliverJoinCards(t.Context(), t, s.joins, string(request.HostID), enrollment.Targets)
+	// When
+	if err := s.drain.SetDraining(true); err != nil {
+		t.Fatal(err)
+	}
+	next := request
+	next.HostID = fleetproto.ID("host_" + strings.Repeat("f", 64))
+	newWire, _ := fleetproto.MarshalJoinRequest(next)
+	// Then: reject only new creation; retries keep their existing conflict/status semantics.
+	if response := post(newWire, "192.0.2.2"); response.Code != 503 {
+		t.Fatal("new join crossed drain:", response.Code, response.Body.String())
+	}
+	if response := post(wire, "192.0.2.1"); response.Code != 409 {
+		t.Fatal("existing retry changed:", response.Code, response.Body.String())
+	}
+	var nonce string
+	if err := s.store.db.QueryRow("SELECT nonce FROM gateway_pending_joins WHERE host_id=?", string(request.HostID)).Scan(&nonce); err != nil {
+		t.Fatal(err)
+	}
+	if err := queueJoinCallback(s.joins, "token-hash", 11, string(request.HostID), 2, 1, 7000, "a", nonce); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := s.joins.Inbox(t.Context())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("approval inbox blocked: %v %v", entries, err)
+	}
+	decision, err := s.joins.Consume(t.Context(), entries[0])
+	if err != nil || decision == nil || !decision.Approved {
+		t.Fatalf("existing approval blocked: %+v %v", decision, err)
+	}
+	response := drainGatewayRequest(s, "", secret, http.MethodGet, "/v1/join/"+string(request.HostID), nil)
+	approved, err := fleetproto.ParseJoinResponse(response.Body.Bytes())
+	if response.Code != 200 || err != nil || approved.State != fleetproto.JoinApproved {
+		t.Fatalf("existing outcome blocked: %d %s %v", response.Code, response.Body.String(), err)
+	}
+	if err := s.drain.SetDraining(false); err != nil {
+		t.Fatal(err)
+	}
+	if response := post(newWire, "192.0.2.2"); response.Code != 200 {
+		t.Fatal("drain consumed cooldown or failed to resume join creation:", response.Code, response.Body.String())
+	}
+}

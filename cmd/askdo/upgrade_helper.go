@@ -260,7 +260,7 @@ func upgradeReadOnlyDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Use the rollout's all-UID terminal predicate and live-ticket predicate, with
+// Use all-UID terminal work and live ticket/join predicates, with
 // read-only SQL only. Opening either application store could migrate BEFORE
 // its stopped-state backup, so those read-write constructors are not used.
 func (h upgradeLocalHost) Quiet(ctx context.Context, layout upgrade.Layout) (bool, error) {
@@ -271,6 +271,7 @@ func (h upgradeLocalHost) Quiet(ctx context.Context, layout upgrade.Layout) (boo
 	for _, query := range [][2]string{
 		{layout.JobsDB, "SELECT count(*) FROM jobs WHERE state NOT IN ('finished','cancelled','expired','denied','failed','unknown')"},
 		{layout.GatewayDB, "SELECT count(*) FROM gateway_tickets WHERE state IN ('created','delivering','pending') AND expires_at > " + strconv.FormatInt(now.Unix(), 10)},
+		{layout.GatewayDB, "SELECT count(*) FROM gateway_pending_joins WHERE state='pending' AND expires_at > " + strconv.FormatInt(now.Unix(), 10)},
 	} {
 		if query[0] == "" {
 			continue
@@ -480,12 +481,12 @@ func (h *upgradeLocalHost) signalLegacy(ctx context.Context, name string, expect
 func (h *upgradeLocalHost) Stop(ctx context.Context, name string, expected upgrade.Unit) error {
 	if mode, ok := h.drains[name]; ok && mode.legacy {
 		if mode.unit.MainPID != expected.MainPID || mode.unit.StartTime != expected.StartTime {
-			return errors.New("legacy stop identity differs from the drained process")
+			return fmt.Errorf("%w: legacy stop identity differs from the drained process", upgrade.ErrStopNotIssued)
 		}
 		return h.stopLegacy(ctx, name, expected)
 	}
 	if err := h.checkProcess(ctx, name, expected); err != nil {
-		return err
+		return errors.Join(upgrade.ErrStopNotIssued, err)
 	}
 	_, err := h.tools.Run(ctx, fleetSystemctlTool, "stop", name)
 	return err
@@ -498,6 +499,11 @@ func (h *upgradeLocalHost) stopLegacy(ctx context.Context, name string, expected
 	managerFinished := false
 	defer func() {
 		if err != nil {
+			if managerDone == nil {
+				// No manager stop or termination was issued. Runtime preparation
+				// is reverted below; activation may recover the untouched peers.
+				err = errors.Join(upgrade.ErrStopNotIssued, err)
+			}
 			// Stop failure must not strand a frozen service, even if its caller
 			// was cancelled or manager observation is unavailable. Recovery uses
 			// the original kernel PID/start identity, never a replacement PID.

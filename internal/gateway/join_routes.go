@@ -115,6 +115,8 @@ func (s *Server) handleJoinPost(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, fleetproto.ErrCodeProtocol)
 		return
 	}
+	draining, finishAdmission := s.drain.Track()
+	defer finishAdmission()
 	// A duplicate identity is answered before the cooldown: a lost response
 	// retry must learn its request already exists.
 	var exists int
@@ -123,7 +125,13 @@ func (s *Server) handleJoinPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if exists != 0 {
+		finishAdmission()
 		writeFailure(w, http.StatusConflict, fleetproto.ErrCodeProtocol)
+		return
+	}
+	if draining {
+		finishAdmission()
+		writeFailure(w, http.StatusServiceUnavailable, fleetproto.ErrCodeTransport)
 		return
 	}
 	if !s.joinCooldowns.allow(remoteIP(r), time.Now()) {
@@ -137,6 +145,7 @@ func (s *Server) handleJoinPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := s.joins.Create(r.Context(), request, enrollment)
+	finishAdmission() // any admitted join is now durable before drain acknowledges.
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrJoinCap):

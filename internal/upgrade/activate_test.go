@@ -92,7 +92,7 @@ func (h *activationHost) Stop(_ context.Context, name string, expected Unit) err
 		h.beforeStopCheck(name)
 	}
 	if current := h.units[name]; current.MainPID != expected.MainPID || current.StartTime != expected.StartTime {
-		return errors.New("replacement service refused before Stop")
+		return errors.Join(ErrStopNotIssued, errors.New("replacement service refused before Stop"))
 	}
 	if h.legacy[name] {
 		h.events = append(h.events, "kill:"+name)
@@ -1028,5 +1028,52 @@ func TestHelperReplacementAfterFinalQuietCheckIsNotStopped(t *testing.T) {
 		if strings.HasPrefix(event, "stop:") || strings.HasPrefix(event, "kill:") {
 			t.Fatalf("replacement's new work was interrupted: %v", f.host.events)
 		}
+	}
+}
+
+func TestHelperStopNotIssuedResumesPeerOnlyBeforeAnyRealStop(t *testing.T) {
+	for _, first := range []bool{true, false} {
+		t.Run(strconv.FormatBool(first), func(t *testing.T) {
+			// Given: an identity refusal at the first or second unit boundary.
+			f := newActivationFixture(t, true)
+			f.schedule(t)
+			refused := "askdo.service"
+			if first {
+				refused = "askdo-gateway.service"
+			}
+			f.host.beforeStopCheck = func(name string) {
+				if name == refused {
+					u := f.host.units[name]
+					u.MainPID, u.StartTime = 999, 456
+					f.host.units[name] = u
+					f.host.draining[name] = false // replacement starts with admission open.
+				}
+			}
+			// When
+			err := f.helper.Activate(t.Context(), f.stage)
+			// Then: absence of CURRENT stop effects cannot erase an earlier real stop.
+			if !errors.Is(err, ErrStopNotIssued) {
+				t.Fatalf("pre-effect error lost: %v", err)
+			}
+			stops, resumes := 0, 0
+			for _, event := range f.host.events {
+				if strings.HasPrefix(event, "stop:") {
+					stops++
+				}
+				if strings.HasPrefix(event, "resume:") {
+					resumes++
+				}
+			}
+			if first && (stops != 0 || resumes != 1 || f.host.draining["askdo.service"]) {
+				t.Fatalf("untouched peer left drained: %v", f.host.events)
+			}
+			if !first && (stops != 1 || resumes != 0) {
+				t.Fatalf("admission restarted after an actual stop: %v", f.host.events)
+			}
+			data, readErr := os.ReadFile(f.host.layout.CLI)
+			if readErr != nil || string(data) != "old cli" {
+				t.Fatal("identity refusal installed candidates", readErr)
+			}
+		})
 	}
 }

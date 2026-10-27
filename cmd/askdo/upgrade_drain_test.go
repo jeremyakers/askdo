@@ -567,10 +567,64 @@ func TestUpgradeCooperativeStopRefusesUndrainedReplacement(t *testing.T) {
 			}), kill: func(int, syscall.Signal) error { killed = true; return nil }}
 			// When / Then
 			err := host.Stop(t.Context(), "askdo.service", upgrade.Unit{MainPID: 101, StartTime: 123})
-			if err == nil || stopped || killed {
+			if !errors.Is(err, upgrade.ErrStopNotIssued) || stopped || killed {
 				t.Fatalf("replacement interrupted: err=%v stopped=%v killed=%v", err, stopped, killed)
 			}
 		})
+	}
+}
+
+func TestUpgradeLegacyPreEffectIdentityRefusalRestoresRuntimeOverride(t *testing.T) {
+	// Given: identity changes after runtime preparation but BEFORE manager stop.
+	root := t.TempDir()
+	layout := upgrade.Layout{JobsDB: filepath.Join(root, "jobs.db"), ProcRoot: filepath.Join(root, "proc")}
+	writeUpgradeProcess(t, layout.ProcRoot, 101, 123)
+	runtimeRoot, runtimeTrust := upgradeRuntimeFixture(t)
+	pid, start := 101, uint64(123)
+	managerCalls, reloads, kills := 0, 0, 0
+	host := upgradeLocalHost{procRoot: layout.ProcRoot, runtimeRoot: runtimeRoot, runtimeTrust: runtimeTrust, operation: cliUpgradeID, tools: upgradeToolFunc(func(_ context.Context, _ string, args ...string) (string, error) {
+		if args[0] == "daemon-reload" {
+			reloads++
+			return "", nil
+		}
+		if args[0] == "stop" {
+			managerCalls++
+			return "", nil
+		}
+		if len(args) == 3 && args[2] == "--property=KillSignal,SuccessExitStatus" {
+			pid, start = 202, 456
+			writeUpgradeProcess(t, layout.ProcRoot, pid, start)
+			return "KillSignal=9\nSuccessExitStatus=KILL\n", nil
+		}
+		return fmt.Sprintf("MainPID=%d\nActiveState=active\nSubState=running\nControlGroup=/system.slice/askdo.service\n", pid), nil
+	}), kill: func(target int, sig syscall.Signal) error {
+		if target != 101 {
+			t.Fatal("signaled a replacement process")
+		}
+		if sig == syscall.SIGSTOP {
+			writeUpgradeProcessState(t, layout.ProcRoot, 101, 123, 'T')
+		} else if sig == syscall.SIGCONT {
+			writeUpgradeProcess(t, layout.ProcRoot, 101, 123)
+		} else {
+			kills++
+		}
+		return nil
+	}}
+	expected, err := host.Observe(t.Context(), "askdo.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.SetDraining(t.Context(), layout, "askdo.service", expected, true); err != nil {
+		t.Fatal(err)
+	}
+	// When / Then: all temporary policy is undone; no manager stop or kill occurred.
+	err = host.Stop(t.Context(), "askdo.service", expected)
+	if !errors.Is(err, upgrade.ErrStopNotIssued) || managerCalls != 0 || kills != 0 || reloads != 2 {
+		t.Fatalf("pre-effect refusal: %v managers=%d kills=%d reloads=%d", err, managerCalls, kills, reloads)
+	}
+	path := filepath.Join(runtimeRoot, "askdo.service.d", "zz-askdo-upgrade-"+cliUpgradeID+".conf")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("identity refusal left runtime policy behind: %v", err)
 	}
 }
 
