@@ -6,15 +6,22 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -36,7 +43,7 @@ func (i upgradeRootOwnedInfo) Sys() any {
 	return &stat
 }
 
-func upgradeVerifyConfig(t *testing.T, fleet bool, key ed25519.PublicKey) (upgrade.Layout, config.FleetConfig) {
+func upgradeVerifyConfig(t *testing.T, fleet bool, key ed25519.PublicKey, ca ...[]byte) (upgrade.Layout, config.FleetConfig) {
 	t.Helper()
 	t.Cleanup(config.StubCredentialChecksForTest(func(path string) (os.FileInfo, error) {
 		info, err := os.Lstat(path)
@@ -58,6 +65,9 @@ func upgradeVerifyConfig(t *testing.T, fleet bool, key ed25519.PublicKey) (upgra
 		return path
 	}
 	f := config.FleetConfig{URL: "https://gateway.invalid", HostID: "host-a", EnrollmentFile: write("enrollment", []byte(base64.RawURLEncoding.EncodeToString(make([]byte, 32))), 0o600), VerificationKeyFile: write("verify", []byte(base64.StdEncoding.EncodeToString(key)), 0o400), ApprovalTTL: 600}
+	if len(ca) != 0 {
+		f.CAFile = write("ca", ca[0], 0o444)
+	}
 	raw := map[string]any{"config_version": 5, "inspection": map[string]any{"read_roots": []string{}}, "review": map[string]any{"gateway_profiles": []string{"local"}}, "limits": map[string]any{}, "fleet": f}
 	if !fleet {
 		raw["config_version"] = 4
@@ -69,8 +79,31 @@ func upgradeVerifyConfig(t *testing.T, fleet bool, key ed25519.PublicKey) (upgra
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := []byte(`{"config_version":1,"public_url":"https://local-gateway.invalid","profiles":[]}`)
+	local := []byte(`{"config_version":1,"public_url":"https://local-gateway.invalid","listen":"127.0.0.1:8443","profiles":[]}`)
 	return upgrade.Layout{Config: write("config.json", data, 0o600), GatewayConfig: write("gateway.json", local, 0o600)}, f
+}
+
+func upgradeVerifyTLSFixture(t *testing.T) (tls.Certificate, []byte) {
+	t.Helper()
+	public, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "local-gateway.invalid"}, DNSNames: []string{"local-gateway.invalid"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, IsCA: true, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, public, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedKey, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	certificate, err := tls.X509KeyPair(ca, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return certificate, ca
 }
 
 func upgradeVerifyBrokerDial(context.Context, string, string) (net.Conn, error) {
@@ -87,7 +120,8 @@ func TestUpgradeVerifyUsesActualEnrolledCatalogueExchange(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			layout, enrollment := upgradeVerifyConfig(t, true, public)
+			certificate, ca := upgradeVerifyTLSFixture(t)
+			layout, enrollment := upgradeVerifyConfig(t, true, public, ca)
 			if scenario == "missing enrollment" {
 				if err := os.Remove(enrollment.EnrollmentFile); err != nil {
 					t.Fatal(err)
@@ -108,32 +142,51 @@ func TestUpgradeVerifyUsesActualEnrolledCatalogueExchange(t *testing.T) {
 				status = http.StatusUnauthorized
 			}
 			previous := http.DefaultTransport
+			var mu sync.Mutex
 			var exchanges []<-chan error
-			var addresses []string
-			// Clone preserves this test-only TLS dial seam. Each exchange uses
-			// net.Pipe and a real HTTP request/response, never a listener or socket.
-			http.DefaultTransport = &http.Transport{DialTLSContext: func(_ context.Context, _ string, address string) (net.Conn, error) {
+			var addresses, remoteAddresses []string
+			// Local transport uses real TLS over net.Pipe: both public SNI/cert
+			// identity and authenticated/signed catalog verification remain real.
+			exchange := func(ctx context.Context, local bool) net.Conn {
 				client, server := net.Pipe()
 				done := make(chan error, 1)
+				mu.Lock()
 				exchanges = append(exchanges, done)
-				addresses = append(addresses, address)
-				exchangeStatus := status
-				if scenario == "healthy remote broken local" && address == "local-gateway.invalid:443" {
-					exchangeStatus = http.StatusServiceUnavailable
-				}
+				mu.Unlock()
 				go func() {
 					defer server.Close()
-					r, err := http.ReadRequest(bufio.NewReader(server))
-					if err == nil && (r.URL.Path != "/v1/catalog" || r.URL.Query().Get("submitter_uid") != "0" || r.Header.Get("X-Askdo-Host") != enrollment.HostID || r.Header.Get("Authorization") != "Bearer "+base64.RawURLEncoding.EncodeToString(make([]byte, 32))) {
+					var conn net.Conn = server
+					if local {
+						secured := tls.Server(server, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
+						if err := secured.HandshakeContext(ctx); err != nil {
+							done <- err
+							return
+						}
+						if secured.ConnectionState().ServerName != "local-gateway.invalid" {
+							done <- errors.New("TLS did not retain public hostname")
+							return
+						}
+						conn = secured
+					}
+					r, err := http.ReadRequest(bufio.NewReader(conn))
+					if err == nil && (r.Host != "local-gateway.invalid" || r.URL.Path != "/v1/catalog" || r.URL.Query().Get("submitter_uid") != "0" || r.Header.Get("X-Askdo-Host") != enrollment.HostID || r.Header.Get("Authorization") != "Bearer "+base64.RawURLEncoding.EncodeToString(make([]byte, 32))) {
 						err = io.ErrUnexpectedEOF
 					}
 					if err == nil {
-						response := &http.Response{StatusCode: exchangeStatus, ProtoMajor: 1, ProtoMinor: 1, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(wire)), ContentLength: int64(len(wire)), Close: true}
-						err = response.Write(server)
+						response := &http.Response{StatusCode: status, ProtoMajor: 1, ProtoMinor: 1, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(wire)), ContentLength: int64(len(wire)), Close: true}
+						err = response.Write(conn)
 					}
 					done <- err
 				}()
-				return client, nil
+				return client
+			}
+			// The public hostname would reach a healthy remote peer. A custom
+			// DialContext must bypass even an inherited DialTLSContext hook.
+			http.DefaultTransport = &http.Transport{DialTLSContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+				mu.Lock()
+				remoteAddresses = append(remoteAddresses, address)
+				mu.Unlock()
+				return exchange(ctx, false), nil
 			}}
 			defer func() { http.DefaultTransport = previous }()
 			before, err := os.ReadFile(layout.Config)
@@ -145,21 +198,36 @@ func TestUpgradeVerifyUsesActualEnrolledCatalogueExchange(t *testing.T) {
 				t.Fatal(err)
 			}
 			// When
-			err = (upgradeLocalHost{dial: upgradeVerifyBrokerDial}).Verify(t.Context(), layout)
+			err = (upgradeLocalHost{dial: upgradeVerifyBrokerDial, gatewayDial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				mu.Lock()
+				addresses = append(addresses, address)
+				mu.Unlock()
+				if network != "tcp" || address != "127.0.0.1:8443" {
+					return nil, errors.New("verification did not dial the local listener")
+				}
+				if scenario == "healthy remote broken local" {
+					return nil, errors.New("local listener unavailable")
+				}
+				return exchange(ctx, true), nil
+			}}).Verify(t.Context(), layout)
 			// Then: 401, missing enrollment and unverifiable catalogs cannot pass.
 			if (err == nil) != (scenario == "authenticated") {
 				t.Fatalf("verification scenario=%s err=%v", scenario, err)
 			}
-			for _, done := range exchanges {
+			mu.Lock()
+			completed := append([]<-chan error(nil), exchanges...)
+			localTargets, remoteTargets := append([]string(nil), addresses...), append([]string(nil), remoteAddresses...)
+			mu.Unlock()
+			for _, done := range completed {
 				if err := <-done; err != nil {
 					t.Fatal("authenticated exchange:", err)
 				}
 			}
-			if scenario != "missing enrollment" && len(exchanges) != 1 {
-				t.Fatalf("catalog exchanges=%d", len(exchanges))
+			if scenario != "missing enrollment" && scenario != "healthy remote broken local" && len(completed) != 1 {
+				t.Fatalf("catalog exchanges=%d", len(completed))
 			}
-			if len(addresses) != 0 && addresses[0] != "local-gateway.invalid:443" {
-				t.Fatalf("verification targeted unrelated enrolled gateway: %v", addresses)
+			if len(remoteTargets) != 0 || len(localTargets) != 0 && localTargets[0] != "127.0.0.1:8443" {
+				t.Fatalf("verification targeted unrelated peer: local=%v remote=%v", localTargets, remoteTargets)
 			}
 			after, readErr := os.ReadFile(layout.Config)
 			if readErr != nil || !bytes.Equal(before, after) {
