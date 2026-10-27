@@ -114,6 +114,10 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 		return runInspection(args[1:], os.Stdout, os.Stderr)
 	case "auth":
 		return runAuth(args[1:], os.Stdout, os.Stderr)
+	case "upgrade":
+		return runUpgrade(args[1:], runClient, os.Stdout, os.Stderr)
+	case "upgrade-helper":
+		return runUpgradeHelper(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "logs":
 		// Root-only operator command; must dispatch before the client
 		// fallback so the job ID is never forwarded over the loopback socket.

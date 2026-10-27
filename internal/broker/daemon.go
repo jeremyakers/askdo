@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/admission"
 	"github.com/jeremyakers/askdo/internal/codexauth"
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/fleetclient"
@@ -97,6 +98,8 @@ type daemon struct {
 	spoolRoot      string
 	fencePath      string
 	fenceOwner     uint32
+	drain          admission.Gate
+	drainPath      string
 	frameMax       uint32
 	worker         Worker
 	executor       Executor
@@ -172,6 +175,8 @@ func Run(ctx context.Context, configPath string) error {
 		return err
 	}
 	defer d.close()
+	stopDrain := d.drain.Listen(ctx, d.drainPath)
+	defer stopDrain()
 	return d.serve(ctx, listener)
 }
 
@@ -356,7 +361,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	admissionTail := make(chan struct{})
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
+	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, drainPath: admission.Path(storePath), frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
 		riskPolicyDefault: riskPolicyDefaultPath(configPath), riskPolicyTrust: rootRiskPolicyTrust(), configPath: configPath, reloadConfig: options.cfg == nil}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
 	d.reviewLogPath = reviewlog.Path(storePath)
@@ -668,21 +673,7 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid reserve request"})
 			return
 		}
-		var id, bearer string
-		if request.CancelCapability {
-			var token [32]byte
-			if _, err = rand.Read(token[:]); err == nil {
-				id, err = d.store.ReserveCancelableJobID(context.Background(), uid, time.Now(), sha256.Sum256(token[:]))
-				bearer = hex.EncodeToString(token[:])
-			}
-		} else {
-			id, err = d.store.ReserveJobID(context.Background(), uid, time.Now())
-		}
-		if err != nil {
-			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "reservation failed"})
-			return
-		}
-		_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
+		d.handleReserve(conn, uid, request)
 	case "submit":
 		if fenced, _ := admissionFence(d.fencePath, d.fenceOwner); fenced {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "migration_in_progress", Message: "submissions are temporarily unavailable"})
@@ -776,7 +767,36 @@ func (d *daemon) handleAutoApproval(conn *net.UnixConn, uid uint32, request prot
 	_ = writeClient(conn, proto.AutoApprovalStatusEvent{Op: "auto_approval_status", MaxRisk: cap, Threshold: threshold, EffectiveThreshold: effective})
 }
 
+func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.ReserveRequest) {
+	draining, finish := d.drain.Track()
+	defer finish()
+	if draining {
+		finish()
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "draining", Message: "new work is paused for upgrade"})
+		return
+	}
+	var id, bearer string
+	var err error
+	if request.CancelCapability {
+		var token [32]byte
+		if _, err = rand.Read(token[:]); err == nil {
+			id, err = d.store.ReserveCancelableJobID(context.Background(), uid, time.Now(), sha256.Sum256(token[:]))
+			bearer = hex.EncodeToString(token[:])
+		}
+	} else {
+		id, err = d.store.ReserveJobID(context.Background(), uid, time.Now())
+	}
+	finish()
+	if err != nil {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "reservation failed"})
+		return
+	}
+	_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
+}
+
 func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func()) {
+	draining, finishAdmission := d.drain.Track()
+	defer finishAdmission()
 	d.mu.Lock()
 	shuttingDown := d.shuttingDown
 	d.mu.Unlock()
@@ -799,6 +819,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "conflict", Message: "request ID has different contents"})
 			return
 		}
+		finishAdmission()
 		existing, err := d.store.GetJob(context.Background(), uid, request.RequestID)
 		if err != nil {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "consumed job unavailable"})
@@ -811,6 +832,11 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	}
 	if reservation != store.ReservationReserved {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "conflict", Message: "reservation cannot be submitted"})
+		return
+	}
+	if draining {
+		finishAdmission()
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "draining", Message: "new work is paused for upgrade"})
 		return
 	}
 	identity := resolveSubmitterIdentity(uid)
@@ -911,6 +937,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = os.RemoveAll(spool.dir)
 		var duplicate *store.ErrDuplicateIdentical
 		if errors.As(err, &duplicate) {
+			finishAdmission()
 			_ = writeClient(conn, proto.AcceptedEvent{Op: "accepted", RequestID: request.RequestID, State: string(created.State)})
 			release()
 			d.followOriginal(conn, uid, request.RequestID, request.ProtocolVersion)
@@ -950,6 +977,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			}
 		}(*deadline)
 	}
+	finishAdmission()
 	_ = writeClient(conn, proto.AcceptedEvent{Op: "accepted", RequestID: request.RequestID, State: string(store.StateQueued)})
 	release()
 	d.followRuntime(conn, job, true, request.ProtocolVersion)

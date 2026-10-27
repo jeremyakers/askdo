@@ -5,6 +5,7 @@
 - [`../README.md`](../README.md) — requirements, install and onboarding.
 - [`installation.md`](installation.md) — installer asset pinning and advanced
   Synology DSM behavior.
+- [`upgrade.md`](upgrade.md) — approved self-upgrade, reconnects and recovery.
 - [`clean-cutover.md`](clean-cutover.md) — install alongside another service,
   coordinate Telegram bot use, and plan an operator-approved handoff; no live
   cutover is claimed.

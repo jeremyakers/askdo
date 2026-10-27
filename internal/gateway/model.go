@@ -79,6 +79,11 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 		result.Failure = &fleetproto.Failure{Code: code}
 		return result
 	}
+	draining, finishAdmission := s.drain.Track()
+	defer finishAdmission()
+	if draining && !turn.RecoverPrevious {
+		return fail(fleetproto.ErrCodeTransport)
+	}
 	// Freeze the same JSON representation subsequent network/pipe echoes use.
 	// RawMessage bytes otherwise retain whitespace and unescaped HTML from the
 	// sender, while json.Marshal normalizes those bytes at the wire boundary.
@@ -182,7 +187,7 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 			// A successor can itself lose its reply while waiting. Carry the
 			// known provider minimum forward even if this wait is canceled.
 			operation.retryAt = previous.retryAt
-			if previous.result.Response != nil || !previous.recoverable {
+			if previous.result.Response != nil || !previous.recoverable || draining {
 				// A valid completed response is adopted, not recomputed. This also
 				// avoids appending Codex reasoning twice after a lost signed reply.
 				result = previous.result
@@ -194,6 +199,12 @@ func (s *Server) modelTurn(ctx context.Context, host AuthenticatedHost, turn fle
 			err = callCtx.Err()
 			joinCanceled = true
 		}
+	}
+	// A draining service may return an existing cached outcome, but recovery
+	// must not turn into a fresh physical provider call.
+	if draining && !resolved {
+		result.Failure = &fleetproto.Failure{Code: fleetproto.ErrCodeTransport}
+		resolved = true
 	}
 	// Both ordinary retries and lost-outcome recovery enforce the predecessor's
 	// absolute minimum. An already-waited caller incurs no second delay, and a

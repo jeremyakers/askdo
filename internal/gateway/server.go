@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/admission"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/modelwire"
 )
@@ -40,6 +41,7 @@ type Server struct {
 	requestMu     sync.Mutex
 	requests      sync.WaitGroup
 	stopping      bool
+	drain         admission.Gate
 	// Private deterministic fixture checkpoint; set before model requests start.
 	beforeModelCompletion func()
 }
@@ -252,6 +254,8 @@ func (s *Server) handleModelTurn(w http.ResponseWriter, r *http.Request) {
 // Serve uses operator-provided TLS and gracefully drains on ctx cancellation.
 // No shared services are restarted. Close also cancels active provider requests.
 func (s *Server) Serve(ctx context.Context) error {
+	stopDrain := s.drain.Listen(ctx, admission.Path(s.store.path))
+	defer stopDrain()
 	server := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	done := make(chan struct{})
 	go func() {

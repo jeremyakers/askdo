@@ -46,6 +46,8 @@ func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, 400, fleetproto.ErrCodeProtocol)
 		return
 	}
+	draining, finishAdmission := s.drain.Track()
+	defer finishAdmission()
 	old, original, err := readTicket(r.Context(), s.store.db, host.HostID, job)
 	token := ""
 	if err == nil {
@@ -58,6 +60,11 @@ func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, 500, fleetproto.ErrCodeTransport)
 		return
 	} else {
+		if draining {
+			finishAdmission()
+			writeFailure(w, http.StatusServiceUnavailable, fleetproto.ErrCodeTransport)
+			return
+		}
 		catalog, err := s.catalog(host, sub.Ticket.Display.Identity.SubmitterUID)
 		if err != nil || !reflect.DeepEqual(catalog.Route, sub.Route) {
 			writeFailure(w, 409, fleetproto.ErrCodeRevision)
@@ -117,6 +124,7 @@ func (s *Server) handleTicket(w http.ResponseWriter, r *http.Request) {
 	for attempt := uint32(1); attempt <= fleetproto.MaxProfiles; attempt++ {
 		s.DropSession(sub.Ticket.Binding.HostID, sub.Ticket.Binding.JobID, attempt)
 	}
+	finishAdmission()
 	wire, err := fleetproto.Sign(s.key, ack)
 	if err != nil {
 		writeFailure(w, 500, fleetproto.ErrCodeProtocol)
