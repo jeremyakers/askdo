@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +17,7 @@ func TestApprovalTimestampUpsertAndIdentity(t *testing.T) {
 	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
 	now := time.Now().UTC()
 	for _, offset := range []time.Duration{0, 20 * time.Second} {
-		stamp := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(offset), ExpiresAt: now.Add(offset + time.Minute)}
+		stamp := ApprovalTimestamp{AuthorityHash: strings.Repeat("a", 64), ApprovalTimestampKey: key, ApprovedAt: now.Add(offset), ExpiresAt: now.Add(offset + time.Minute)}
 		// When a successful dispatch records or refreshes the timestamp.
 		if err := s.UpsertApprovalTimestamp(ctx, stamp); err != nil {
 			t.Fatal(err)
@@ -53,7 +55,7 @@ func TestApprovalTimestampRejectsInvalidRecords(t *testing.T) {
 			// Given an invalid timestamp record.
 			s := openTestStore(t)
 			now := time.Now().UTC()
-			stamp := ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}
+			stamp := ApprovalTimestamp{AuthorityHash: strings.Repeat("a", 64), ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}
 			change(&stamp)
 			// When persisted, then the store rejects it without a SQL conversion error.
 			if err := s.UpsertApprovalTimestamp(context.Background(), stamp); err == nil {
@@ -106,7 +108,7 @@ func TestApprovalTimestampSchema5MigrationPreservesJobs(t *testing.T) {
 		t.Fatalf("historical job = %+v, %v", job, err)
 	}
 	now := time.Now().UTC()
-	if err := s.UpsertApprovalTimestamp(context.Background(), ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: 1000, TTYSession: 1, TTYRdev: 2, TTYInode: 3, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+	if err := s.UpsertApprovalTimestamp(context.Background(), ApprovalTimestamp{AuthorityHash: strings.Repeat("a", 64), ApprovalTimestampKey: ApprovalTimestampKey{UID: 1000, TTYSession: 1, TTYRdev: 2, TTYInode: 3, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -116,7 +118,7 @@ func TestApprovalTimestampCleanupRemovesExpiredRows(t *testing.T) {
 	s := openTestStore(t)
 	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
 	now := time.Now().UTC()
-	stamp := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}
+	stamp := ApprovalTimestamp{AuthorityHash: strings.Repeat("a", 64), ApprovalTimestampKey: key, ApprovedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}
 	if err := s.UpsertApprovalTimestamp(context.Background(), stamp); err != nil {
 		t.Fatal(err)
 	}
@@ -138,12 +140,12 @@ func TestApprovalTimestampRefreshIsMonotonic(t *testing.T) {
 	s := openTestStore(t)
 	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
 	now := time.Now().UTC()
-	newer := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour)}
+	newer := ApprovalTimestamp{AuthorityHash: strings.Repeat("a", 64), ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour)}
 	if err := s.UpsertApprovalTimestamp(context.Background(), newer); err != nil {
 		t.Fatal(err)
 	}
 	// When an older successful handoff writes afterward.
-	older := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Second)}
+	older := ApprovalTimestamp{AuthorityHash: strings.Repeat("a", 64), ApprovalTimestampKey: key, ApprovedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Second)}
 	if err := s.UpsertApprovalTimestamp(context.Background(), older); err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +153,78 @@ func TestApprovalTimestampRefreshIsMonotonic(t *testing.T) {
 	got, err := s.GetApprovalTimestamp(context.Background(), key)
 	if err != nil || got != newer {
 		t.Fatalf("timestamp=%+v err=%v, want %+v", got, err, newer)
+	}
+}
+
+func TestForegroundAuthorizationConstraintMigrationPreservesGrants(t *testing.T) {
+	// Given a schema-5 foreground grant with the old authorization constraint.
+	path := filepath.Join(t.TempDir(), "jobs.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("b", 64)
+	_, err = db.Exec(`CREATE TABLE meta (schema_version INTEGER NOT NULL); INSERT INTO meta VALUES(5); PRAGMA user_version = 5;
+		CREATE TABLE jobs (uid INTEGER NOT NULL, request_id TEXT NOT NULL, state TEXT NOT NULL,
+		submit_body BLOB, operation_json BLOB, reason TEXT, mode TEXT, created_at INTEGER NOT NULL,
+		deadline_at INTEGER, spool_dir TEXT, manifest_path TEXT, manifest_hash TEXT, approval_json BLOB,
+		result_json BLOB, attempts_json BLOB, updated_at INTEGER, canonical_job INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY(uid, request_id));
+		CREATE TABLE foreground_grants (uid INTEGER NOT NULL, request_id TEXT NOT NULL,
+		token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32), manifest_digest TEXT NOT NULL,
+		submitter_pid INTEGER NOT NULL, submitter_starttime INTEGER NOT NULL, tty_rdev INTEGER NOT NULL,
+		tty_inode INTEGER NOT NULL, tty_session INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+		consumed_at INTEGER, authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto')),
+		PRIMARY KEY(uid, request_id), FOREIGN KEY(uid, request_id) REFERENCES jobs(uid, request_id));
+		INSERT INTO jobs(uid, request_id, state, reason, created_at, manifest_hash, approval_json)
+		VALUES(1001, 'old', 'awaiting-human', 'retained', 123, ?, ?);
+		INSERT INTO foreground_grants(uid, request_id, token_hash, manifest_digest, submitter_pid,
+		submitter_starttime, tty_rdev, tty_inode, tty_session, expires_at, authorization_source)
+		VALUES(1001, 'old', zeroblob(32), ?, 1, 1, 1, 1, 1, 1, 'human');
+		INSERT INTO jobs(uid, request_id, state, reason, created_at, manifest_hash, approval_json)
+		VALUES(1001, 'new', 'awaiting-human', 'new', 123, ?, ?)`, digest, `{"kind":"timestamp","decision":"approved","digest":"`+digest+`"}`, digest, digest, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// When the store migrates the schema and creates a timestamp grant.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	beforeJob, err := s.GetJob(context.Background(), 1001, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := ForegroundGrant{UID: 1001, RequestID: "new", TokenHash: sha256.Sum256([]byte("new-token")), ManifestDigest: digest,
+		SubmitterPID: 1, SubmitterStarttime: 1, TTYRdev: 1, TTYInode: 1, TTYSession: 1,
+		ExpiresAtUTC: time.Now().Add(time.Hour).UTC(), NowUTC: time.Now().UTC(), AuthorizationSource: "timestamp"}
+	var matching int
+	if err := s.db.QueryRow(`SELECT count(*) FROM jobs WHERE uid = ? AND request_id = ? AND state = ? AND manifest_hash = ?
+		AND approval_json IS NOT NULL AND json_valid(approval_json)
+		AND json_extract(approval_json, '$.kind') IN ('human', 'timestamp')
+		AND json_extract(approval_json, '$.decision') = 'approved'
+		AND json_extract(approval_json, '$.digest') = ?`, 1001, "old", "awaiting-human", digest, digest).Scan(&matching); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("stored job before timestamp grant: state=%s hash=%s approval=%s; matching=%d", beforeJob.State, beforeJob.ManifestHash, beforeJob.ApprovalJSON, matching)
+	ok, err := s.CreateForegroundGrant(context.Background(), grant)
+	if err != nil || !ok {
+		t.Fatalf("timestamp grant after migration: ok=%t err=%v", ok, err)
+	}
+	// Then the new source is timestamp and the old grant is preserved.
+	source, err := s.GetForegroundAuthorizationSource("new")
+	if err != nil || source != "timestamp" {
+		t.Fatalf("authorization source=%q err=%v", source, err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM foreground_grants`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("grants=%d, want 2", count)
 	}
 }

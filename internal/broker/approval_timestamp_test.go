@@ -58,6 +58,10 @@ func timestampWorker(approvals *atomic.Int32, action string, beforeExit func(str
 	}}
 }
 
+func timestampAuthority(cfg *config.Config, uid uint32) string {
+	return approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles)
+}
+
 func timestampConfig(t *testing.T) (*config.Config, uint32) {
 	t.Helper()
 	account, err := user.Current()
@@ -221,7 +225,7 @@ func TestApprovalTimestampIneligibleJobsStillRequireApproval(t *testing.T) {
 			case "wrong inode":
 				storedKey.TTYInode++
 			}
-			stamp := store.ApprovalTimestamp{ApprovalTimestampKey: storedKey, ApprovedAt: now.Add(-time.Minute), ExpiresAt: expiry}
+			stamp := store.ApprovalTimestamp{ApprovalTimestampKey: storedKey, ApprovedAt: now.Add(-time.Minute), ExpiresAt: expiry, AuthorityHash: timestampAuthority(cfg, uid)}
 			if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), stamp); err != nil {
 				t.Fatal(err)
 			}
@@ -279,7 +283,7 @@ func TestApprovalTimestampFailuresNeverRefresh(t *testing.T) {
 			var before store.ApprovalTimestamp
 			if scenario != "denied" {
 				now := time.Now().UTC()
-				before = store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}
+				before = store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute), AuthorityHash: timestampAuthority(cfg, uid)}
 				if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), before); err != nil {
 					t.Fatal(err)
 				}
@@ -330,7 +334,7 @@ func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
 			if scenario == "enable" {
 				beforeAge = time.Second
 			}
-			before := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-beforeAge), ExpiresAt: now.Add(time.Minute)}
+			before := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-beforeAge), ExpiresAt: now.Add(time.Minute), AuthorityHash: timestampAuthority(cfg, uid)}
 			if scenario == "increase expiry" {
 				before.ApprovedAt = now.Add(-2 * time.Hour)
 				before.ExpiresAt = now.Add(-time.Second)
@@ -471,5 +475,43 @@ func TestApprovalTimestampAutoApprovalNeverRefreshes(t *testing.T) {
 	stamp, err := h.daemon.store.GetApprovalTimestamp(context.Background(), key)
 	if err != nil || human || !stamp.ExpiresAt.IsZero() {
 		t.Fatalf("auto dispatch became human-approved: human=%v timestamp=%+v %v", human, stamp, err)
+	}
+}
+
+func TestApprovalTimestampRejectsFutureApproval(t *testing.T) {
+	// Given a timestamp whose approval time is in the future, as after a clock step.
+	cfg, uid := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	key := setTimestampPeer(h, uid)
+	now := time.Now().UTC()
+	stamp := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(time.Hour), ExpiresAt: now.Add(2 * time.Hour), AuthorityHash: timestampAuthority(cfg, uid)}
+	if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), stamp); err != nil {
+		t.Fatal(err)
+	}
+	req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+	timestampSubmit(t, h, req)
+	// Then the future approval cannot bypass the normal approval flow.
+	if approvals.Load() != 1 {
+		t.Fatalf("future approval bypassed normal approval: approvals=%d", approvals.Load())
+	}
+}
+
+func TestApprovalTimestampAuthorityChangeRequiresApproval(t *testing.T) {
+	// Given a timestamp issued by a different approval authority.
+	cfg, uid := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	key := setTimestampPeer(h, uid)
+	now := time.Now().UTC()
+	stamp := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour), AuthorityHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), stamp); err != nil {
+		t.Fatal(err)
+	}
+	req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+	timestampSubmit(t, h, req)
+	// Then the current authority must approve again.
+	if approvals.Load() != 1 {
+		t.Fatalf("authority change reused old timestamp: approvals=%d", approvals.Load())
 	}
 }

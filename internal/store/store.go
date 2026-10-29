@@ -339,9 +339,13 @@ func (store *Store) migrate(ctx context.Context) error {
 		boot_id TEXT NOT NULL,
 		approved_at INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL,
+		authority_hash TEXT NOT NULL,
 		PRIMARY KEY (uid, tty_session, tty_rdev, tty_inode, boot_id)
 	)`); err != nil {
 		return fmt.Errorf("create approval timestamps table: %w", err)
+	}
+	if err := migrateForegroundAuthorizationSource(ctx, tx, version); err != nil {
+		return fmt.Errorf("migrate foreground authorization source: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS foreground_grants (
 		uid INTEGER NOT NULL,
@@ -724,6 +728,48 @@ func validDigest(digest string) bool {
 func validForegroundPeer(uid uint32, pid, starttime int64, rdev, inode uint64, session int64) bool {
 	return uid != 0 && pid > 0 && starttime > 0 && rdev > 0 && rdev <= uint64(^uint64(0)>>1) &&
 		inode > 0 && inode <= uint64(^uint64(0)>>1) && session > 0
+}
+
+// migrateForegroundAuthorizationSource rebuilds the pre-timestamp constraint
+// while preserving every grant. CREATE IF NOT EXISTS alone cannot change it.
+func migrateForegroundAuthorizationSource(ctx context.Context, tx *sql.Tx, version int) error {
+	if version >= 6 {
+		return nil
+	}
+	var definition string
+	err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'foreground_grants'`).Scan(&definition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE foreground_grants RENAME TO foreground_grants_legacy`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE foreground_grants (
+		uid INTEGER NOT NULL,
+		request_id TEXT NOT NULL,
+		token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+		manifest_digest TEXT NOT NULL,
+		submitter_pid INTEGER NOT NULL,
+		submitter_starttime INTEGER NOT NULL,
+		tty_rdev INTEGER NOT NULL,
+		tty_inode INTEGER NOT NULL,
+		tty_session INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		consumed_at INTEGER,
+		authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto', 'timestamp')),
+		PRIMARY KEY (uid, request_id),
+		FOREIGN KEY (uid, request_id) REFERENCES jobs(uid, request_id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO foreground_grants SELECT uid, request_id, token_hash, manifest_digest, submitter_pid, submitter_starttime, tty_rdev, tty_inode, tty_session, expires_at, consumed_at, authorization_source FROM foreground_grants_legacy`); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `DROP TABLE foreground_grants_legacy`)
+	return err
 }
 
 // CreateForegroundGrant requires a recorded human approval bound to the exact
