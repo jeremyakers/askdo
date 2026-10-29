@@ -1043,7 +1043,7 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 		UID: j.uid, RequestID: j.req.RequestID, TokenHash: hash, ManifestDigest: pending.digest,
 		SubmitterPID: peer.pid, SubmitterStarttime: evidence.starttime,
 		TTYRdev: evidence.rdev, TTYInode: evidence.inode, TTYSession: evidence.session,
-		ExpiresAtUTC: expiry, NowUTC: time.Now().UTC(),
+		ExpiresAtUTC: expiry, NowUTC: time.Now().UTC(), AuthorizationSource: approvalKind,
 	})
 	if changed && err == nil {
 		j.state = store.StateAwaitingHandoff
