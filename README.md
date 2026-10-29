@@ -199,6 +199,19 @@ Keep AI review for agents but not for your own account:
 sudo askdo review exempt add "$USER"
 ```
 
+Optionally reuse that approval for foreground unreviewed commands in the same
+terminal, with a sliding five-minute window:
+
+```sh
+sudo askdo review timestamp set "$USER" 300
+askdo review timestamp list
+sudo askdo review timestamp clear "$USER"  # disable reuse again
+```
+
+The first command still needs approval. Each successful handoff resets the
+window; detached jobs and AI-required commands never use it. It is off by default.
+See [approval timestamps](docs/configuration.md#sliding-foreground-approval-timestamps).
+
 Headless agents get streamed output and a job ID they can return to later. If
 the client disconnects before launch, the pending request is cancelled; after
 launch, use `status` and `attach` rather than submitting the command again.

@@ -65,6 +65,7 @@ type jobRuntime struct {
 	models                 []proto.ProjectedModel
 	preflightFailures      []proto.AvailabilityFailure
 	approvalOnly           bool
+	humanApproval          bool // actual human approval, or its foreground timestamp
 	subscribers            map[chan []byte]struct{}
 	attachLive             bool
 	worker                 WorkerSession
@@ -121,9 +122,9 @@ type foregroundPeer struct {
 }
 
 // approvalBinding binds the pending operator approval to the frozen manifest.
-// Every field is broker-trusted: the digest and operator ID come from the
-// freeze/configuration, and the card/message/expiry come from the worker's
-// notification_sent report after validation.
+// Every field is broker-trusted: the digest comes from the freeze, and card
+// metadata comes from a validated notification/configuration. Timestamp reuse
+// binds its stored expiry instead and has no Telegram card or operator tuple.
 type approvalBinding struct {
 	channelName    string
 	targets        []proto.NotificationTarget
@@ -585,9 +586,14 @@ func (j *jobRuntime) run(ctx context.Context) {
 		j.fail("review rejected: " + reason)
 		return
 	}
+	timestampApproval, timestampErr := j.approvalTimestampBinding(ctx, digest)
+	if timestampErr != nil {
+		// An unavailable optional timestamp preserves normal per-command approval.
+		slog.Warn("approval timestamp unavailable", "request_id", j.req.RequestID, "error", timestampErr)
+	}
 	_, brokerApproval := j.daemon.worker.(interface{ brokerApproval() })
 	brokerApproval = brokerApproval && j.fleet == nil && autoPlan == nil
-	if brokerApproval {
+	if brokerApproval || timestampApproval != nil {
 		switch value := frozen.(type) {
 		case proto.Frozen:
 			value.BrokerApproval = true
@@ -599,6 +605,10 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	if err := writeWorker(session, frozen, proto.BrokerToWorker); err != nil {
 		j.fail("send frozen review")
+		return
+	}
+	if timestampApproval != nil {
+		j.runApprovalTimestamp(ctx, timestampApproval)
 		return
 	}
 	if j.fleet != nil {
@@ -927,6 +937,9 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	// spool file and the durable record), staged bundle bytes must still match
 	// their digests, and the approval/deadline must not
 	// have lapsed. Any failure here is pre-dispatch and executes nothing.
+	j.mu.Lock()
+	j.humanApproval = true
+	j.mu.Unlock()
 	if err := j.preLaunchChecks(pending); err != nil {
 		j.fail("pre-launch validation: " + err.Error())
 		return
@@ -970,8 +983,9 @@ func (j *jobRuntime) consumeDecision(ctx context.Context, decision *proto.Decisi
 	j.execute(ctx)
 }
 
-// createHandoff records the human decision before atomically creating the
-// unclaimed grant. No daemon-owned executor path is reachable from here.
+// createHandoff records human authorization before atomically creating the
+// unclaimed grant. A nil decision denotes timestamp reuse, never a Telegram tap.
+// No daemon-owned executor path is reachable from here.
 func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding, decision *proto.Decision) {
 	peer := j.foreground
 	evidence, err := j.daemon.ttyEvidence(peer.pid)
@@ -988,19 +1002,27 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 	if deadline := j.deadline(); !deadline.IsZero() && deadline.Before(expiry) {
 		expiry = deadline
 	}
+	var decidingUser, decidingChat, decidingMessage int64
+	var approvalSource string
+	if decision != nil {
+		decidingUser, decidingChat, decidingMessage = decision.OperatorUserID, decision.ChatID, decision.MessageID
+	} else {
+		approvalSource = "timestamp"
+	}
 	decisionRecord, err := json.Marshal(struct {
-		Kind     string `json:"kind"`
-		Decision string `json:"decision"`
+		Kind           string `json:"kind"`
+		Decision       string `json:"decision"`
+		ApprovalSource string `json:"approval_source,omitempty"`
 		approvalRecord
 		DecidingUserID    int64 `json:"deciding_user_id,omitempty"`
 		DecidingChatID    int64 `json:"deciding_chat_id,omitempty"`
 		DecidingMessageID int64 `json:"deciding_message_id,omitempty"`
-	}{Kind: "human", Decision: "approved", approvalRecord: approvalRecord{
+	}{Kind: "human", Decision: "approved", ApprovalSource: approvalSource, approvalRecord: approvalRecord{
 		CardID: pending.cardID, MessageIDs: pending.messageIDs, Digest: pending.digest,
 		OperatorUserID: pending.operatorUserID, ExpiryUnixMS: pending.expiry.UnixMilli(),
 		ChannelName: j.approvalChannel(pending), Targets: pending.targets,
 		FleetEvents: j.fleetProofs(),
-	}, DecidingUserID: decision.OperatorUserID, DecidingChatID: decision.ChatID, DecidingMessageID: decision.MessageID})
+	}, DecidingUserID: decidingUser, DecidingChatID: decidingChat, DecidingMessageID: decidingMessage})
 	if err != nil {
 		j.fail("encode human approval")
 		return

@@ -192,6 +192,9 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	if err := cfg.Review.ResolveApprovalOnlyUsers(); err != nil {
 		return nil, nil, err
 	}
+	if err := cfg.Review.ResolveApprovalTimestampUsers(); err != nil {
+		return nil, nil, err
+	}
 	emitConfigWarnings(slog.Default(), cfg)
 	if err := inspection.ProbeInspectionSupport(); err != nil {
 		return nil, nil, fmt.Errorf("inspection unavailable: %w", err)
@@ -1053,6 +1056,9 @@ func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisc
 			if err != nil {
 				_, _, _ = job.cancel("disconnect")
 				return
+			}
+			if err := job.recordApprovalTimestamp(context.Background(), time.UnixMilli(ready.ExpiryUnixMS)); err != nil {
+				slog.Warn("approval timestamp refresh failed", "request_id", job.req.RequestID, "error", err)
 			}
 		case body, ok := <-events:
 			if !ok {

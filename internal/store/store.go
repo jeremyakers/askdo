@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // State is a job lifecycle state persisted in the jobs table.
 type State string
@@ -330,6 +330,17 @@ func (store *Store) migrate(ctx context.Context) error {
 		updated_at INTEGER NOT NULL
 	)`); err != nil {
 		return fmt.Errorf("create auto-approval preferences table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS approval_timestamps (
+		uid INTEGER NOT NULL,
+		tty_session INTEGER NOT NULL,
+		tty_rdev INTEGER NOT NULL,
+		tty_inode INTEGER NOT NULL,
+		approved_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		PRIMARY KEY (uid, tty_session, tty_rdev, tty_inode)
+	)`); err != nil {
+		return fmt.Errorf("create approval timestamps table: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS foreground_grants (
 		uid INTEGER NOT NULL,
