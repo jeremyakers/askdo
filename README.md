@@ -204,7 +204,7 @@ terminal, with a sliding five-minute window:
 
 ```sh
 sudo askdo review timestamp set "$USER" 300
-askdo review timestamp list
+sudo askdo review timestamp list
 sudo askdo review timestamp clear "$USER"  # disable reuse again
 ```
 

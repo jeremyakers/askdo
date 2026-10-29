@@ -24,7 +24,7 @@ func reviewTimestamp(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, reviewUsage)
 		return 125
 	}
-	if verb != "list" && !requireRoot("review timestamp "+verb, stderr) {
+	if !requireRoot("review timestamp "+verb, stderr) {
 		return 125
 	}
 	store, err := operator.LoadForReviewPolicyMutation(path)

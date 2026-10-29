@@ -336,9 +336,10 @@ func (store *Store) migrate(ctx context.Context) error {
 		tty_session INTEGER NOT NULL,
 		tty_rdev INTEGER NOT NULL,
 		tty_inode INTEGER NOT NULL,
+		boot_id TEXT NOT NULL,
 		approved_at INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL,
-		PRIMARY KEY (uid, tty_session, tty_rdev, tty_inode)
+		PRIMARY KEY (uid, tty_session, tty_rdev, tty_inode, boot_id)
 	)`); err != nil {
 		return fmt.Errorf("create approval timestamps table: %w", err)
 	}

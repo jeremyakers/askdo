@@ -12,8 +12,8 @@ func TestApprovalTimestampUpsertAndIdentity(t *testing.T) {
 	// Given an empty real store and a kernel-shaped terminal identity.
 	s := openTestStore(t)
 	ctx := context.Background()
-	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456}
-	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	now := time.Now().UTC()
 	for _, offset := range []time.Duration{0, 20 * time.Second} {
 		stamp := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(offset), ExpiresAt: now.Add(offset + time.Minute)}
 		// When a successful dispatch records or refreshes the timestamp.
@@ -53,7 +53,7 @@ func TestApprovalTimestampRejectsInvalidRecords(t *testing.T) {
 			// Given an invalid timestamp record.
 			s := openTestStore(t)
 			now := time.Now().UTC()
-			stamp := ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}
+			stamp := ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}
 			change(&stamp)
 			// When persisted, then the store rejects it without a SQL conversion error.
 			if err := s.UpsertApprovalTimestamp(context.Background(), stamp); err == nil {
@@ -106,7 +106,29 @@ func TestApprovalTimestampSchema5MigrationPreservesJobs(t *testing.T) {
 		t.Fatalf("historical job = %+v, %v", job, err)
 	}
 	now := time.Now().UTC()
-	if err := s.UpsertApprovalTimestamp(context.Background(), ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: 1000, TTYSession: 1, TTYRdev: 2, TTYInode: 3}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+	if err := s.UpsertApprovalTimestamp(context.Background(), ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: 1000, TTYSession: 1, TTYRdev: 2, TTYInode: 3, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApprovalTimestampCleanupRemovesExpiredRows(t *testing.T) {
+	// Given an expired terminal timestamp.
+	s := openTestStore(t)
+	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	now := time.Now().UTC()
+	stamp := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}
+	if err := s.UpsertApprovalTimestamp(context.Background(), stamp); err != nil {
+		t.Fatal(err)
+	}
+	// When the timestamp is read, then cleanup removes the expired row.
+	if _, err := s.GetApprovalTimestamp(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM approval_timestamps`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expired timestamp rows=%d, want 0", count)
 	}
 }

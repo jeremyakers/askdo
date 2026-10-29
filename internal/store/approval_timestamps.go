@@ -15,10 +15,11 @@ type ApprovalTimestampKey struct {
 	TTYSession int64
 	TTYRdev    uint64
 	TTYInode   uint64
+	BootID     string
 }
 
 func (key ApprovalTimestampKey) valid() bool {
-	return key.TTYSession > 0 && key.TTYRdev > 0 && key.TTYRdev <= 1<<63-1 && key.TTYInode > 0 && key.TTYInode <= 1<<63-1
+	return key.BootID != "" && key.TTYSession > 0 && key.TTYRdev > 0 && key.TTYRdev <= 1<<63-1 && key.TTYInode > 0 && key.TTYInode <= 1<<63-1
 }
 
 // ApprovalTimestamp records the dispatch time and sliding expiry. Policy and
@@ -34,10 +35,13 @@ func (store *Store) GetApprovalTimestamp(ctx context.Context, key ApprovalTimest
 	if !key.valid() {
 		return ApprovalTimestamp{}, errors.New("invalid approval timestamp identity")
 	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM approval_timestamps WHERE expires_at <= ?`, time.Now().UTC().UnixNano()); err != nil {
+		return ApprovalTimestamp{}, fmt.Errorf("clean expired approval timestamps: %w", err)
+	}
 	var approved, expires int64
 	err := store.db.QueryRowContext(ctx, `SELECT approved_at, expires_at FROM approval_timestamps
-		WHERE uid = ? AND tty_session = ? AND tty_rdev = ? AND tty_inode = ?`,
-		key.UID, key.TTYSession, int64(key.TTYRdev), int64(key.TTYInode)).Scan(&approved, &expires)
+		WHERE uid = ? AND tty_session = ? AND tty_rdev = ? AND tty_inode = ? AND boot_id = ?`,
+		key.UID, key.TTYSession, int64(key.TTYRdev), int64(key.TTYInode), key.BootID).Scan(&approved, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ApprovalTimestamp{}, nil
 	}
@@ -52,11 +56,14 @@ func (store *Store) UpsertApprovalTimestamp(ctx context.Context, stamp ApprovalT
 	if !stamp.ApprovalTimestampKey.valid() || stamp.ApprovedAt.IsZero() || !stamp.ExpiresAt.After(stamp.ApprovedAt) {
 		return errors.New("invalid approval timestamp")
 	}
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM approval_timestamps WHERE expires_at <= ?`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("clean expired approval timestamps: %w", err)
+	}
 	_, err := store.db.ExecContext(ctx, `INSERT INTO approval_timestamps
-		(uid, tty_session, tty_rdev, tty_inode, approved_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(uid, tty_session, tty_rdev, tty_inode) DO UPDATE SET
+		(uid, tty_session, tty_rdev, tty_inode, boot_id, approved_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(uid, tty_session, tty_rdev, tty_inode, boot_id) DO UPDATE SET
 		approved_at = excluded.approved_at, expires_at = excluded.expires_at`, stamp.UID, stamp.TTYSession,
-		int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.ApprovedAt.UTC().UnixNano(), stamp.ExpiresAt.UTC().UnixNano())
+		int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UTC().UnixNano(), stamp.ExpiresAt.UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("write approval timestamp: %w", err)
 	}

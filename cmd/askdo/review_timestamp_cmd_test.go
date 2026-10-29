@@ -33,7 +33,7 @@ func TestReviewTimestampPolicyCommands(t *testing.T) {
 				}
 			}
 			// Then list is read-only, safe to display, and clear removes the opt-in.
-			getEUID = func() int { return 1000 }
+			getEUID = func() int { return 0 }
 			withPolicy := fileContent(t, path)
 			code, out, errOut := reviewCLI("timestamp", "list", "--config", path)
 			if code != 0 || !strings.Contains(out, current.Username) || !strings.Contains(out, "3600") || strings.Contains(out+errOut, "/private/") || fileContent(t, path) != withPolicy {
@@ -97,7 +97,7 @@ func TestReviewTimestampMutationRequiresRoot(t *testing.T) {
 	getEUID = func() int { return 1000 }
 	path := reviewPolicyFixture(t)
 	before := fileContent(t, path)
-	for _, args := range [][]string{{"set", "root", "60"}, {"clear", "root"}} {
+	for _, args := range [][]string{{"set", "root", "60"}, {"clear", "root"}, {"list"}} {
 		// When setting or clearing timestamps, then no write is allowed.
 		code, _, errOut := reviewCLI(append(append([]string{"timestamp"}, args...), "--config", path)...)
 		if code != 125 || !strings.Contains(errOut, "requires root") || fileContent(t, path) != before {

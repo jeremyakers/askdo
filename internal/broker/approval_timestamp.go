@@ -9,7 +9,7 @@ import (
 
 func (j *jobRuntime) approvalTimestampKey() store.ApprovalTimestampKey {
 	tty := j.foreground.tty
-	return store.ApprovalTimestampKey{UID: j.uid, TTYSession: tty.session, TTYRdev: tty.rdev, TTYInode: tty.inode}
+	return store.ApprovalTimestampKey{UID: j.uid, TTYSession: tty.session, TTYRdev: tty.rdev, TTYInode: tty.inode, BootID: j.daemon.bootID}
 }
 
 func (j *jobRuntime) approvalTimestampBinding(ctx context.Context, digest string) (*approvalBinding, error) {
@@ -20,9 +20,12 @@ func (j *jobRuntime) approvalTimestampBinding(ctx context.Context, digest string
 	if err != nil {
 		return nil, err
 	}
-	// Enforce the currently loaded timeout against approval age, not merely the
-	// longer expiry computed under a previous policy.
-	expiry := stamp.ApprovedAt.Add(j.configuration().Review.TimestampTimeout(j.uid))
+	// Enforce the currently loaded timeout against approval age, without
+	// resurrecting a window that already expired under the earlier policy.
+	expiry := stamp.ExpiresAt
+	if current := stamp.ApprovedAt.Add(j.configuration().Review.TimestampTimeout(j.uid)); current.Before(expiry) {
+		expiry = current
+	}
 	if !expiry.After(time.Now()) {
 		return nil, nil
 	}

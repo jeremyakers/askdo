@@ -84,13 +84,14 @@ func timestampConfig(t *testing.T) (*config.Config, uint32) {
 
 func setTimestampPeer(h *brokerHarness, uid uint32) store.ApprovalTimestampKey {
 	h.peerUID.Store(uid)
+	h.daemon.bootID = "test-boot"
 	var pid atomic.Int64
 	pid.Store(1234)
 	h.daemon.peerPID = func(*net.UnixConn) (int64, error) { return pid.Add(1), nil }
 	h.daemon.ttyEvidence = func(pid int64) (ttyIdentity, error) {
 		return ttyIdentity{starttime: pid, session: 12, rdev: 34817, inode: 789}, nil
 	}
-	return store.ApprovalTimestampKey{UID: uid, TTYSession: 12, TTYRdev: 34817, TTYInode: 789}
+	return store.ApprovalTimestampKey{UID: uid, TTYSession: 12, TTYRdev: 34817, TTYInode: 789, BootID: "test-boot"}
 }
 
 func timestampSubmit(t *testing.T, h *brokerHarness, req proto.SubmitRequest) proto.ForegroundReadyEvent {
@@ -303,7 +304,7 @@ func TestApprovalTimestampFailuresNeverRefresh(t *testing.T) {
 }
 
 func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
-	for _, scenario := range []string{"enable", "change timeout", "shorten expiry", "clear"} {
+	for _, scenario := range []string{"enable", "change timeout", "shorten expiry", "increase expiry", "clear"} {
 		t.Run(scenario, func(t *testing.T) {
 			// Given a running broker and an already approved terminal.
 			cfg, uid := timestampConfig(t)
@@ -323,6 +324,10 @@ func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
 				beforeAge = time.Second
 			}
 			before := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-beforeAge), ExpiresAt: now.Add(time.Minute)}
+			if scenario == "increase expiry" {
+				before.ApprovedAt = now.Add(-2 * time.Hour)
+				before.ExpiresAt = now.Add(-time.Second)
+			}
 			if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), before); err != nil {
 				t.Fatal(err)
 			}
@@ -346,14 +351,18 @@ func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
 				for name := range cfg.Review.ApprovalTimestampUsers {
 					cfg.Review.ApprovalTimestampUsers[name] = 30
 				}
+			} else if scenario == "increase expiry" {
+				for name := range cfg.Review.ApprovalTimestampUsers {
+					cfg.Review.ApprovalTimestampUsers[name] = 3600
+				}
 			}
 			// When local policy changes on disk and a new command is submitted.
 			writeLiveConfig(t, path, cfg)
 			timestampSubmit(t, h, lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground))
 			// Then the next job uses the new timeout without a broker restart.
-			if scenario == "shorten expiry" {
+			if scenario == "shorten expiry" || scenario == "increase expiry" {
 				if approvals.Load() != 1 {
-					t.Fatalf("shortened policy still reused old timestamp: approvals=%d", approvals.Load())
+					t.Fatalf("policy change incorrectly reused old timestamp: approvals=%d", approvals.Load())
 				}
 			} else if scenario == "clear" {
 				got, err := h.daemon.store.GetApprovalTimestamp(context.Background(), key)

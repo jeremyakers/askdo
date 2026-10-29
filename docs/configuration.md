@@ -44,8 +44,8 @@ display current settings. These commands do not grant socket access.
 For sudo-like approval reuse on your own account, opt in with
 `askdo review timestamp set <username> <seconds>` (root required, 30–3600
 integer seconds). `askdo review timestamp clear <username>` disables it;
-`askdo review timestamp list` displays the configured timeouts. All accept
-`--config PATH` and work with direct v4 and fleet v5 host configurations.
+`askdo review timestamp list` displays the configured timeouts. All three
+commands require root. All accept `--config PATH` and work with direct v4 and fleet v5 host configurations.
 They use the same atomic, section-validated config mutation as the other review
 policy commands; adding a timestamp does not itself exempt an account from AI review.
 
