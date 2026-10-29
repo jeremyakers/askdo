@@ -132,3 +132,24 @@ func TestApprovalTimestampCleanupRemovesExpiredRows(t *testing.T) {
 		t.Fatalf("expired timestamp rows=%d, want 0", count)
 	}
 }
+
+func TestApprovalTimestampRefreshIsMonotonic(t *testing.T) {
+	// Given a terminal with a newer approval already recorded.
+	s := openTestStore(t)
+	key := ApprovalTimestampKey{UID: testUID, TTYSession: 123, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	now := time.Now().UTC()
+	newer := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := s.UpsertApprovalTimestamp(context.Background(), newer); err != nil {
+		t.Fatal(err)
+	}
+	// When an older successful handoff writes afterward.
+	older := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Second)}
+	if err := s.UpsertApprovalTimestamp(context.Background(), older); err != nil {
+		t.Fatal(err)
+	}
+	// Then the newer timestamp cannot move backward.
+	got, err := s.GetApprovalTimestamp(context.Background(), key)
+	if err != nil || got != newer {
+		t.Fatalf("timestamp=%+v err=%v, want %+v", got, err, newer)
+	}
+}

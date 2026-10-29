@@ -355,7 +355,7 @@ func (store *Store) migrate(ctx context.Context) error {
 		tty_session INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL,
 		consumed_at INTEGER,
-		authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto')),
+		authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto', 'timestamp')),
 		PRIMARY KEY (uid, request_id),
 		FOREIGN KEY (uid, request_id) REFERENCES jobs(uid, request_id)
 	)`); err != nil {
@@ -676,17 +676,18 @@ func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthoriza
 // the original submitter and frozen operation. TokenHash must not be the token.
 // The broker obtains PID/starttime and controlling TTY evidence independently.
 type ForegroundGrant struct {
-	UID                uint32
-	RequestID          string
-	TokenHash          [32]byte
-	ManifestDigest     string
-	SubmitterPID       int64
-	SubmitterStarttime int64
-	TTYRdev            uint64
-	TTYInode           uint64
-	TTYSession         int64
-	ExpiresAtUTC       time.Time
-	NowUTC             time.Time
+	UID                 uint32
+	RequestID           string
+	TokenHash           [32]byte
+	ManifestDigest      string
+	SubmitterPID        int64
+	SubmitterStarttime  int64
+	TTYRdev             uint64
+	TTYInode            uint64
+	TTYSession          int64
+	ExpiresAtUTC        time.Time
+	NowUTC              time.Time
+	AuthorizationSource string
 }
 
 // ForegroundClaim carries a bearer token and broker-authenticated peer/process
@@ -758,12 +759,19 @@ func (store *Store) CreateForegroundGrant(ctx context.Context, grant ForegroundG
 	if changed != 1 {
 		return false, nil
 	}
+	authorizationSource := grant.AuthorizationSource
+	if authorizationSource == "" {
+		authorizationSource = "human"
+	}
+	if authorizationSource != "human" && authorizationSource != "auto" && authorizationSource != "timestamp" {
+		return false, errors.New("invalid foreground authorization source")
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO foreground_grants
 		(uid, request_id, token_hash, manifest_digest, submitter_pid, submitter_starttime,
 		tty_rdev, tty_inode, tty_session, expires_at, authorization_source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'human')`, grant.UID, grant.RequestID,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, grant.UID, grant.RequestID,
 		grant.TokenHash[:], grant.ManifestDigest, grant.SubmitterPID, grant.SubmitterStarttime,
-		int64(grant.TTYRdev), int64(grant.TTYInode), grant.TTYSession, grant.ExpiresAtUTC.UTC().UnixNano())
+		int64(grant.TTYRdev), int64(grant.TTYInode), grant.TTYSession, grant.ExpiresAtUTC.UTC().UnixNano(), authorizationSource)
 	if err != nil && isUniqueConstraint(err) {
 		return false, nil
 	}

@@ -51,6 +51,17 @@ func (store *Store) GetApprovalTimestamp(ctx context.Context, key ApprovalTimest
 	return ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: time.Unix(0, approved).UTC(), ExpiresAt: time.Unix(0, expires).UTC()}, nil
 }
 
+// GetForegroundAuthorizationSource returns the authorization class recorded for
+// a foreground grant, including timestamp reuse rather than a fresh human tap.
+func (store *Store) GetForegroundAuthorizationSource(requestID string) (string, error) {
+	var source string
+	err := store.db.QueryRowContext(context.Background(), `SELECT authorization_source FROM foreground_grants WHERE request_id = ?`, requestID).Scan(&source)
+	if err != nil {
+		return "", fmt.Errorf("read foreground authorization source: %w", err)
+	}
+	return source, nil
+}
+
 // UpsertApprovalTimestamp records one successful foreground dispatch.
 func (store *Store) UpsertApprovalTimestamp(ctx context.Context, stamp ApprovalTimestamp) error {
 	if !stamp.ApprovalTimestampKey.valid() || stamp.ApprovedAt.IsZero() || !stamp.ExpiresAt.After(stamp.ApprovedAt) {
@@ -62,7 +73,8 @@ func (store *Store) UpsertApprovalTimestamp(ctx context.Context, stamp ApprovalT
 	_, err := store.db.ExecContext(ctx, `INSERT INTO approval_timestamps
 		(uid, tty_session, tty_rdev, tty_inode, boot_id, approved_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(uid, tty_session, tty_rdev, tty_inode, boot_id) DO UPDATE SET
-		approved_at = excluded.approved_at, expires_at = excluded.expires_at`, stamp.UID, stamp.TTYSession,
+		approved_at = excluded.approved_at, expires_at = excluded.expires_at
+		WHERE excluded.approved_at > approval_timestamps.approved_at`, stamp.UID, stamp.TTYSession,
 		int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UTC().UnixNano(), stamp.ExpiresAt.UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("write approval timestamp: %w", err)

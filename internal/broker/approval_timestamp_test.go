@@ -181,6 +181,13 @@ func TestApprovalTimestampFirstApprovalThenSlidingHandoffs(t *testing.T) {
 		if i > 0 && (audit.Kind != "timestamp" || audit.Source != "timestamp" || audit.User != 0 || audit.Card != 0) {
 			t.Fatalf("timestamp fabricated Telegram evidence: %s", row.ApprovalJSON)
 		}
+		grantSource, err := h.daemon.store.GetForegroundAuthorizationSource(req.RequestID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i > 0 && grantSource != "timestamp" {
+			t.Fatalf("foreground grant source=%q, want timestamp", grantSource)
+		}
 		previous = stamp
 	}
 }
