@@ -1,13 +1,43 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/user"
 	"sort"
 	"strconv"
 
 	"github.com/jeremyakers/askdo/internal/operator"
+	"github.com/jeremyakers/askdo/internal/store"
 )
+
+var timestampStorePath = "/var/lib/askdo/jobs.sqlite3"
+
+func clearStoredApprovalTimestamps(configPath, username string) error {
+	if timestampStorePath == "/var/lib/askdo/jobs.sqlite3" && configPath != defaultConfigPath {
+		return nil
+	}
+	account, err := user.Lookup(username)
+	if err != nil {
+		return err
+	}
+	uid, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil {
+		return err
+	}
+	jobs, err := store.Open(timestampStorePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer jobs.Close()
+	return jobs.ClearApprovalTimestamps(context.Background(), uint32(uid))
+}
 
 func reviewTimestamp(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "set" && args[0] != "clear" && args[0] != "list") {
@@ -74,6 +104,12 @@ func reviewTimestamp(args []string, stdout, stderr io.Writer) int {
 	if err := store.Save(operator.SectionReview); err != nil {
 		fmt.Fprintf(stderr, "review timestamp %s: config not written: %v\n", verb, err)
 		return 1
+	}
+	if verb == "clear" {
+		if err := clearStoredApprovalTimestamps(path, name); err != nil {
+			fmt.Fprintf(stderr, "review timestamp clear: policy saved, but stored timestamps could not be revoked: %v\n", err)
+			return 1
+		}
 	}
 	fmt.Fprintf(stdout, "%s approval timestamp policy for %q\n", verb, name)
 	if verb == "set" {

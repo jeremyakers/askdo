@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os/user"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/store"
 )
 
 func TestReviewTimestampPolicyCommands(t *testing.T) {
@@ -103,5 +108,49 @@ func TestReviewTimestampMutationRequiresRoot(t *testing.T) {
 		if code != 125 || !strings.Contains(errOut, "requires root") || fileContent(t, path) != before {
 			t.Fatalf("nonroot: %d %s", code, errOut)
 		}
+	}
+}
+
+func TestReviewTimestampClearRevokesStoredWindows(t *testing.T) {
+	// Given an opted-in user with a stored approval window.
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubRoot(t)
+	path := reviewPolicyFixture(t)
+	if code, _, errOut := reviewCLI("mode", "approval-only", "--config", path); code != 0 {
+		t.Fatalf("approval-only: %d %s", code, errOut)
+	}
+	if code, _, errOut := reviewCLI("timestamp", "set", current.Username, "900", "--config", path); code != 0 {
+		t.Fatalf("set: %d %s", code, errOut)
+	}
+	jobsPath := filepath.Join(t.TempDir(), "jobs.db")
+	oldPath := timestampStorePath
+	timestampStorePath = jobsPath
+	defer func() { timestampStorePath = oldPath }()
+	jobs, err := store.Open(jobsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jobs.Close()
+	uid, err := strconv.ParseUint(current.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	key := store.ApprovalTimestampKey{UID: uint32(uid), TTYSession: 1, TTYRdev: 2, TTYInode: 3, BootID: "test-boot"}
+	if err := jobs.UpsertApprovalTimestamp(context.Background(), store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour), AuthorityHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}); err != nil {
+		t.Fatal(err)
+	}
+	// When the administrator clears the policy.
+	code, _, errOut := reviewCLI("timestamp", "clear", current.Username, "--config", path)
+	if code != 0 {
+		t.Fatalf("clear: %d %s", code, errOut)
+	}
+	// Then the stored window is revoked, so re-enabling cannot resurrect it.
+	got, err := jobs.GetApprovalTimestamp(context.Background(), key)
+	if err != nil || !got.ExpiresAt.IsZero() {
+		t.Fatalf("stored timestamp survived clear: %+v %v", got, err)
 	}
 }

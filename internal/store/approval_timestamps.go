@@ -64,6 +64,19 @@ func (store *Store) GetForegroundAuthorizationSource(requestID string) (string, 
 	return source, nil
 }
 
+// ClearApprovalTimestamps permanently revokes all stored approval windows for a
+// user, including a later re-enable with the same approval authority.
+func (store *Store) ClearApprovalTimestamps(ctx context.Context, uid uint32) error {
+	if uid == 0 {
+		return errors.New("clear approval timestamps requires a user")
+	}
+	_, err := store.db.ExecContext(ctx, `DELETE FROM approval_timestamps WHERE uid = ?`, uid)
+	if err != nil {
+		return fmt.Errorf("clear approval timestamps: %w", err)
+	}
+	return nil
+}
+
 // UpsertApprovalTimestamp records one successful foreground dispatch.
 func (store *Store) UpsertApprovalTimestamp(ctx context.Context, stamp ApprovalTimestamp) error {
 	if !stamp.ApprovalTimestampKey.valid() || !validDigest(stamp.AuthorityHash) || stamp.ApprovedAt.IsZero() || !stamp.ExpiresAt.After(stamp.ApprovedAt) {
