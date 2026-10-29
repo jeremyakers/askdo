@@ -1003,11 +1003,12 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 		expiry = deadline
 	}
 	var decidingUser, decidingChat, decidingMessage int64
+	approvalKind := "human"
 	var approvalSource string
 	if decision != nil {
 		decidingUser, decidingChat, decidingMessage = decision.OperatorUserID, decision.ChatID, decision.MessageID
 	} else {
-		approvalSource = "timestamp"
+		approvalKind, approvalSource = "timestamp", "timestamp"
 	}
 	decisionRecord, err := json.Marshal(struct {
 		Kind           string `json:"kind"`
@@ -1017,7 +1018,7 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 		DecidingUserID    int64 `json:"deciding_user_id,omitempty"`
 		DecidingChatID    int64 `json:"deciding_chat_id,omitempty"`
 		DecidingMessageID int64 `json:"deciding_message_id,omitempty"`
-	}{Kind: "human", Decision: "approved", ApprovalSource: approvalSource, approvalRecord: approvalRecord{
+	}{Kind: approvalKind, Decision: "approved", ApprovalSource: approvalSource, approvalRecord: approvalRecord{
 		CardID: pending.cardID, MessageIDs: pending.messageIDs, Digest: pending.digest,
 		OperatorUserID: pending.operatorUserID, ExpiryUnixMS: pending.expiry.UnixMilli(),
 		ChannelName: j.approvalChannel(pending), Targets: pending.targets,

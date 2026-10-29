@@ -20,10 +20,13 @@ func (j *jobRuntime) approvalTimestampBinding(ctx context.Context, digest string
 	if err != nil {
 		return nil, err
 	}
-	if !stamp.ExpiresAt.After(time.Now()) {
+	// Enforce the currently loaded timeout against approval age, not merely the
+	// longer expiry computed under a previous policy.
+	expiry := stamp.ApprovedAt.Add(j.configuration().Review.TimestampTimeout(j.uid))
+	if !expiry.After(time.Now()) {
 		return nil, nil
 	}
-	return &approvalBinding{digest: digest, expiry: stamp.ExpiresAt, consumed: true}, nil
+	return &approvalBinding{digest: digest, expiry: expiry, consumed: true}, nil
 }
 
 // runApprovalTimestamp authorizes the actual frozen manifest directly. It never

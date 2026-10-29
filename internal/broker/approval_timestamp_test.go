@@ -169,6 +169,7 @@ func TestApprovalTimestampFirstApprovalThenSlidingHandoffs(t *testing.T) {
 			t.Fatalf("handoff did not bind frozen manifest: %+v %v", row, err)
 		}
 		var audit struct {
+			Kind   string `json:"kind"`
 			Source string `json:"approval_source"`
 			User   int64  `json:"deciding_user_id"`
 			Card   int64  `json:"card_id"`
@@ -176,7 +177,7 @@ func TestApprovalTimestampFirstApprovalThenSlidingHandoffs(t *testing.T) {
 		if err := json.Unmarshal(row.ApprovalJSON, &audit); err != nil {
 			t.Fatal(err)
 		}
-		if i > 0 && (audit.Source != "timestamp" || audit.User != 0 || audit.Card != 0) {
+		if i > 0 && (audit.Kind != "timestamp" || audit.Source != "timestamp" || audit.User != 0 || audit.Card != 0) {
 			t.Fatalf("timestamp fabricated Telegram evidence: %s", row.ApprovalJSON)
 		}
 		previous = stamp
@@ -302,7 +303,7 @@ func TestApprovalTimestampFailuresNeverRefresh(t *testing.T) {
 }
 
 func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
-	for _, scenario := range []string{"enable", "change timeout", "clear"} {
+	for _, scenario := range []string{"enable", "change timeout", "shorten expiry", "clear"} {
 		t.Run(scenario, func(t *testing.T) {
 			// Given a running broker and an already approved terminal.
 			cfg, uid := timestampConfig(t)
@@ -317,7 +318,11 @@ func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
 			h.daemon.peerUID = func(*net.UnixConn) (uint32, error) { return h.peerUID.Load(), nil }
 			key := setTimestampPeer(h, uid)
 			now := time.Now().UTC()
-			before := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute)}
+			beforeAge := time.Minute
+			if scenario == "enable" {
+				beforeAge = time.Second
+			}
+			before := store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(-beforeAge), ExpiresAt: now.Add(time.Minute)}
 			if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), before); err != nil {
 				t.Fatal(err)
 			}
@@ -337,12 +342,20 @@ func TestApprovalTimestampHotReloadAppliesToNextSubmission(t *testing.T) {
 				for name := range cfg.Review.ApprovalTimestampUsers {
 					cfg.Review.ApprovalTimestampUsers[name] = 90
 				}
+			} else if scenario == "shorten expiry" {
+				for name := range cfg.Review.ApprovalTimestampUsers {
+					cfg.Review.ApprovalTimestampUsers[name] = 30
+				}
 			}
 			// When local policy changes on disk and a new command is submitted.
 			writeLiveConfig(t, path, cfg)
 			timestampSubmit(t, h, lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground))
 			// Then the next job uses the new timeout without a broker restart.
-			if scenario == "clear" {
+			if scenario == "shorten expiry" {
+				if approvals.Load() != 1 {
+					t.Fatalf("shortened policy still reused old timestamp: approvals=%d", approvals.Load())
+				}
+			} else if scenario == "clear" {
 				got, err := h.daemon.store.GetApprovalTimestamp(context.Background(), key)
 				if err != nil || got != before || approvals.Load() != 1 {
 					t.Fatalf("cleared policy: %+v %v, approvals=%d", got, err, approvals.Load())

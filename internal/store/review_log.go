@@ -125,7 +125,7 @@ func outcomeForJob(job Job, consumed string) reviewlog.Event {
 			slog.Warn("review log approval decode failed", "request_id", job.RequestID, "error", err)
 		}
 	}
-	if approval.Kind != "human" && approval.Kind != "auto" {
+	if approval.Kind != "human" && approval.Kind != "auto" && approval.Kind != "timestamp" {
 		approval.Kind = "none"
 	}
 	var result Result
@@ -141,7 +141,7 @@ func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	if approval.Kind == "auto" {
 		decision = "approved"
 	}
-	hasDecision := (approval.Kind == "human" || approval.Kind == "auto") && (decision == "approved" || decision == "denied" || decision == "request_changes")
+	hasDecision := (approval.Kind == "human" || approval.Kind == "auto" || approval.Kind == "timestamp") && (decision == "approved" || decision == "denied" || decision == "request_changes")
 	if !hasDecision && consumed != "" {
 		approval.Kind, decision, hasDecision = "human", consumed, true
 	}

@@ -741,7 +741,7 @@ func (store *Store) CreateForegroundGrant(ctx context.Context, grant ForegroundG
 	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
 		WHERE uid = ? AND request_id = ? AND state = ? AND manifest_hash = ?
 		AND approval_json IS NOT NULL AND json_valid(approval_json)
-		AND json_extract(approval_json, '$.kind') = 'human'
+		AND json_extract(approval_json, '$.kind') IN ('human', 'timestamp')
 		AND json_extract(approval_json, '$.decision') = 'approved'
 		AND json_extract(approval_json, '$.digest') = ?
 		AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`,
