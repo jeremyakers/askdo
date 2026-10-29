@@ -157,7 +157,8 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		if options.runClient == nil {
 			options.runClient = client.Run
 		}
-		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", "/usr/local/bin/askdo", "upgrade-helper", "--operation", *operation, "--source", source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
+		helperPath := filepath.Join(source, "askdo")
+		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", helperPath, "upgrade-helper", "--operation", *operation, "--source", source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
 	// The root operation's activation budget starts only after scheduling, not
