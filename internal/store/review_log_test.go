@@ -430,3 +430,15 @@ func TestReviewLogConsumedDecisionForUnknownJobIsNotTracked(t *testing.T) {
 		t.Fatalf("retained %v", s.consumed)
 	}
 }
+
+func TestOutcomeForJobTimestampApproval(t *testing.T) {
+	// Given a timestamp-authorized approval record.
+	job := Job{UID: 1001, RequestID: "timestamp-job", State: StateFinished,
+		ApprovalJSON: []byte(`{"kind":"timestamp","decision":"approved"}`)}
+	// When deriving the outcome journal.
+	event := outcomeForJob(job, "")
+	// Then it remains timestamp reuse, not a direct human tap.
+	if event.ApprovalKind != "timestamp" || event.Decision != "approved" {
+		t.Fatalf("outcome=%+v", event)
+	}
+}

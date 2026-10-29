@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // State is a job lifecycle state persisted in the jobs table.
 type State string
@@ -331,6 +331,22 @@ func (store *Store) migrate(ctx context.Context) error {
 	)`); err != nil {
 		return fmt.Errorf("create auto-approval preferences table: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS approval_timestamps (
+		uid INTEGER NOT NULL,
+		tty_session INTEGER NOT NULL,
+		tty_rdev INTEGER NOT NULL,
+		tty_inode INTEGER NOT NULL,
+		boot_id TEXT NOT NULL,
+		approved_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		authority_hash TEXT NOT NULL,
+		PRIMARY KEY (uid, tty_session, tty_rdev, tty_inode, boot_id)
+	)`); err != nil {
+		return fmt.Errorf("create approval timestamps table: %w", err)
+	}
+	if err := migrateForegroundAuthorizationSource(ctx, tx, version); err != nil {
+		return fmt.Errorf("migrate foreground authorization source: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS foreground_grants (
 		uid INTEGER NOT NULL,
 		request_id TEXT NOT NULL,
@@ -343,7 +359,7 @@ func (store *Store) migrate(ctx context.Context) error {
 		tty_session INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL,
 		consumed_at INTEGER,
-		authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto')),
+		authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto', 'timestamp')),
 		PRIMARY KEY (uid, request_id),
 		FOREIGN KEY (uid, request_id) REFERENCES jobs(uid, request_id)
 	)`); err != nil {
@@ -664,17 +680,18 @@ func (store *Store) CommitAutoStart(ctx context.Context, auth AutoStartAuthoriza
 // the original submitter and frozen operation. TokenHash must not be the token.
 // The broker obtains PID/starttime and controlling TTY evidence independently.
 type ForegroundGrant struct {
-	UID                uint32
-	RequestID          string
-	TokenHash          [32]byte
-	ManifestDigest     string
-	SubmitterPID       int64
-	SubmitterStarttime int64
-	TTYRdev            uint64
-	TTYInode           uint64
-	TTYSession         int64
-	ExpiresAtUTC       time.Time
-	NowUTC             time.Time
+	UID                 uint32
+	RequestID           string
+	TokenHash           [32]byte
+	ManifestDigest      string
+	SubmitterPID        int64
+	SubmitterStarttime  int64
+	TTYRdev             uint64
+	TTYInode            uint64
+	TTYSession          int64
+	ExpiresAtUTC        time.Time
+	NowUTC              time.Time
+	AuthorizationSource string
 }
 
 // ForegroundClaim carries a bearer token and broker-authenticated peer/process
@@ -713,6 +730,48 @@ func validForegroundPeer(uid uint32, pid, starttime int64, rdev, inode uint64, s
 		inode > 0 && inode <= uint64(^uint64(0)>>1) && session > 0
 }
 
+// migrateForegroundAuthorizationSource rebuilds the pre-timestamp constraint
+// while preserving every grant. CREATE IF NOT EXISTS alone cannot change it.
+func migrateForegroundAuthorizationSource(ctx context.Context, tx *sql.Tx, version int) error {
+	if version >= 6 {
+		return nil
+	}
+	var definition string
+	err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'foreground_grants'`).Scan(&definition)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE foreground_grants RENAME TO foreground_grants_legacy`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE foreground_grants (
+		uid INTEGER NOT NULL,
+		request_id TEXT NOT NULL,
+		token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+		manifest_digest TEXT NOT NULL,
+		submitter_pid INTEGER NOT NULL,
+		submitter_starttime INTEGER NOT NULL,
+		tty_rdev INTEGER NOT NULL,
+		tty_inode INTEGER NOT NULL,
+		tty_session INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		consumed_at INTEGER,
+		authorization_source TEXT NOT NULL CHECK (authorization_source IN ('human', 'auto', 'timestamp')),
+		PRIMARY KEY (uid, request_id),
+		FOREIGN KEY (uid, request_id) REFERENCES jobs(uid, request_id)
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO foreground_grants SELECT uid, request_id, token_hash, manifest_digest, submitter_pid, submitter_starttime, tty_rdev, tty_inode, tty_session, expires_at, consumed_at, authorization_source FROM foreground_grants_legacy`); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `DROP TABLE foreground_grants_legacy`)
+	return err
+}
+
 // CreateForegroundGrant requires a recorded human approval bound to the exact
 // manifest. The state change and hash insertion commit or roll back together.
 func (store *Store) CreateForegroundGrant(ctx context.Context, grant ForegroundGrant) (bool, error) {
@@ -730,7 +789,7 @@ func (store *Store) CreateForegroundGrant(ctx context.Context, grant ForegroundG
 	result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
 		WHERE uid = ? AND request_id = ? AND state = ? AND manifest_hash = ?
 		AND approval_json IS NOT NULL AND json_valid(approval_json)
-		AND json_extract(approval_json, '$.kind') = 'human'
+		AND json_extract(approval_json, '$.kind') IN ('human', 'timestamp')
 		AND json_extract(approval_json, '$.decision') = 'approved'
 		AND json_extract(approval_json, '$.digest') = ?
 		AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`,
@@ -746,12 +805,19 @@ func (store *Store) CreateForegroundGrant(ctx context.Context, grant ForegroundG
 	if changed != 1 {
 		return false, nil
 	}
+	authorizationSource := grant.AuthorizationSource
+	if authorizationSource == "" {
+		authorizationSource = "human"
+	}
+	if authorizationSource != "human" && authorizationSource != "auto" && authorizationSource != "timestamp" {
+		return false, errors.New("invalid foreground authorization source")
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO foreground_grants
 		(uid, request_id, token_hash, manifest_digest, submitter_pid, submitter_starttime,
 		tty_rdev, tty_inode, tty_session, expires_at, authorization_source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'human')`, grant.UID, grant.RequestID,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, grant.UID, grant.RequestID,
 		grant.TokenHash[:], grant.ManifestDigest, grant.SubmitterPID, grant.SubmitterStarttime,
-		int64(grant.TTYRdev), int64(grant.TTYInode), grant.TTYSession, grant.ExpiresAtUTC.UTC().UnixNano())
+		int64(grant.TTYRdev), int64(grant.TTYInode), grant.TTYSession, grant.ExpiresAtUTC.UTC().UnixNano(), authorizationSource)
 	if err != nil && isUniqueConstraint(err) {
 		return false, nil
 	}

@@ -298,15 +298,16 @@ type InspectionConfig struct {
 
 // ReviewConfig controls model review.
 type ReviewConfig struct {
-	Mode                    string        `json:"mode,omitempty"`
-	ApprovalOnlyUsers       []string      `json:"approval_only_users,omitempty"`
-	LocalOnly               bool          `json:"local_only"`
-	Models                  []ModelConfig `json:"models"`
-	GatewayProfiles         []string      `json:"gateway_profiles,omitempty"`
-	RequestTimeout          Duration      `json:"request_timeout"`
-	TotalTimeout            Duration      `json:"total_timeout"`
-	MaxModelCallsPerAttempt int           `json:"max_model_calls_per_attempt"`
-	MaxOutputTokens         int           `json:"max_output_tokens"`
+	Mode                    string         `json:"mode,omitempty"`
+	ApprovalOnlyUsers       []string       `json:"approval_only_users,omitempty"`
+	ApprovalTimestampUsers  map[string]int `json:"approval_timestamp_users,omitempty"`
+	LocalOnly               bool           `json:"local_only"`
+	Models                  []ModelConfig  `json:"models"`
+	GatewayProfiles         []string       `json:"gateway_profiles,omitempty"`
+	RequestTimeout          Duration       `json:"request_timeout"`
+	TotalTimeout            Duration       `json:"total_timeout"`
+	MaxModelCallsPerAttempt int            `json:"max_model_calls_per_attempt"`
+	MaxOutputTokens         int            `json:"max_output_tokens"`
 	// AutoApproveGrants is the bounded root-controlled opt-in to skipping
 	// the Telegram approval tap for low-risk jobs: each entry names a login
 	// and the highest model risk score (1..4; risk 5 and unreviewed jobs are
@@ -324,6 +325,7 @@ type ReviewConfig struct {
 	// Names resolve at Load; files and group membership are read per review.
 	AccountNotes     *AccountNotesConfig `json:"account_notes,omitempty"`
 	approvalOnlyUIDs map[uint32]struct{}
+	timestampUIDs    map[uint32]time.Duration
 	autoApproveRisk  map[uint32]int
 	userNotes        map[uint32]AccountNoteFile
 	groupNotes       map[uint32]AccountNoteFile
@@ -518,6 +520,9 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Review.ResolveApprovalOnlyUsers(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Review.ResolveApprovalTimestampUsers(); err != nil {
+		return nil, err
+	}
 	if err := cfg.Review.ResolveAutoApproveGrants(); err != nil {
 		return nil, err
 	}
@@ -710,6 +715,9 @@ func (c *Config) ValidateFleetJoinPolicy() error {
 		return err
 	}
 	if err := next.Review.ResolveApprovalOnlyUsers(); err != nil {
+		return err
+	}
+	if err := next.Review.ResolveApprovalTimestampUsers(); err != nil {
 		return err
 	}
 	if err := next.Review.ResolveAutoApproveGrants(); err != nil {
@@ -913,6 +921,14 @@ func validateReviewPolicy(review ReviewConfig) error {
 	for _, name := range review.ApprovalOnlyUsers {
 		if name == "" || strings.TrimSpace(name) != name {
 			return errors.New("review.approval_only_users contains an invalid login name")
+		}
+	}
+	for name, seconds := range review.ApprovalTimestampUsers {
+		if name == "" || strings.TrimSpace(name) != name {
+			return errors.New("review.approval_timestamp_users contains an invalid login name")
+		}
+		if seconds < 30 || seconds > 3600 {
+			return errors.New("review.approval_timestamp_users seconds must be 30 through 3600")
 		}
 	}
 	if len(review.AutoApproveGrants) > 128 {

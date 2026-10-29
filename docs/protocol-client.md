@@ -110,9 +110,11 @@ separately authorized installation/service actions. Old strict brokers reject
 the extension; the new CLI does not silently fall back to unprotected submit.
 Protected foreground claims require a helper advertising `cancel_control`
 **before** claim consumption. Old helpers still serve legacy jobs. Jobs created
-without a grant cannot acquire one retrospectively. The jobs DB migrates from
-schema 4 to 5, preserving historical jobs/reservations; older brokers cannot
-open the newer schema. No optional cancellation feature gates daemon startup.
+without a grant cannot acquire one retrospectively. The current jobs DB migrates
+supported older schemas to schema 6, preserving historical jobs/reservations;
+older brokers cannot open the newer schema. Schema 6 adds local approval
+timestamps keyed by UID and TTY session/device/inode; it adds no client protocol
+fields or secrets. No optional cancellation feature gates daemon startup.
 
 **`submit`** — create or retrieve a job:
 

@@ -91,6 +91,7 @@ type daemonOptions struct {
 type daemon struct {
 	reviewLogPath  string
 	cfg            *config.Config
+	bootID         string
 	configPath     string
 	reloadConfig   bool
 	store          *store.Store
@@ -191,6 +192,16 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	}
 	if err := cfg.Review.ResolveApprovalOnlyUsers(); err != nil {
 		return nil, nil, err
+	}
+	if err := cfg.Review.ResolveApprovalTimestampUsers(); err != nil {
+		return nil, nil, err
+	}
+	bootID, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return nil, nil, fmt.Errorf("read kernel boot ID: %w", err)
+	}
+	if strings.TrimSpace(string(bootID)) == "" {
+		return nil, nil, errors.New("kernel boot ID is empty")
 	}
 	emitConfigWarnings(slog.Default(), cfg)
 	if err := inspection.ProbeInspectionSupport(); err != nil {
@@ -361,7 +372,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	admissionTail := make(chan struct{})
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	d := &daemon{cfg: cfg, store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, drainPath: admission.Path(storePath), frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
+	d := &daemon{cfg: cfg, bootID: strings.TrimSpace(string(bootID)), store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, drainPath: admission.Path(storePath), frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
 		riskPolicyDefault: riskPolicyDefaultPath(configPath), riskPolicyTrust: rootRiskPolicyTrust(), configPath: configPath, reloadConfig: options.cfg == nil}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
 	d.reviewLogPath = reviewlog.Path(storePath)
@@ -1053,6 +1064,9 @@ func (d *daemon) followRuntime(conn *net.UnixConn, job *jobRuntime, cancelOnDisc
 			if err != nil {
 				_, _, _ = job.cancel("disconnect")
 				return
+			}
+			if err := job.recordApprovalTimestamp(context.Background(), time.UnixMilli(ready.ExpiryUnixMS)); err != nil {
+				slog.Warn("approval timestamp refresh failed", "request_id", job.req.RequestID, "error", err)
 			}
 		case body, ok := <-events:
 			if !ok {

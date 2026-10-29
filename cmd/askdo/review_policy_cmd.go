@@ -8,7 +8,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const reviewUsage = "usage: askdo review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review log [--since DURATION] [--job ID] [--json]"
+const reviewUsage = "usage: askdo review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review timestamp set USER SECONDS|clear USER|list [--config PATH] | review log [--since DURATION] [--job ID] [--json]"
 
 func runReview(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -22,6 +22,8 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		return reviewMode(args[1:], stdout, stderr)
 	case "exempt":
 		return reviewExempt(args[1:], stdout, stderr)
+	case "timestamp":
+		return reviewTimestamp(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, reviewUsage)
 		return 125
@@ -80,7 +82,7 @@ func reviewMode(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "review mode set to %s\n", positional[0])
 	if review.Mode == "approval_only" {
-		fmt.Fprintln(stderr, "WARNING: EVERY submitting UID in the socket group may request unreviewed root execution; Telegram approval is still mandatory.")
+		fmt.Fprintln(stderr, "WARNING: EVERY submitting UID in the socket group may request unreviewed root execution; Telegram approval is required unless a foreground approval timestamp is enabled and valid.")
 	}
 	return 0
 }
@@ -145,7 +147,7 @@ func reviewExempt(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "%s approval-only exemption for %q\n", verb, name)
 	if verb == "add" {
-		fmt.Fprintln(stderr, "WARNING: any process sharing the exempt user's UID also skips model review; agents need a distinct OS account. Telegram approval remains mandatory.")
+		fmt.Fprintln(stderr, "WARNING: any process sharing the exempt user's UID also skips model review; agents need a distinct OS account. Telegram approval is required unless a foreground approval timestamp is enabled and valid.")
 	}
 	return 0
 }

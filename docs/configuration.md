@@ -39,8 +39,15 @@ sets the policy (`approval-only` on the CLI becomes
 `approval_only` in JSON). `askdo review exempt add <username>` and
 `askdo review exempt remove <username>` manage OS login exemptions in
 `required` mode; `askdo review mode` and `askdo review exempt list`
-display current settings. These commands do not grant socket access or replace
-Telegram.
+display current settings. These commands do not grant socket access.
+
+For sudo-like approval reuse on your own account, opt in with
+`askdo review timestamp set <username> <seconds>` (root required, 30–3600
+integer seconds). `askdo review timestamp clear <username>` disables it;
+`askdo review timestamp list` displays the configured timeouts. All three
+commands require root. All accept `--config PATH` and work with direct v4 and fleet v5 host configurations.
+They use the same atomic, section-validated config mutation as the other review
+policy commands; adding a timestamp does not itself exempt an account from AI review.
 
 Validate with:
 
@@ -242,8 +249,9 @@ for the distinction between fixture checks and deployment evidence.
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
-| `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. A human Telegram decision remains mandatory for **NO AI REVIEW**; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
+| `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. **NO AI REVIEW** requires a human Telegram decision unless an explicitly enabled foreground approval timestamp is valid; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
 | `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. |
+| `approval_timestamp_users` | no | `{}` (off) | Map of OS login names to integer seconds, 30–3600. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse the sliding approval timestamp. Omit or clear a login to disable it; zero is not a configured timeout. |
 | `account_notes` | no | absent | Additive administrator Markdown context: optional `users` and `groups` maps from OS login / Unix group names to absolute clean file paths. Names resolve at config load; files and membership are read per review. See [reviewer instruction layers and account notes](#reviewer-instruction-layers-and-account-notes). |
 | `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
 | `webfetch_enabled` | no | `false` | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. See [review tools](review-tools.md#optional-webfetch). |
@@ -252,6 +260,30 @@ for the distinction between fixture checks and deployment evidence.
 | `total_timeout` | no | `"20m"` | Whole-review budget across all fallback choices; > 0 and ≥ `request_timeout`. Becomes the worker's `review_deadline_unix_ms`. |
 | `max_model_calls_per_attempt` | no | `32` | 1–128; bound on physical model calls per choice, including failed calls and retries, not just successful conversation turns. |
 | `max_output_tokens` | no | `8192` | 1–200000; bound on tokens per model response. |
+
+#### Sliding foreground approval timestamps
+
+The first foreground unreviewed command still needs Telegram approval. Only a
+successful handoff to the original client starts the window. Later unreviewed
+commands from the same authenticated UID and controlling terminal skip the tap
+while the timestamp is valid, and each successful handoff resets expiry to the
+dispatch time plus the configured timeout. There is no session-start command.
+
+The identity includes the kernel TTY session, device and inode, not the command's
+PID or process start time. A different UID or terminal cannot reuse it. Like
+sudo's timestamp, it is not protection against other processes sharing that UID
+and terminal; keep agents on a distinct OS account.
+
+Detached jobs, captured-stdin scripts (which remain detached), AI-required jobs
+(including `--review=yes`) and risk-based auto-approval neither use nor refresh
+this timestamp. Denial, expiry, failed evidence checks or failed handoff do not
+extend it. Reuse still freezes the exact manifest and applies the existing
+pre-launch and one-use foreground grant checks; it does not invent a Telegram
+decision. Timestamp records live in the local jobs database. Config changes apply
+to the next submission without a restart; already admitted jobs keep their policy.
+Clearing a policy disables reuse but does not erase stored records; re-enabling
+can reuse an unexpired record. `telegram.approval_ttl` is a separate deadline for
+an individual approval card and never starts a timestamp by itself.
 
 #### Reviewer instruction layers and account notes
 
@@ -512,8 +544,9 @@ job across all broker tools. Hash byte ceilings may be lowered, not raised.
 
 ### `telegram`
 
-Telegram is the mandatory decision interface; there is no approval path
-without it. One configuration uses exactly one of two forms:
+Telegram supplies human decisions, including the first approval that starts an
+opt-in foreground timestamp. Its configuration remains required. One
+configuration uses exactly one of two forms:
 
 - **Legacy single-bot form** (the original shape): the flat
   `token_file`/`operator_user_id`/`chat_id` fields below. Still fully
