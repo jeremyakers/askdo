@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -172,7 +173,7 @@ func TestUpgradeSystemdManagerStartsUniqueIndependentOneShotWithoutWaiting(t *te
 	// When
 	err := manager.Start(t.Context(), id, stage)
 	// Then
-	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo"), "upgrade-helper", "--activate", stage}}}
+	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo-linux-"+runtime.GOARCH), "upgrade-helper", "--activate", stage}}}
 	if err != nil || !reflect.DeepEqual(tools.calls, want) {
 		t.Fatalf("manager: %v calls=%+v", err, tools.calls)
 	}
@@ -332,7 +333,7 @@ func (f upgradeRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error)
 func TestUpgradeDetachedManagerStartsStagedHelper(t *testing.T) {
 	// Given a staged helper and no systemd-run dependency.
 	stage := t.TempDir()
-	helper := filepath.Join(stage, "askdo")
+	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
 	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' \"$UPGRADE_STAGE\" > \"$UPGRADE_STAGE/activation.log\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

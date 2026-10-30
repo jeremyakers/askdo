@@ -123,7 +123,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 					t.Fatalf("not a detached fixed helper invocation: %q", args)
 				}
 				operation, source = argv[3], argv[5]
-				if want := []string{filepath.Join(source, "askdo"), "upgrade-helper", "--operation", cliUpgradeID, "--source", source}; !reflect.DeepEqual(argv, want) {
+				if want := []string{filepath.Join(source, "askdo-linux-"+runtime.GOARCH), "upgrade-helper", "--operation", cliUpgradeID, "--source", source}; !reflect.DeepEqual(argv, want) {
 					t.Fatalf("helper argv=%q want=%q", argv, want)
 				}
 				info, err := os.Stat(source)
