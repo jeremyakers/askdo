@@ -334,7 +334,7 @@ func TestUpgradeDetachedManagerStartsStagedHelper(t *testing.T) {
 	// Given a staged helper and no systemd-run dependency.
 	stage := t.TempDir()
 	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' \"$UPGRADE_STAGE\" > \"$UPGRADE_STAGE/activation.log\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' \"$UPGRADE_STAGE $ASKDO_UPGRADE_DETACHED\" > \"$UPGRADE_STAGE/activation.log\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// When the detached manager starts activation.
@@ -346,7 +346,7 @@ func TestUpgradeDetachedManagerStartsStagedHelper(t *testing.T) {
 	for {
 		data, err := os.ReadFile(filepath.Join(stage, "activation.log"))
 		if err == nil && len(data) > 0 {
-			if !strings.Contains(string(data), stage) {
+			if strings.TrimSpace(string(data)) != stage+" 1" {
 				t.Fatalf("activation log=%q", data)
 			}
 			return
