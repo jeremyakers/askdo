@@ -18,7 +18,8 @@ manifest digest, and asks for Telegram approval. Approval is mandatory for every
 upgrade; automatic approval is not used for this operation.
 
 After approval, a captured root bootstrap verifies a root-owned candidate copy
-before executing it with the frozen plan. The new helper stages and verifies the
+and executes it through a pinned file descriptor with the frozen plan, so path
+replacement cannot change the verified inode. The new helper stages and verifies the
 release again before activation. It drains new work while existing jobs finish,
 backs up the broker and gateway data,
 installs the release, and verifies the restarted services and gateway catalog.

@@ -12,8 +12,8 @@ import (
 )
 
 // upgradeBootstrapScript verifies a root-owned copy before executing the new
-// helper. The old installed helper is not involved, and a mutable download can
-// never become root code before its approved digest has been checked.
+// helper through a pinned file descriptor. The old installed helper is not
+// involved, and path replacement cannot change the verified inode before exec.
 func upgradeBootstrapScript(plan upgrade.Plan, capturedPlan []byte, backupRoot string) ([]byte, error) {
 	if !filepath.IsAbs(backupRoot) || filepath.Clean(backupRoot) != backupRoot || strings.ContainsAny(backupRoot, "'\n\r") {
 		return nil, errors.New("upgrade bootstrap root must be a clean absolute path")
@@ -52,9 +52,10 @@ esac
 /bin/mkdir -m 0700 "$bootstrap"
 trap '/bin/rm -rf -- "$bootstrap"' EXIT
 /usr/bin/install -m 0700 "$source/%s" "$candidate"
-printf '%%s  %%s\n' '%s' "$candidate" | /usr/bin/sha256sum -c -
+exec 3<"$candidate"
+printf '%%s  %%s\n' '%s' /proc/self/fd/3 | /usr/bin/sha256sum -c -
 status=0
-printf '%%s' '%s' | "$candidate" upgrade-helper --operation "$operation" --source "$source" || status=$?
+printf '%%s' '%s' | /proc/self/fd/3 upgrade-helper --operation "$operation" --source "$source" || status=$?
 exit "$status"
 `, backupRoot, bootstrap, candidate, plan.CLIAsset, plan.CLIDigest, capturedPlan)
 	return []byte(script), nil

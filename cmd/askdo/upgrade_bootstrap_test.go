@@ -53,7 +53,7 @@ func TestUpgradeBootstrapExecutesOnlyPinnedCandidate(t *testing.T) {
 	}
 	marker := filepath.Join(source, "executed")
 	data, err := os.ReadFile(marker)
-	if err != nil || !strings.Contains(string(data), "bootstrap-"+plan.Operation) {
+	if err != nil || string(data) != "/proc/self/fd/3" {
 		t.Fatalf("executed path=%q, err=%v", data, err)
 	}
 }
