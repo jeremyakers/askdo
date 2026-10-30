@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -102,7 +103,7 @@ type upgradeSystemdManager struct{ tools upgradeToolRunner }
 func (m upgradeSystemdManager) Start(ctx context.Context, id, stage string) error {
 	// --no-block is essential for Type=oneshot: wait-for-completion would
 	// deadlock against the scheduling job's own terminal/quietness gate.
-	_, err := m.tools.Run(ctx, upgradeSystemdRun, "--unit=askdo-upgrade-"+id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo"), "upgrade-helper", "--activate", stage)
+	_, err := m.tools.Run(ctx, upgradeSystemdRun, "--unit=askdo-upgrade-"+id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo-linux-"+runtime.GOARCH), "upgrade-helper", "--activate", stage)
 	return err
 }
 
@@ -120,7 +121,7 @@ func newUpgradeActivationManager(tools upgradeToolRunner) upgrade.ActivationMana
 }
 
 func (upgradeDetachedManager) Start(_ context.Context, id, stage string) error {
-	helper := filepath.Join(stage, "askdo")
+	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
 	log, err := os.OpenFile(filepath.Join(stage, "activation.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err

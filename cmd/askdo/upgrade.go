@@ -157,7 +157,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		if options.runClient == nil {
 			options.runClient = client.Run
 		}
-		helperPath := filepath.Join(source, "askdo")
+		helperPath := filepath.Join(source, plan.CLIAsset)
 		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", helperPath, "upgrade-helper", "--operation", *operation, "--source", source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
