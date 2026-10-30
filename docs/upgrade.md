@@ -17,10 +17,15 @@ It downloads and verifies the release, shows its operation, source commit and
 manifest digest, and asks for Telegram approval. Approval is mandatory for every
 upgrade; automatic approval is not used for this operation.
 
-After approval, askdo stages the verified files, drains new work while existing
-jobs finish, backs up the broker and gateway data, installs the release, and
-verifies the restarted services and gateway catalog. The result is not called
-successful until those checks pass.
+After approval, a captured root bootstrap verifies a root-owned candidate copy
+and executes it through a pinned file descriptor with the frozen plan, so path
+replacement cannot change the verified inode. The new helper stages and verifies the
+release again before activation. It drains new work while existing jobs finish,
+backs up the broker and gateway data,
+installs the release, and verifies the restarted services and gateway catalog.
+On hosts without `systemd-run`, a detached activation starts a new session and
+moves to the root of each cgroup hierarchy before stopping the broker. The
+result is not called successful until those checks pass.
 
 ## Supported topology and timing
 
@@ -54,7 +59,8 @@ commit, state, stage and timestamps. They contain no credentials.
 - A duplicate active operation is refused; a completed release can be upgraded
   again later with a new operation ID.
 - Failed or uncertain results include the stage and backup path. No automatic
-  rollback is attempted. Inspect the backup before restoring compatible
+  rollback is attempted. On detached hosts, inspect `stage/activation.log` for
+  pre-activation errors. Inspect the backup before restoring compatible
   binaries and databases together.
 - The backup directory is root-private. Use normal administrator access to
   inspect it; public receipts never expose its contents.

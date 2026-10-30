@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,7 +42,7 @@ func runUpgradeHelper(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 	defer cancel()
 	return runUpgradeHelperWith(ctx, args, getEUID(), func() upgrade.Helper {
 		tools := upgradeSystemTools{}
-		return upgrade.Helper{BackupRoot: "/var/backups/askdo", ReceiptRoot: defaultUpgradeReceiptRoot, Manager: upgradeSystemdManager{tools: tools}, Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
+		return upgrade.Helper{BackupRoot: "/var/backups/askdo", ReceiptRoot: defaultUpgradeReceiptRoot, Manager: newUpgradeActivationManager(tools), Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
 			return preflightUpgradeTopology(defaultConfigPath, defaultGatewayConfig)
 		}}
 	}, stdin, stdout, stderr)
@@ -66,8 +67,22 @@ func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory 
 		if host, ok := helper.Host.(*upgradeLocalHost); ok {
 			host.operation = filepath.Base(*activate)
 		}
+		if os.Getenv("ASKDO_UPGRADE_DETACHED") == "1" {
+			if err := upgradeEscapeCgroups(); err != nil {
+				fmt.Fprintln(stderr, "upgrade-helper: escape service cgroups:", err)
+				if receiptErr := helper.FailScheduled(ctx, *activate, "detached activation could not escape service cgroups"); receiptErr != nil {
+					fmt.Fprintln(stderr, "upgrade-helper: record activation failure:", receiptErr)
+				}
+				return 1
+			}
+		}
 		if err := helper.Activate(ctx, *activate); err != nil {
 			fmt.Fprintln(stderr, "upgrade-helper:", err)
+			// Activate owns receipt updates after its preflight. Reconcile only a
+			// still-scheduled receipt when it failed before reaching that point.
+			if receiptErr := helper.FailScheduled(ctx, *activate, "activation failed before receipt ownership; see activation log"); receiptErr != nil {
+				fmt.Fprintln(stderr, "upgrade-helper: reconcile activation receipt:", receiptErr)
+			}
 			return 1
 		}
 		fmt.Fprintln(stdout, "upgrade activation verified:", *activate)
@@ -102,8 +117,38 @@ type upgradeSystemdManager struct{ tools upgradeToolRunner }
 func (m upgradeSystemdManager) Start(ctx context.Context, id, stage string) error {
 	// --no-block is essential for Type=oneshot: wait-for-completion would
 	// deadlock against the scheduling job's own terminal/quietness gate.
-	_, err := m.tools.Run(ctx, upgradeSystemdRun, "--unit=askdo-upgrade-"+id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/usr/local/bin/askdo", "upgrade-helper", "--activate", stage)
+	_, err := m.tools.Run(ctx, upgradeSystemdRun, "--unit=askdo-upgrade-"+id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo-linux-"+runtime.GOARCH), "upgrade-helper", "--activate", stage)
 	return err
+}
+
+// upgradeDetachedManager is used on hosts without systemd-run, including DSM.
+// The helper starts in a new session, outside the broker's process group, and
+// writes its own durable activation log. The broker does not cancel it during
+// shutdown, so activation can finish and report its receipt after restart.
+type upgradeDetachedManager struct{}
+
+func newUpgradeActivationManager(tools upgradeToolRunner) upgrade.ActivationManager {
+	if info, err := os.Stat(upgradeSystemdRun); err == nil && !info.IsDir() {
+		return upgradeSystemdManager{tools: tools}
+	}
+	return upgradeDetachedManager{}
+}
+
+func (upgradeDetachedManager) Start(_ context.Context, id, stage string) error {
+	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
+	log, err := os.OpenFile(filepath.Join(stage, "activation.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(helper, "upgrade-helper", "--activate", stage)
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "UPGRADE_STAGE=" + stage, "ASKDO_UPGRADE_DETACHED=1"}
+	cmd.Dir = "/"
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 type upgradeSystemTools struct{}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -172,7 +173,7 @@ func TestUpgradeSystemdManagerStartsUniqueIndependentOneShotWithoutWaiting(t *te
 	// When
 	err := manager.Start(t.Context(), id, stage)
 	// Then
-	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/usr/local/bin/askdo", "upgrade-helper", "--activate", stage}}}
+	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo-linux-"+runtime.GOARCH), "upgrade-helper", "--activate", stage}}}
 	if err != nil || !reflect.DeepEqual(tools.calls, want) {
 		t.Fatalf("manager: %v calls=%+v", err, tools.calls)
 	}
@@ -328,3 +329,31 @@ func TestUpgradeBrokerProbeRequiresValidatedResponseNotJustConnect(t *testing.T)
 type upgradeRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f upgradeRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestUpgradeDetachedManagerStartsStagedHelper(t *testing.T) {
+	// Given a staged helper and no systemd-run dependency.
+	stage := t.TempDir()
+	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nprintf '%s\\n' \"$UPGRADE_STAGE $ASKDO_UPGRADE_DETACHED\" > \"$UPGRADE_STAGE/activation.log\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// When the detached manager starts activation.
+	if err := (upgradeDetachedManager{}).Start(t.Context(), "up_detached", stage); err != nil {
+		t.Fatal(err)
+	}
+	// Then the staged helper, not the old installed binary, produced the log.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(filepath.Join(stage, "activation.log"))
+		if err == nil && len(data) > 0 {
+			if strings.TrimSpace(string(data)) != stage+" 1" {
+				t.Fatalf("activation log=%q", data)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("staged helper did not write activation log")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

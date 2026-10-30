@@ -225,6 +225,11 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	if _, _, _, err := verifiedSource(stage, id); err != nil {
 		return "", fmt.Errorf("staged release: %w", err)
 	}
+	// copyPrivate intentionally writes 0600. Only the verified candidate CLI is
+	// made executable, inside the root-owned 0700 stage, before activation starts.
+	if err := os.Chmod(filepath.Join(stage, plan.CLIAsset), 0o700); err != nil {
+		return "", fmt.Errorf("make staged candidate executable: %w", err)
+	}
 	record, err := json.Marshal(activationRecord{Version: 1, DeadlineUnixMS: h.now().Add(OperationTimeout).UnixMilli()})
 	if err != nil {
 		return "", err
@@ -258,6 +263,33 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 		return stage, errors.Join(fmt.Errorf("activation manager: %w", err), h.scheduleFailure(id, detail, state))
 	}
 	return stage, nil
+}
+
+// FailScheduled records a detached helper failure that occurred before
+// Activate could own receipt updates. It never replays activation or changes
+// an operation that already left the scheduled state.
+func (h Helper) FailScheduled(ctx context.Context, stage, detail string) error {
+	id := filepath.Base(stage)
+	if validateOperationID(id) != nil || !filepath.IsAbs(stage) || stage != filepath.Join(h.BackupRoot, id) {
+		return errors.New("activation stage is not an operation under the backup root")
+	}
+	lock, err := activationLock(ctx, h.ReceiptRoot)
+	if err != nil {
+		return err
+	}
+	defer releaseLockLine(lock)
+	r, err := ReadReceipt(h.ReceiptRoot, id)
+	if err != nil {
+		return err
+	}
+	if r.Stage != stage {
+		return errors.New("receipt stage differs from activation stage")
+	}
+	if r.State != stateScheduled {
+		return nil
+	}
+	r.State, r.Detail, r.UpdatedAtUnixMS = stateFailed, detail, h.now().UnixMilli()
+	return writeReceipt(h.ReceiptRoot, r)
 }
 
 // Called only while Schedule owns NewOperation's lock; UpdateReceipt would

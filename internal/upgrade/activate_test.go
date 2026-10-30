@@ -256,6 +256,10 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 		if err != nil || info.Mode().Perm() != 0o700 {
 			t.Fatalf("stage metadata: %v, %v", info, err)
 		}
+		cli, err := os.Stat(filepath.Join(stage, f.plan.CLIAsset))
+		if err != nil || cli.Mode().Perm() != 0o700 {
+			t.Fatalf("staged CLI must be executable after verification: %v, %v", cli, err)
+		}
 		accepted = true
 		return nil
 	})
@@ -264,6 +268,26 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 	// Then: manager acceptance is not activation success and no live action occurred.
 	if err != nil || !accepted || stage != f.stage || activationReceipt(t, f).State != "scheduled" || len(f.host.events) != 0 {
 		t.Fatalf("schedule: stage=%s accepted=%v err=%v events=%v", stage, accepted, err, f.host.events)
+	}
+}
+
+func TestHelperFailScheduledIsTerminalAndNotReplayed(t *testing.T) {
+	// Given a scheduled activation whose detached process cannot reach Activate.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+
+	// When the pre-activation failure is recorded.
+	err := f.helper.FailScheduled(t.Context(), f.stage, "detached activation could not start")
+
+	// Then the receipt is terminal and activation cannot replay it.
+	if err != nil || activationReceipt(t, f).State != "failed" {
+		t.Fatalf("failure receipt: %+v, %v", activationReceipt(t, f), err)
+	}
+	if err := f.helper.Activate(t.Context(), f.stage); err == nil || len(f.host.events) != 0 {
+		t.Fatalf("failed activation replayed: %v, events=%v", err, f.host.events)
+	}
+	if err := f.helper.FailScheduled(t.Context(), f.stage, "duplicate reconciliation must be a no-op"); err != nil {
+		t.Fatalf("terminal receipt reconciliation: %v", err)
 	}
 }
 
