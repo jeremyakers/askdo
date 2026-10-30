@@ -92,8 +92,8 @@ inherited permissions left an earlier directory world-writable; no pre-creation
 or manual `chmod` is needed. It contains only the bearer, job ID, absolute
 socket path and informative host name. The bearer is never printed. Detached
 submissions print `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...`; interactive
-foreground success instead shows one review prompt and the command output.
-`--verbose` restores those identity and lifecycle lines. If the private file cannot be saved, nothing is submitted. The receipt
+foreground success instead shows the command output, plus a review prompt only
+when notification is required. `--verbose` restores those identity and lifecycle lines. If the private file cannot be saved, nothing is submitted. The receipt
 survives interruption, timeout, disconnect and client exit. Automatic removal
 requires an observed terminal result on that submitting/cancelling client;
 otherwise keep it, or explicitly remove it yourself after checking status.
@@ -453,13 +453,14 @@ and cleanup does not take another terminal job's foreground or modes.
 
 `stage` and `detail` are free-form within protocol bounds; stages seen in
 practice include `reviewing`, `fallback`, `notifying`, `awaiting-human`,
-`awaiting-handoff`, `starting`, `running`, `output`, `expired`, `failed`. The CLI
-prints
-`stage: detail` to stderr.
-On a matching `accepted` event with state `queued`, the CLI also prints
+`awaiting-handoff`, `starting`, `running`, `output`, `expired`, `failed`. Detached
+and `--verbose` clients print `stage: detail` to stderr. On a matching `accepted`
+event with state `queued`, they also print
 `queued: broker accepted; review/notification pending`. That receipt does not
 claim a Telegram card was sent; notification follows review, which may still
-be waiting for the broker's review slot.
+be waiting for the broker's review slot. A quiet original foreground client
+instead prints its review prompt only on `awaiting-human` progress, so timestamp
+reuse remains silent.
 
 **`stdout` / `stderr`** — detached command output, base64:
 

@@ -789,12 +789,8 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil || event.RequestID != requestID {
 			return 125, true, ""
 		}
-		if event.State == "queued" {
-			if !options.quietForeground {
-				fmt.Fprintln(options.Stderr, "queued: broker accepted; review/notification pending")
-			} else {
-				fmt.Fprintf(options.Stderr, "Job %s: check Telegram for the review card\n", requestID)
-			}
+		if event.State == "queued" && !options.quietForeground {
+			fmt.Fprintln(options.Stderr, "queued: broker accepted; review/notification pending")
 		}
 		return 0, false, event.State
 	case "progress":
@@ -804,6 +800,10 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		}
 		if !options.quietForeground {
 			fmt.Fprintf(options.Stderr, "%s: %s\n", event.Stage, event.Detail)
+		} else if event.Stage == "awaiting-human" {
+			// This progress event follows NotificationSent. Timestamp reuse skips
+			// notification and therefore never produces this prompt.
+			fmt.Fprintf(options.Stderr, "Job %s: check Telegram for the review card\n", requestID)
 		}
 		return 0, false, event.Stage
 	case "stdout", "stderr":

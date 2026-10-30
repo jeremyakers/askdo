@@ -159,6 +159,19 @@ func TestSystemExecutorNoStdinAndBrokerControlledCwd(t *testing.T) {
 	}
 }
 
+func TestForegroundOperationIncludesTerminalType(t *testing.T) {
+	// Given a foreground request with its validated terminal type.
+	j := &jobRuntime{req: proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/ls", "--color"}, CWD: "/tmp", Lifecycle: proto.LifecycleForeground, TerminalType: "xterm-256color"}}
+
+	// When the execution operation is built.
+	op := j.operation()
+
+	// Then terminal-aware applications receive TERM on their real foreground TTY.
+	if !strings.Contains(strings.Join(op.Env, "\n"), "TERM=xterm-256color") {
+		t.Fatalf("foreground environment lacks TERM: %v", op.Env)
+	}
+}
+
 func TestBundleOperationShape(t *testing.T) {
 	cwd := t.TempDir()
 	bound, err := bindCWD(cwd)
@@ -204,7 +217,7 @@ func TestArgvOperationShape(t *testing.T) {
 	}
 	defer bound.close()
 	j := &jobRuntime{
-		req:          proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id", "-u"}, CWD: cwd},
+		req:          proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id", "-u"}, CWD: cwd, Lifecycle: proto.LifecycleDetached},
 		cwd:          bound,
 		spool:        spoolFiles{dir: "/spool/job"},
 		resolvedArgv: []string{"/usr/bin/id", "-u"},
@@ -212,6 +225,10 @@ func TestArgvOperationShape(t *testing.T) {
 	op := j.operation()
 	if strings.Join(op.Argv, " ") != "/usr/bin/id -u" {
 		t.Fatalf("argv=%v", op.Argv)
+	}
+	wantEnv := "PATH=/usr/bin:/bin\nHOME=/root\nLANG=C.UTF-8\nPWD=" + cwd
+	if strings.Join(op.Env, "\n") != wantEnv {
+		t.Fatalf("detached environment changed: %v", op.Env)
 	}
 	op.CWDFd = j.cwdFD()
 	if op.CWD != cwd {

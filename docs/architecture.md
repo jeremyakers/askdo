@@ -391,8 +391,9 @@ One pass through the pipeline per job (`internal/broker/job.go`):
       is not full regular-sudo parity. A confirmed launch marks
      `starting` → `running`; output drains into bounded per-stream logs from
      launch, independent of any subscriber. Foreground uses the same frozen
-    argv/environment and bound CWD but inherits the verified original human
-    TTY through `askdo-launch`; it is not captured into the daemon's detached
+    argv and bound CWD, adds the validated caller `TERM` to the explicit
+    environment, and inherits the verified original human TTY through
+    `askdo-launch`; it is not captured into the daemon's detached
     stdout/stderr spool.
 
 The client obtains `cwd` from its current working directory. Both argv and

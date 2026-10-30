@@ -43,6 +43,7 @@ func runInteractiveOutputTest(t *testing.T, args []string, verbose bool) (string
 		for _, event := range []any{
 			proto.AcceptedEvent{Op: "accepted", RequestID: testCanonicalID, State: "queued"},
 			proto.ProgressEvent{Op: "progress", Stage: "reviewing", Detail: "review started"},
+			proto.ProgressEvent{Op: "progress", Stage: "awaiting-human", Detail: "awaiting decision"},
 			proto.OutputEvent{Op: "stdout", Stream: "stdout", DataBase64: base64.StdEncoding.EncodeToString([]byte("0\n"))},
 			proto.ResultEvent{Op: "result", RequestID: testCanonicalID, State: "finished", ExitCode: new(int)},
 		} {
@@ -80,6 +81,33 @@ func TestInteractiveSuccessOutputQuietByDefault(t *testing.T) {
 	want := "Job " + testCanonicalID + ": check Telegram for the review card\n"
 	if stderr != want {
 		t.Fatalf("stderr=%q, want %q", stderr, want)
+	}
+}
+
+func TestInteractiveQuietTimestampReuseDoesNotPromiseReviewCard(t *testing.T) {
+	// Given the event sequence produced by timestamp reuse without a notification.
+	events := []any{
+		proto.AcceptedEvent{Op: "accepted", RequestID: testCanonicalID, State: "queued"},
+		proto.ProgressEvent{Op: "progress", Stage: "awaiting-handoff", Detail: "foreground authorization ready"},
+		proto.ProgressEvent{Op: "progress", Stage: "running", Detail: "foreground handoff sent"},
+	}
+	var stdout, stderr bytes.Buffer
+
+	// When the reuse events are handled by a quiet foreground client.
+	for _, event := range events {
+		body, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, terminal, _ := handleEvent(body, testCanonicalID, Options{Stdout: &stdout, Stderr: &stderr, quietForeground: true})
+		if code != 0 || terminal {
+			t.Fatalf("code=%d terminal=%t", code, terminal)
+		}
+	}
+
+	// Then no Telegram prompt is printed.
+	if stderr.String() != "" {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
