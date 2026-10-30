@@ -134,10 +134,16 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		fmt.Fprintf(stdout, "Upgrade operation: %s\nRelease: %s\nSource commit: %s\nManifest SHA-256: %s\n", *operation, plan.Release, plan.SourceCommit, plan.ManifestDigest)
 		reason := fmt.Sprintf("Upgrade askdo and any installed gateway to %s from source %s with manifest SHA-256 %s (operation %s). Stage the verified release and activate it after this scheduling job finishes.", plan.Release, plan.SourceCommit, plan.ManifestDigest, *operation)
 		// Explicit detached execution never invokes the foreground sudo helper.
-		// Supply the marshaled plan through an unlinked, private descriptor, not
-		// the mutable local plan.json or caller stdin. The ordinary client captures
-		// these bytes in the broker's approval snapshot before the helper runs.
-		// Captured stdin is also always human-only, including on older brokers.
+		// The captured bootstrap verifies a root-owned candidate copy before
+		// executing it with the embedded approved plan. The broker freezes the
+		// complete script, so neither mutable source bytes nor obsolete installed
+		// helper behavior can select the scheduling or activation path. Captured
+		// stdin is always human-only, including on older brokers.
+		bootstrap, err := upgradeBootstrapScript(plan, capturedPlan, "/var/backups/askdo")
+		if err != nil {
+			fmt.Fprintln(stderr, "upgrade bootstrap; no command submitted:", err)
+			return 125
+		}
 		stdin, err := os.CreateTemp(source, ".captured-plan-")
 		if err != nil {
 			fmt.Fprintln(stderr, "upgrade stdin; no command submitted:", err)
@@ -145,7 +151,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		}
 		defer stdin.Close()
 		if err = os.Remove(stdin.Name()); err == nil {
-			_, err = stdin.Write(capturedPlan)
+			_, err = stdin.Write(bootstrap)
 		}
 		if err == nil {
 			_, err = stdin.Seek(0, io.SeekStart)
@@ -157,8 +163,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		if options.runClient == nil {
 			options.runClient = client.Run
 		}
-		helperPath := "/usr/local/bin/askdo"
-		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", helperPath, "upgrade-helper", "--operation", *operation, "--source", source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
+		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", "/bin/sh", "-s", *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
 	// The root operation's activation budget starts only after scheduling, not

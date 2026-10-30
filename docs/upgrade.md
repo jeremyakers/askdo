@@ -17,9 +17,10 @@ It downloads and verifies the release, shows its operation, source commit and
 manifest digest, and asks for Telegram approval. Approval is mandatory for every
 upgrade; automatic approval is not used for this operation.
 
-After approval, the trusted installed helper stages and verifies the release;
-only then can the root-owned candidate perform activation. The helper drains
-new work while existing jobs finish, backs up the broker and gateway data,
+After approval, a captured root bootstrap verifies a root-owned candidate copy
+before executing it with the frozen plan. The new helper stages and verifies the
+release again before activation. It drains new work while existing jobs finish,
+backs up the broker and gateway data,
 installs the release, and verifies the restarted services and gateway catalog.
 On hosts without `systemd-run`, a detached activation starts a new session and
 moves to the root of each cgroup hierarchy before stopping the broker. The
