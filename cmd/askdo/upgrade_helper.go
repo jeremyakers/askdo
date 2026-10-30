@@ -67,8 +67,22 @@ func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory 
 		if host, ok := helper.Host.(*upgradeLocalHost); ok {
 			host.operation = filepath.Base(*activate)
 		}
+		if os.Getenv("ASKDO_UPGRADE_DETACHED") == "1" {
+			if err := upgradeEscapeCgroups(); err != nil {
+				fmt.Fprintln(stderr, "upgrade-helper: escape service cgroups:", err)
+				if receiptErr := helper.FailScheduled(ctx, *activate, "detached activation could not escape service cgroups"); receiptErr != nil {
+					fmt.Fprintln(stderr, "upgrade-helper: record activation failure:", receiptErr)
+				}
+				return 1
+			}
+		}
 		if err := helper.Activate(ctx, *activate); err != nil {
 			fmt.Fprintln(stderr, "upgrade-helper:", err)
+			// Activate owns receipt updates after its preflight. Reconcile only a
+			// still-scheduled receipt when it failed before reaching that point.
+			if receiptErr := helper.FailScheduled(ctx, *activate, "activation failed before receipt ownership; see activation log"); receiptErr != nil {
+				fmt.Fprintln(stderr, "upgrade-helper: reconcile activation receipt:", receiptErr)
+			}
 			return 1
 		}
 		fmt.Fprintln(stdout, "upgrade activation verified:", *activate)
@@ -127,7 +141,7 @@ func (upgradeDetachedManager) Start(_ context.Context, id, stage string) error {
 		return err
 	}
 	cmd := exec.Command(helper, "upgrade-helper", "--activate", stage)
-	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "UPGRADE_STAGE=" + stage}
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "UPGRADE_STAGE=" + stage, "ASKDO_UPGRADE_DETACHED=1"}
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
