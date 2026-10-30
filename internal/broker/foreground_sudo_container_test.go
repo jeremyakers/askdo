@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,11 +152,13 @@ func TestForegroundSudoContainer(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Review.Mode, cfg.Review.Models = "approval_only", nil
+	cfg.Review.ApprovalTimestampUsers = map[string]int{"askdo-human": 600}
 	root := t.TempDir()
+	var approvals atomic.Int32
 	executor := &FakeExecutor{StartError: errors.New("foreground must never use broker executor")}
 	d, listener, err := newDaemon("", daemonOptions{
 		cfg: cfg, socketPath: "/run/askdo/request.sock", storePath: filepath.Join(root, "jobs.sqlite3"),
-		spoolRoot: filepath.Join(root, "spool"), worker: approvalProtocolWorker(t, "policy", nil, true),
+		spoolRoot: filepath.Join(root, "spool"), worker: timestampWorker(&approvals, "approve", nil),
 		executor: executor, peerUID: unixPeerUID, peerPID: unixPeerPID, ttyEvidence: foregroundTTYIdentity,
 	})
 	if err != nil {
@@ -203,11 +206,14 @@ func TestForegroundSudoContainer(t *testing.T) {
 	}
 	// script allocates a real controlling PTY; runuser retains the session and
 	// supplies actual unprivileged SO_PEERCRED to the broker.
-	good := "tty; id -u; set -- $(/bin/cat /proc/$$/stat); echo PGRP_SID_TTY=$5,$6,$7; /usr/local/bin/askdo --verbose --reason container-foreground -- /usr/bin/id -u; code=$?; echo ASKDO_EXIT=$code; exit $code"
+	good := "tty; id -u; set -- $(/bin/cat /proc/$$/stat); echo PGRP_SID_TTY=$5,$6,$7; /usr/local/bin/askdo --verbose --reason container-foreground -- /usr/bin/id -u; code=$?; /usr/local/bin/askdo --verbose --reason container-color -- /usr/bin/ls --color /usr/bin/ls; color=$?; /usr/local/bin/askdo --reason container-timestamp-reuse -- /usr/bin/id -u; reuse=$?; echo ASKDO_COLOR_EXIT=$color; echo ASKDO_REUSE_EXIT=$reuse; echo ASKDO_EXIT=$code; exit $code"
 	output, status := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+good+"'", "/dev/null")
 	t.Logf("original PTY / UID / root child / CLI exit: %q status=%d", output, status)
-	if status != 0 || !strings.Contains(output, "/dev/pts/") || !strings.Contains(output, "ASKDO_EXIT=0") || !strings.Contains(output, "\r\n0\r\n") || !strings.Contains(output, "\r\n1001\r\n") {
+	if status != 0 || !strings.Contains(output, "/dev/pts/") || !strings.Contains(output, "ASKDO_EXIT=0") || !strings.Contains(output, "ASKDO_COLOR_EXIT=0") || !strings.Contains(output, "ASKDO_REUSE_EXIT=0") || !strings.Contains(output, "\r\n0\r\n") || !strings.Contains(output, "\r\n1001\r\n") || !strings.Contains(output, "\x1b[01;32m/usr/bin/ls\x1b[0m\r\n") || strings.Contains(output, "check Telegram for the review card") {
 		t.Fatalf("real foreground path failed: status=%d output=%q", status, output)
+	}
+	if approvals.Load() != 1 {
+		t.Fatalf("three foreground commands required %d approvals, want 1", approvals.Load())
 	}
 	assertNoExecutor()
 	// Interactive shell job control is essential: the user's original terminal

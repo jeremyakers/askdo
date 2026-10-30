@@ -1618,6 +1618,9 @@ func (j *jobRuntime) operation() Operation {
 	argv := append([]string(nil), j.req.Argv...)
 	cwd := j.req.CWD
 	env := []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PWD=" + cwd}
+	if j.req.Lifecycle == proto.LifecycleForeground {
+		env = append(env, "TERM="+j.req.TerminalType)
+	}
 	if len(j.resolvedArgv) != 0 {
 		argv = append([]string(nil), j.resolvedArgv...)
 	}

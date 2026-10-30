@@ -100,6 +100,16 @@ func setTimestampPeer(h *brokerHarness, uid uint32) store.ApprovalTimestampKey {
 
 func timestampSubmit(t *testing.T, h *brokerHarness, req proto.SubmitRequest) proto.ForegroundReadyEvent {
 	t.Helper()
+	return timestampSubmitObserved(t, h, req, false)
+}
+
+func timestampSubmitWithoutHumanPrompt(t *testing.T, h *brokerHarness, req proto.SubmitRequest) proto.ForegroundReadyEvent {
+	t.Helper()
+	return timestampSubmitObserved(t, h, req, true)
+}
+
+func timestampSubmitObserved(t *testing.T, h *brokerHarness, req proto.SubmitRequest, rejectHumanPrompt bool) proto.ForegroundReadyEvent {
+	t.Helper()
 	if err := req.Validate(); err != nil {
 		t.Fatalf("invalid fixture: %v", err)
 	}
@@ -111,6 +121,10 @@ func timestampSubmit(t *testing.T, h *brokerHarness, req proto.SubmitRequest) pr
 	sendFrame(t, conn, req)
 	for i := 0; i < 40; i++ {
 		body := readFrame(t, conn)
+		var progress proto.ProgressEvent
+		if rejectHumanPrompt && json.Unmarshal(body, &progress) == nil && progress.Op == "progress" && progress.Stage == "awaiting-human" {
+			t.Fatalf("timestamp reuse published a human-notification prompt: %s", body)
+		}
 		var ready proto.ForegroundReadyEvent
 		if json.Unmarshal(body, &ready) == nil && ready.Op == "handoff_ready" {
 			if err := ready.Validate(); err != nil {
@@ -163,7 +177,12 @@ func TestApprovalTimestampFirstApprovalThenSlidingHandoffs(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
 		// When successive command processes dispatch from the same login terminal.
-		ready := timestampSubmit(t, h, req)
+		var ready proto.ForegroundReadyEvent
+		if i == 0 {
+			ready = timestampSubmit(t, h, req)
+		} else {
+			ready = timestampSubmitWithoutHumanPrompt(t, h, req)
+		}
 		// Then only the first needed approval, and each handoff slides by the TTL.
 		stamp := awaitTimestamp(t, h, key, previous.ApprovedAt)
 		if approvals.Load() != 1 || stamp.ExpiresAt.Sub(stamp.ApprovedAt) != time.Minute || !stamp.ExpiresAt.After(previous.ExpiresAt) {
