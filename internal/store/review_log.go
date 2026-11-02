@@ -81,7 +81,7 @@ func (store *Store) NoteConsumedDecision(uid uint32, requestID string, decision 
 // RETURNING identifies exactly the changed rows, even if bulk callers reuse a
 // timestamp. No store lookup is allowed after commit: retention may compact it.
 func (store *Store) updateReturningOutcomes(ctx context.Context, tx *sql.Tx, query string, args ...any) (int, []reviewlog.Event, error) {
-	rows, err := tx.QueryContext(ctx, query+` RETURNING uid, request_id, state, approval_json, result_json, updated_at`, args...)
+	rows, err := tx.QueryContext(ctx, query+` RETURNING uid, request_id, state, operation_json, approval_json, result_json, updated_at`, args...)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -91,7 +91,7 @@ func (store *Store) updateReturningOutcomes(ctx context.Context, tx *sql.Tx, que
 	for rows.Next() {
 		var job Job
 		var updated int64
-		if err := rows.Scan(&job.UID, &job.RequestID, &job.State, &job.ApprovalJSON, &job.ResultJSON, &updated); err != nil {
+		if err := rows.Scan(&job.UID, &job.RequestID, &job.State, &job.OperationJSON, &job.ApprovalJSON, &job.ResultJSON, &updated); err != nil {
 			return 0, nil, err
 		}
 		count++
@@ -114,8 +114,20 @@ func (store *Store) updateReturningOutcomes(ctx context.Context, tx *sql.Tx, que
 
 // outcomeForJob derives the journaled outcome from the committed row. consumed
 // is the noted operator decision ("approved", "denied", "request_changes" or empty); it only fills
-// in a decision the durable approval record does not hold.
+// in a decision the durable approval record does not hold. The execution
+// identity comes from the row's operation record, where the broker bound the
+// resolved target at admission; rows without one journal as root exactly as
+// before targets existed.
 func outcomeForJob(job Job, consumed string) reviewlog.Event {
+	var operation struct {
+		TargetUID  uint32 `json:"target_uid"`
+		TargetName string `json:"target_name"`
+	}
+	if len(job.OperationJSON) > 0 {
+		if err := json.Unmarshal(job.OperationJSON, &operation); err != nil {
+			slog.Warn("review log operation decode failed", "request_id", job.RequestID, "error", err)
+		}
+	}
 	var approval struct {
 		Kind     string `json:"kind"`
 		Decision string `json:"decision"`
@@ -171,7 +183,7 @@ func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	if approval.Kind == "none" && (job.State == StateFinished || job.State == StateUnknown || result.Kind == ResultLaunchFailure) {
 		approval.Kind, decision = "human", "approved"
 	}
-	return reviewlog.Event{Version: 1, Event: "outcome", Time: job.UpdatedAt, JobID: job.RequestID, SubmitterUID: job.UID, State: string(job.State), ExitCode: result.ExitCode, ResultKind: string(result.Kind), Signal: result.Signal, ApprovalKind: approval.Kind, Decision: decision}
+	return reviewlog.Event{Version: 1, Event: "outcome", Time: job.UpdatedAt, JobID: job.RequestID, SubmitterUID: job.UID, TargetUID: operation.TargetUID, TargetName: operation.TargetName, State: string(job.State), ExitCode: result.ExitCode, ResultKind: string(result.Kind), Signal: result.Signal, ApprovalKind: approval.Kind, Decision: decision}
 }
 
 // Only committed snapshots cross this boundary. Logging failures cannot roll

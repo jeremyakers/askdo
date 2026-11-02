@@ -108,9 +108,10 @@ func TestTargetUserBundleIsRefusedBeforeApproval(t *testing.T) {
 	request.Files = []proto.BundleFile{{Path: "run.sh", ContentBase64: base64.StdEncoding.EncodeToString([]byte("#!/bin/sh\nid -u\n"))}}
 	// When it is submitted.
 	body := submitAndReadTerminalBytes(t, h.socket, targetedSubmit(t, request, account.Username))
-	// Then it is refused before anything durable, naming the working alternative.
+	// Then it is refused before anything durable, with the same wording the
+	// client uses locally, naming the working alternative.
 	var event proto.ErrorEvent
-	if err := proto.StrictUnmarshal(body, &event); err != nil || event.Code != "invalid_request" || !strings.Contains(event.Message, "root only") || !strings.Contains(event.Message, "-u "+account.Username+" -- bash") {
+	if err := proto.StrictUnmarshal(body, &event); err != nil || event.Code != "invalid_request" || event.Message != proto.TargetUserBundleRefusal(account.Username) {
 		t.Fatalf("response=%s err=%v", body, err)
 	}
 	if _, err := h.daemon.store.GetJob(context.Background(), testUID, request.RequestID); err == nil {

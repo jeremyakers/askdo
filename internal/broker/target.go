@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/user"
@@ -8,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
+
+	"github.com/jeremyakers/askdo/internal/proto"
 )
 
 // ExecutionTarget is the resolved account an approved operation runs as, the
@@ -36,9 +40,25 @@ func (t ExecutionTarget) home() string {
 
 var errUnknownTargetUser = errors.New("unknown user")
 
+// durableOperation is the job row's operation record: the normalized submit
+// request plus, for a non-root target, the resolved identity the job will run
+// as. The store derives every outcome journal entry from the committed row —
+// including restart and expiry sweeps that never see this runtime — so the
+// account is named there rather than guessed later. Root rows keep the
+// pre-target shape exactly.
+func durableOperation(request proto.SubmitRequest, target ExecutionTarget) []byte {
+	operation, _ := json.Marshal(struct {
+		proto.SubmitRequest
+		TargetUID  uint32 `json:"target_uid,omitempty"`
+		TargetName string `json:"target_name,omitempty"`
+	}{SubmitRequest: request, TargetUID: target.UID, TargetName: target.Name})
+	return operation
+}
+
 // lookupTargetAccount resolves a login name or "#UID" (already validated by
-// proto.ValidateTargetUser) in the host account database.
-func lookupTargetAccount(spec string) (*user.User, error) {
+// proto.ValidateTargetUser) in the host account database. It is a variable
+// so tests can present account entries the host database never contains.
+var lookupTargetAccount = func(spec string) (*user.User, error) {
 	if digits, numeric := strings.CutPrefix(spec, "#"); numeric {
 		id, err := strconv.ParseUint(digits, 10, 32)
 		if err != nil {
@@ -78,6 +98,13 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	if err != nil {
 		return ExecutionTarget{}, fmt.Errorf("parse gid of %q: %w", spec, err)
 	}
+	// The name is bound into the manifest, cards, bootstrap, journal and
+	// USER/LOGNAME, which must all show the account's real name faithfully:
+	// bounded, valid UTF-8, with no control or format (bidi, zero-width)
+	// characters that a renderer would strip or misdirect.
+	if !displayableAccountName(account.Username) {
+		return ExecutionTarget{}, fmt.Errorf("account name of %q is not displayable", spec)
+	}
 	ids, err := account.GroupIds()
 	if err != nil {
 		return ExecutionTarget{}, fmt.Errorf("look up groups of %q: %w", spec, err)
@@ -97,10 +124,14 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	if !slices.Contains(groups, uint32(gid)) {
 		groups = append(groups, uint32(gid))
 	}
-	// The name is bound into the manifest, cards, bootstrap and USER/LOGNAME,
-	// all of which require bounded printable text.
-	if account.Username == "" || len(account.Username) > 256 || strings.ContainsFunc(account.Username, unicode.IsControl) {
-		return ExecutionTarget{}, fmt.Errorf("account name of %q is not displayable", spec)
-	}
 	return ExecutionTarget{UID: uint32(uid), GID: uint32(gid), Groups: groups, Name: account.Username, Home: account.HomeDir}, nil
+}
+
+// displayableAccountName reports whether an account name can be bound and
+// shown exactly as the account database spells it.
+func displayableAccountName(name string) bool {
+	if name == "" || len(name) > 256 || !utf8.ValidString(name) {
+		return false
+	}
+	return !strings.ContainsFunc(name, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
 }

@@ -124,6 +124,15 @@ type SubmitRequest struct {
 // MaxTargetUserBytes bounds a sudo-style target user specification.
 const MaxTargetUserBytes = 256
 
+// TargetUserBundleRefusal is the one explanation, shared by the client's
+// local check and the broker's admission check, of why bundle mode cannot
+// run as a non-root target: the staged bundle is root-private, so the
+// approved launch could only fail. target is the account as the caller
+// named it (client) or as resolved (broker).
+func TargetUserBundleRefusal(target string) string {
+	return "target user: bundles and --script run as root only (the staged bundle is root-private); pipe the script to `askdo -u " + target + " -- bash` instead"
+}
+
 // ValidateTargetUser checks a sudo-style target specification: a login name
 // or "#UID" (decimal, fits uint32), NUL-free, made of printable non-space
 // runes (no control or format characters). Resolution against the account
@@ -359,7 +368,8 @@ func (r SubmitRequest) Validate() error {
 		return fmt.Errorf("unsupported protocol version %d", r.ProtocolVersion)
 	}
 	if r.TargetUser != "" {
-		// Legacy v2/v3 wires predate target selection and cannot create jobs.
+		// Legacy v2/v3 submits still create (root) jobs; they predate target
+		// selection, so a target on those wires is refused, never ignored.
 		if r.ProtocolVersion < CanonicalProtocolVersion {
 			return errors.New("target_user requires protocol version 4 or later")
 		}
