@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -101,14 +102,28 @@ func strictObject(raw []byte, dest *map[string]json.RawMessage) error {
 }
 
 type LaunchSpec struct {
-	Argv          []string `json:"argv"`
-	Env           []string `json:"env"`
-	CWD           string   `json:"cwd"`
-	TargetUID     uint32   `json:"target_uid"`
+	Argv      []string `json:"argv"`
+	Env       []string `json:"env"`
+	CWD       string   `json:"cwd"`
+	TargetUID uint32   `json:"target_uid"`
+	// TargetGID and TargetGroups complete a non-root target identity (sudo
+	// -u): the helper drops to them before exec. Both are absent for root.
+	TargetGID     uint32   `json:"target_gid,omitempty"`
+	TargetGroups  []uint32 `json:"target_groups,omitempty"`
 	Foreground    bool     `json:"foreground"`
 	JobID         string   `json:"job_id"`
 	CancelControl bool     `json:"cancel_control,omitempty"`
 }
+
+// launchRequiredFields and launchOptionalFields are the complete key set of a
+// launch spec; anything else is rejected before the typed decode.
+var (
+	launchRequiredFields = []string{"argv", "env", "cwd", "target_uid", "foreground", "job_id"}
+	launchOptionalFields = map[string]bool{"cancel_control": true, "target_gid": true, "target_groups": true}
+)
+
+// maxTargetGroups mirrors the kernel's NGROUPS_MAX.
+const maxTargetGroups = 65536
 
 // SendLaunch sends a single marker carrying exactly one CWD fd, then a
 // length-prefixed launch spec. The broker must own this fd before replying.
@@ -197,11 +212,13 @@ func ReceiveLaunch(c *net.UnixConn) (LaunchSpec, *os.File, error) {
 		fd.Close()
 		return LaunchSpec{}, nil, err
 	}
-	if len(fields) != 6 && (len(fields) != 7 || fields["cancel_control"] == nil) {
-		fd.Close()
-		return LaunchSpec{}, nil, errors.New("unexpected launch fields")
+	for name := range fields {
+		if !slices.Contains(launchRequiredFields, name) && !launchOptionalFields[name] {
+			fd.Close()
+			return LaunchSpec{}, nil, errors.New("unexpected launch fields")
+		}
 	}
-	for _, name := range []string{"argv", "env", "cwd", "target_uid", "foreground", "job_id"} {
+	for _, name := range launchRequiredFields {
 		if fields[name] == nil {
 			fd.Close()
 			return LaunchSpec{}, nil, errors.New("missing launch field")
@@ -222,8 +239,13 @@ func ReceiveLaunch(c *net.UnixConn) (LaunchSpec, *os.File, error) {
 }
 
 func ValidateLaunch(s LaunchSpec, fd *os.File) error {
-	if fd == nil || len(s.Argv) == 0 || len(s.Argv) > 256 || len(s.Env) > 256 || s.TargetUID != 0 || s.JobID == "" || len(s.JobID) > 256 || strings.ContainsRune(s.JobID, 0) {
+	if fd == nil || len(s.Argv) == 0 || len(s.Argv) > 256 || len(s.Env) > 256 || s.JobID == "" || len(s.JobID) > 256 || strings.ContainsRune(s.JobID, 0) {
 		return errors.New("invalid launch spec")
+	}
+	// A root target is exactly the pre-target launch: no gid or group list may
+	// ride along. A non-root target carries a bounded group list.
+	if (s.TargetUID == 0 && (s.TargetGID != 0 || len(s.TargetGroups) != 0)) || len(s.TargetGroups) > maxTargetGroups {
+		return errors.New("invalid launch target")
 	}
 	if !strings.HasPrefix(s.Argv[0], "/") || strings.Contains(s.Argv[0], "/../") || strings.Contains(s.Argv[0], "/./") || strings.HasSuffix(s.Argv[0], "/..") || strings.HasSuffix(s.Argv[0], "/.") {
 		return errors.New("invalid executable path")

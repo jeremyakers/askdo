@@ -108,7 +108,11 @@ func launch(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobCont
 	cmd.Env = append([]string{}, spec.Env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = terminal, terminal, terminal
 	cmd.ExtraFiles = []*os.File{dir}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Foreground: true, Ctty: tty}
+	// A non-root target is installed in the forked child after it has taken
+	// the terminal foreground and before chdir/exec: setgroups(2), setgid(2),
+	// then setuid(2), each checked, so a failed drop aborts the child and no
+	// command runs. Root (the pre-target launch) keeps the helper's identity.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Foreground: true, Ctty: tty, Credential: targetCredential(spec)}
 	if err := cmd.Start(); err != nil {
 		return Completion{}, errors.Join(fmt.Errorf("launch %q: %w", spec.Argv[0], err), setForeground(tty, group))
 	}
@@ -254,6 +258,15 @@ func launch(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobCont
 			return Completion{}, fmt.Errorf("resume child: %w", err)
 		}
 	}
+}
+
+// targetCredential is nil for root; otherwise the complete frozen identity
+// (uid, primary gid, explicit supplementary groups) for the child drop.
+func targetCredential(spec LaunchSpec) *syscall.Credential {
+	if spec.TargetUID == 0 {
+		return nil
+	}
+	return &syscall.Credential{Uid: spec.TargetUID, Gid: spec.TargetGID, Groups: append([]uint32(nil), spec.TargetGroups...)}
 }
 
 // Blocking SIGTTOU on this locked OS thread allows tcsetpgrp while the

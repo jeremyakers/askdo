@@ -38,7 +38,7 @@ func renderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 	d, b := ticket.Display, ticket.Binding
 	out := FleetRendering{}
 	if d.Report == nil {
-		in := ApprovalOnlyInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, Expiry: time.Unix(b.ExpiresAt, 0), Failures: d.AvailabilityHistory}
+		in := ApprovalOnlyInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, TargetUID: d.Identity.TargetUID, TargetName: d.Identity.TargetUser, Expiry: time.Unix(b.ExpiresAt, 0), Failures: d.AvailabilityHistory}
 		in.CapturedStdinKind = d.CapturedStdinKind
 		in.WithheldCount = fleetWithheldCount(d.Withholding)
 		var err error
@@ -73,7 +73,7 @@ func renderFleet(ticket fleetproto.Ticket) (FleetRendering, error) {
 			model = h.Name
 		}
 	}
-	in := CardInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, Report: *d.Report, ReviewerModel: model, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, Expiry: time.Unix(b.ExpiresAt, 0)}
+	in := CardInput{Host: d.Identity.Hostname, JobID: string(b.JobID), Operation: d.Operation, Reason: d.Reason, CWD: d.CWD, CapturedStdinBytes: d.CapturedStdinBytes, Report: *d.Report, ReviewerModel: model, SubmitterName: d.Identity.Username, SubmitterUID: d.Identity.SubmitterUID, TargetUID: d.Identity.TargetUID, TargetName: d.Identity.TargetUser, Expiry: time.Unix(b.ExpiresAt, 0)}
 	in.CapturedStdinKind = d.CapturedStdinKind
 	in.WithheldCount = fleetWithheldCount(d.Withholding)
 	// Withholding is display text rather than path references; escape all facts

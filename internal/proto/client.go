@@ -9,7 +9,9 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jeremyakers/askdo/internal/jobid"
@@ -110,6 +112,43 @@ type SubmitRequest struct {
 	// foreground and forbidden otherwise. It is a hint for the terminal
 	// hand-off, never an authenticated attribute.
 	TerminalType string `json:"terminal_type,omitempty"`
+	// TargetUser optionally names the account the approved command runs as,
+	// like sudo -u: a login name or "#UID". Absent means root and keeps the
+	// wire identical to earlier clients. The broker resolves it on the
+	// execution host before anything durable exists and binds the result into
+	// the approval manifest; an older broker's strict decoder rejects the
+	// field instead of silently running the command as root.
+	TargetUser string `json:"target_user,omitempty"`
+}
+
+// MaxTargetUserBytes bounds a sudo-style target user specification.
+const MaxTargetUserBytes = 256
+
+// ValidateTargetUser checks a sudo-style target specification: a login name
+// or "#UID" (decimal, fits uint32), NUL-free, made of printable non-space
+// runes (no control or format characters). Resolution against the account
+// database is the broker's job.
+func ValidateTargetUser(spec string) error {
+	if spec == "" {
+		return nil
+	}
+	if len(spec) > MaxTargetUserBytes || !utf8.ValidString(spec) {
+		return errors.New("target user must be valid UTF-8 of at most 256 bytes")
+	}
+	for _, r := range spec {
+		if unicode.IsSpace(r) || !unicode.IsPrint(r) {
+			return errors.New("target user must not contain whitespace, control or format characters")
+		}
+	}
+	if digits, numeric := strings.CutPrefix(spec, "#"); numeric {
+		if digits == "" || strings.Trim(digits, "0123456789") != "" {
+			return errors.New("numeric target user must be #UID with decimal digits only")
+		}
+		if _, err := strconv.ParseUint(digits, 10, 32); err != nil {
+			return errors.New("numeric target user must fit a 32-bit UID")
+		}
+	}
+	return nil
 }
 
 // BundleFile is one client-captured bundle file.
@@ -318,6 +357,15 @@ func (r SubmitRequest) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported protocol version %d", r.ProtocolVersion)
+	}
+	if r.TargetUser != "" {
+		// Legacy v2/v3 wires predate target selection and cannot create jobs.
+		if r.ProtocolVersion < CanonicalProtocolVersion {
+			return errors.New("target_user requires protocol version 4 or later")
+		}
+		if err := ValidateTargetUser(r.TargetUser); err != nil {
+			return fmt.Errorf("invalid target_user: %w", err)
+		}
 	}
 	if r.ProtocolVersion == CapturedStdinProtocolVersion || (r.ProtocolVersion == FeedbackProtocolVersion && (r.CapturedStdinBase64 != "" || r.capturedStdinPresent)) {
 		if r.Mode != "argv" || r.Lifecycle != LifecycleDetached || r.CapturedStdinBase64 == "" {

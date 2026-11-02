@@ -154,6 +154,10 @@ func display(d Display) error {
 	if !text(d.Operation, 16384, true) || !text(d.Identity.Hostname, 256, true) || !text(d.Identity.Username, 256, true) || d.SummaryParts < 0 || d.SummaryParts > 64 || d.Withholding == nil || len(d.Withholding) > 64 || d.ModelHistory == nil || len(d.ModelHistory) > MaxProfiles || !text(d.UnreviewedReason, 4096, false) {
 		return ErrProtocol
 	}
+	// A non-root target is always named; root never is.
+	if !text(d.Identity.TargetUser, 256, false) || (d.Identity.TargetUID == 0) != (d.Identity.TargetUser == "") {
+		return ErrProtocol
+	}
 	for _, s := range d.Withholding {
 		if !text(s, 4096, true) {
 			return ErrProtocol

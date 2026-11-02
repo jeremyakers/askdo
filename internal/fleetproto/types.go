@@ -120,6 +120,12 @@ type Identity struct {
 	Hostname     string `json:"hostname"`
 	Username     string `json:"username"`
 	SubmitterUID uint32 `json:"submitter_uid"`
+	// TargetUID and TargetUser name the account the command runs as (sudo
+	// -u). Both are present for a non-root target and absent for root, which
+	// keeps legacy display hashes unchanged and makes an older gateway reject
+	// rather than misrender a non-root ticket.
+	TargetUID  uint32 `json:"target_uid,omitempty"`
+	TargetUser string `json:"target_user,omitempty"`
 }
 type Display struct {
 	CapturedStdinKind proto.DeliveryKind `json:"captured_stdin_kind,omitempty"`

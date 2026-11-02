@@ -50,6 +50,7 @@ type jobRuntime struct {
 	executionContainer string
 	cwd                *cwdBinding
 	resolvedArgv       []string
+	target             ExecutionTarget                 // resolved at admission; zero value is root
 	foreground         *foregroundPeer                 // immutable after queue submission
 	handoffReady       chan proto.ForegroundReadyEvent // original submit follower only
 	handoffHash        [32]byte
@@ -1572,19 +1573,19 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	}
 	// Project the actual fixed launch variables, never the private bundle
 	// staging path or any future sensitive execution variable.
-	executionEnvironment := make([]string, 0, 4)
+	executionEnvironment := make([]string, 0, 6)
 	for _, entry := range j.operation().Env {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 		switch name {
-		case "PATH", "HOME", "LANG", "PWD":
+		case "PATH", "HOME", "LANG", "PWD", "USER", "LOGNAME":
 			executionEnvironment = append(executionEnvironment, entry)
 		}
 	}
 	return proto.Bootstrap{
-		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: 0, RequestID: j.req.RequestID,
+		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: j.target.UID, TargetName: j.target.Name, RequestID: j.req.RequestID,
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
@@ -1600,7 +1601,9 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 // operation builds the frozen privileged invocation. The environment is
 // explicit and complete — the executor installs it verbatim and never
 // inherits the daemon's or the caller's environment (no SSH_AUTH_SOCK,
-// BASH_ENV, PYTHONPATH, LD_PRELOAD or credentials).
+// BASH_ENV, PYTHONPATH, LD_PRELOAD or credentials). A non-root target (sudo
+// -u) keeps the same allowlist with HOME set to the account's home directory
+// and USER/LOGNAME naming it; the root launch is unchanged.
 //
 // Both modes run with the submitter's invocation directory as cwd — bound at
 // submission via a held directory descriptor and enforced by the executor's
@@ -1617,7 +1620,10 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 func (j *jobRuntime) operation() Operation {
 	argv := append([]string(nil), j.req.Argv...)
 	cwd := j.req.CWD
-	env := []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PWD=" + cwd}
+	env := []string{"PATH=/usr/bin:/bin", "HOME=" + j.target.home(), "LANG=C.UTF-8", "PWD=" + cwd}
+	if !j.target.root() {
+		env = append(env, "USER="+j.target.Name, "LOGNAME="+j.target.Name)
+	}
 	if j.req.Lifecycle == proto.LifecycleForeground {
 		env = append(env, "TERM="+j.req.TerminalType)
 	}
@@ -1629,7 +1635,9 @@ func (j *jobRuntime) operation() Operation {
 		argv = append([]string{"/bin/bash", "--noprofile", "--norc", entry}, j.req.Args...)
 		env = append(env, "ASKDO_BUNDLE="+j.spool.bundle)
 	}
-	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd}
+	target := j.target
+	target.Groups = append([]uint32(nil), j.target.Groups...)
+	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd, Target: target}
 }
 
 func decodeStoredResult(job store.Job) store.Result {

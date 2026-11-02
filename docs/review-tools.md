@@ -35,9 +35,11 @@ from which **no model report exists** is never labeled reviewed.
 
 The model-visible operation description includes `mode`, `argv` (argv mode) or
 `entry` plus `args` (bundle mode), the caller's exact `cwd` and `reason`, and
-broker-known execution facts: `target_uid`, `submitter_uid`, submitter name,
+broker-known execution facts: `target_uid` (plus `target_user` for a
+`-u` account), `submitter_uid`, submitter name,
 host, observed container, and the fixed non-secret `PATH`, `HOME`, `LANG`, and
-`PWD` variables (`internal/reviewer/loop.go`). The broker-private bundle
+`PWD` variables, with `USER` and `LOGNAME` for a non-root target
+(`internal/reviewer/loop.go`). The broker-private bundle
 staging path and staged bundle hashes are **never** shown to the model. For
 a captured-stdin job (`protocol_version` 5) the description also carries the
 captured-input metadata `captured_stdin` — path `stdin`, size in bytes, and

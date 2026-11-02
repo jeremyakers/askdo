@@ -126,7 +126,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	flags := flag.NewFlagSet("askdo", flag.ContinueOnError)
 	flags.SetOutput(options.Stderr)
 	var timeout time.Duration
-	var reason, bundle, entry, script string
+	var reason, bundle, entry, script, targetUser string
 	var sensitive stringList
 	var review forceReviewFlag
 	var detach bool
@@ -134,6 +134,24 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	flags.DurationVar(&timeout, "timeout", 0, "maximum time to wait")
 	flags.StringVar(&reason, "reason", "privileged command", "reason for privileged operation")
 	flags.BoolVar(&detach, "detach", false, "run detached without a terminal")
+	// Like sudo -u: one target, given as a login name or #UID, resolved and
+	// bound by the broker. Both spellings set the same value; a second,
+	// different value is a usage error rather than a silent override.
+	setTargetUser := func(value string) error {
+		if err := proto.ValidateTargetUser(value); err != nil {
+			return err
+		}
+		if value == "" {
+			return errors.New("-u/--user requires a user name or #UID")
+		}
+		if targetUser != "" && targetUser != value {
+			return errors.New("-u/--user given twice with different users")
+		}
+		targetUser = value
+		return nil
+	}
+	flags.Func("u", "run COMMAND as `USER` (login name or #UID) instead of root", setTargetUser)
+	flags.Func("user", "same as -u", setTargetUser)
 	flags.StringVar(&bundle, "bundle", "", "bundle directory")
 	flags.StringVar(&entry, "entry", "", "bundle entry point")
 	flags.Func("script", "capture one Bash script as a bundle; remaining arguments go to the script", func(path string) error {
@@ -200,7 +218,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	if len(captured) > 0 && script != "" {
 		return usageError(options, "askdo: captured stdin cannot be combined with --script")
 	}
-	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review)}
+	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review), TargetUser: targetUser}
 	if bundle == "" && script == "" {
 		if entry != "" || len(rest) == 0 {
 			fmt.Fprintln(options.Stderr, "argv mode requires a command (use -- before command flags)")

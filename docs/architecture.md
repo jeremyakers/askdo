@@ -222,6 +222,7 @@ from trusting the worker or the network peer. See
    approved original-TTY foreground: client ──sudo -n (narrow rule)──▶ askdo-launch
                            helper ──root-only launch.sock, one-use grant──▶ BROKER
   approved detached: BROKER ──SystemExecutor──▶ root process (no TTY)
+                                                (or the -u target account)
 ```
 
 - The submitting agent and everything it sends (argv, bundle bytes, reasons)
@@ -242,7 +243,8 @@ from trusting the worker or the network peer. See
 - The broker trusts: the host, the installed binary, the configuration, the
   reviewer code, and the operator's Telegram account.
 - askdo is an approval gate, not confinement: an approved program runs
-  as root and can make persistent changes to the host.
+  as root — or, with `-u USER` (`sudo -u` style), as that resolved host
+  account — and can make persistent changes to the host.
 
 ## Job state machine
 
@@ -395,6 +397,30 @@ One pass through the pipeline per job (`internal/broker/job.go`):
     environment, and inherits the verified original human TTY through
     `askdo-launch`; it is not captured into the daemon's detached
     stdout/stderr spool.
+
+**Execution identity.** Every job runs as root unless the submit carried
+`target_user` (CLI `-u USER`/`--user USER`, a login name or `#UID`, like
+`sudo -u`). The broker resolves that specification against the execution
+host's account database at admission, before the reservation becomes a job:
+an unknown account is a submission error with no spool, no job and no
+approval; `root`/`#0` is the plain root launch; bundle mode with a non-root
+target is refused at the same point because the staged bundle is
+root-private (captured stdin is the supported way to run a script as the
+target). The resolved uid, primary gid,
+supplementary groups, name and home directory are fixed for the job and bound
+into the frozen manifest (`target_uid`, `target_user` and the launch
+environment), the reviewer bootstrap (`target_uid`, `target_name`), the review
+journal and every approval card (`submitter → tyme (uid 1001)`; fleet tickets
+carry the same identity so a gateway approver sees it too). A non-root target
+keeps the same environment allowlist with `HOME` set to the account's home and
+`USER`/`LOGNAME` naming it. The detached executor installs the identity in the
+forked child before chdir/exec — setgroups(2), setgid(2), setuid(2) in that
+order, each checked, so a failed drop is a launch failure and nothing runs —
+and `askdo-launch` does the same after taking the terminal foreground. The
+submitter's bound cwd is reached through the held descriptor; if the target
+cannot search it the launch fails rather than running somewhere else.
+Timestamp reuse, forced review, auto-approval policy and the self-upgrade
+bootstrap (always root) are unchanged.
 
 The client obtains `cwd` from its current working directory. Both argv and
 bundle operations execute there; the broker holds and rechecks the submitted

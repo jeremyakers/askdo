@@ -35,7 +35,8 @@ retains all history; `--job` limits retention to that ID.
 Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
 
 * `review`: emitted once after the AI approval manifest successfully freezes.
-  Contains host, submitter UID/name, target UID, mode, approval-display `argv`
+  Contains host, submitter UID/name, target UID (plus `target_name` for a
+  `-u` account; the compact view then shows `target="tyme"(1001)`), mode, approval-display `argv`
   (or bundle `entry` plus `args`), cwd, reason, captured-file path/size/SHA-256/
   masked metadata, model names/outcomes, successful model, the structured report
   (risk, summary, effects, warnings, missing context, optional suggestions, reversibility, intent

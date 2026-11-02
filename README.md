@@ -186,6 +186,20 @@ exempt:
 askdo --review=yes --reason 'Review the service restart' -- /usr/bin/systemctl restart nginx
 ```
 
+Run a command as another account instead of root, like `sudo -u` (a login
+name or `#UID` that exists on this host; the approval card shows
+`you → tyme (uid 1001)` and the command gets that account's groups, `HOME`,
+`USER` and `LOGNAME`):
+
+```sh
+askdo -u tyme --reason 'Rebuild the site as its owner' -- make -C /srv/site
+askdo --user '#1001' --reason 'Check the service account' -- /usr/bin/id
+askdo -u tyme --reason 'Run this script as tyme' -- bash < maintenance.sh
+```
+
+`--bundle` and `--script` always run as root (their staged copy is
+root-private); pipe a script through stdin as above to run it as another user.
+
 Check a job or reconnect to its output:
 
 ```sh
