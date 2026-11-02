@@ -67,9 +67,16 @@ func TestTopLevelHelpRoutesWithoutIO(t *testing.T) {
 		if code != 0 || calls != 0 {
 			t.Fatalf("%s: code=%d clientCalls=%d", arg, code, calls)
 		}
-		for _, want := range []string{"-u USER", "--user USER", "#UID", "--reason", "--timeout", "--detach", "--script PATH", "--", "auth login|status|logout", "config check", "gateway", "askdo auth --help"} {
+		for _, want := range []string{"-u USER", "--user USER", "#UID", "askdo -u tyme -- npm start", "askdo -u '#1001' -- id -u", "--reason", "--timeout", "--detach", "--script PATH", "--", "auth login|status|logout", "config check", "gateway", "askdo auth --help"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%s: help missing %q", arg, want)
+			}
+		}
+		// Bundle and script submissions run as root only, so their synopsis
+		// lines must not advertise a target the broker refuses.
+		for _, line := range strings.Split(out, "\n") {
+			if (strings.Contains(line, "--bundle DIR") || strings.Contains(line, "--script PATH")) && strings.Contains(line, "-u USER") {
+				t.Fatalf("%s: root-only synopsis advertises -u: %q", arg, line)
 			}
 		}
 	}

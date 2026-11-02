@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,10 +15,13 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/client"
+	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/faketelegram"
+	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/foreground"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
+	"github.com/jeremyakers/askdo/internal/telegram"
 )
 
 // isRootTarget reports the zero value: the pre-target root launch.
@@ -337,6 +341,116 @@ func TestTargetUserForegroundHandoffCarriesIdentity(t *testing.T) {
 	}
 	if len(h.executor.Snapshot()) != 0 {
 		t.Fatal("foreground used the broker executor")
+	}
+}
+
+func TestTargetUserOutcomeRecordNamesTarget(t *testing.T) {
+	account := nonRootTestAccount(t)
+	h := newBrokerHarness(t, nil, nil)
+	// Given one approved job for the target account and one for root.
+	for _, args := range [][]string{{"--detach", "-u", account.Username, "--reason", "target outcome", "--", "/usr/bin/true"}, {"--detach", "--reason", "root outcome", "--", "/usr/bin/true"}} {
+		var stdout, stderr bytes.Buffer
+		if code := client.Run(context.Background(), args, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)}); code != 0 {
+			t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+		}
+	}
+	// When their outcomes are journaled.
+	var targeted, root map[string]json.RawMessage
+	for _, r := range readReviewRecords(t, h) {
+		if string(r["event"]) != `"outcome"` {
+			continue
+		}
+		if r["target_uid"] != nil && string(r["target_uid"]) != "0" {
+			targeted = r
+		} else {
+			root = r
+		}
+	}
+	// Then the targeted outcome names the resolved account and the root
+	// outcome keeps the pre-target shape.
+	if targeted == nil || string(targeted["target_uid"]) != account.Uid || string(targeted["target_name"]) != strconv.Quote(account.Username) || string(targeted["state"]) != `"finished"` {
+		t.Fatalf("targeted outcome=%s", mustJSON(t, targeted))
+	}
+	if root == nil || string(root["target_uid"]) != "0" || root["target_name"] != nil || string(root["state"]) != `"finished"` {
+		t.Fatalf("root outcome=%s", mustJSON(t, root))
+	}
+}
+
+func TestTargetUserFleetTicketBindsTarget(t *testing.T) {
+	account := nonRootTestAccount(t)
+	target, err := resolveExecutionTarget(account.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freeze := func(t *testing.T, target ExecutionTarget) (fleetproto.Ticket, *fleetManifest) {
+		t.Helper()
+		j, _ := rootFleetReceiptFixture()
+		db, err := store.Open(filepath.Join(t.TempDir(), "jobs.sqlite3"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		j.daemon.store = db
+		j.fleet.ticket = fleetproto.Ticket{}
+		j.route.ApprovalTTL = config.Duration(time.Minute)
+		j.executionHost, j.submitterName = "fixture", "requester"
+		j.req.Mode, j.req.Argv, j.resolvedArgv = "argv", []string{"id"}, []string{"/usr/bin/id", "-u"}
+		j.target = target
+		manifest, err := j.freezeFleet(nil, nil, "administrator skipped review", nil, nil, captureIndex{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j.fleet.ticket, manifest
+	}
+	// Given the ticket the broker freezes for the target and for root.
+	ticket, manifest := freeze(t, target)
+	rootTicket, rootManifest := freeze(t, ExecutionTarget{})
+	// Then the fleet approver's identity names the target and the root ticket
+	// carries no target at all.
+	identity := ticket.Display.Identity
+	if strconv.FormatUint(uint64(identity.TargetUID), 10) != account.Uid || identity.TargetUser != account.Username {
+		t.Fatalf("ticket identity=%+v", identity)
+	}
+	if rootTicket.Display.Identity.TargetUID != 0 || rootTicket.Display.Identity.TargetUser != "" {
+		t.Fatalf("root ticket identity=%+v", rootTicket.Display.Identity)
+	}
+	// And the display hash the manifest binds covers the target.
+	hash, err := fleetproto.HashDisplay(ticket.Display)
+	if err != nil || hash != manifest.DisplayHash || hash != ticket.Binding.DisplayHash {
+		t.Fatalf("display hash %s manifest %s ticket %s (%v)", hash, manifest.DisplayHash, ticket.Binding.DisplayHash, err)
+	}
+	if manifest.DisplayHash == rootManifest.DisplayHash {
+		t.Fatal("display hash ignores the execution target")
+	}
+	rendered, err := telegram.RenderFleet(ticket)
+	if err != nil || !strings.Contains(rendered.Final, "requester → "+account.Username+" (uid "+account.Uid+")") {
+		t.Fatalf("fleet card: %s (%v)", rendered.Final, err)
+	}
+}
+
+func TestResolveExecutionTargetRefusesUndisplayableAccountNames(t *testing.T) {
+	// Given account-database entries whose names cannot be shown faithfully.
+	for name, username := range map[string]string{
+		"bidi-override": "ty\u202eme",
+		"zero-width":    "ty\u200bme",
+		"invalid-utf8":  "ty\xffme",
+		"control":       "ty\x01me",
+		"empty":         "",
+		"oversize":      strings.Repeat("a", 257),
+	} {
+		t.Run(name, func(t *testing.T) {
+			old := lookupTargetAccount
+			t.Cleanup(func() { lookupTargetAccount = old })
+			lookupTargetAccount = func(string) (*user.User, error) {
+				return &user.User{Uid: "1001", Gid: "1001", Username: username, HomeDir: "/home/x"}, nil
+			}
+			// When the target resolves.
+			_, err := resolveExecutionTarget("x")
+			// Then it is refused before any group lookup, naming the reason.
+			if err == nil || !strings.Contains(err.Error(), "not displayable") {
+				t.Fatalf("%q resolved: %v", username, err)
+			}
+		})
 	}
 }
 

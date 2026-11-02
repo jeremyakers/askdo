@@ -18,8 +18,8 @@ func isHelpWord(arg string) bool {
 
 func writeTopHelp(w io.Writer) {
 	fmt.Fprint(w, `usage: askdo [-u USER] [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] -- COMMAND [ARG...]
-       askdo [-u USER] [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
-       askdo [-u USER] [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
+       askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
+       askdo [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
        askdo status|attach JOB_ID
        askdo cancel --handle-file PATH [--force]
        askdo cancel JOB_ID                 legacy jobs, before dispatch only
@@ -35,6 +35,12 @@ resolves it before the request is recorded, the approval card shows
 "submitter → USER (uid N)", and the command gets that account's uid, groups,
 HOME, USER and LOGNAME. Omit -u to run as root. --bundle and --script run as
 root only; to run a script as USER, pipe it: askdo -u USER -- bash < script.
+
+  askdo -u tyme -- npm start                  run as the tyme account
+  askdo -u '#1001' -- id -u                   by numeric uid; quote #UID so
+                                              the shell does not read # as
+                                              a comment
+  askdo -u tyme --reason 'Rebuild' -- make    with the usual flags before --
 
 Upgrade requires human approval and needs no sudo. Without --release, it selects
 the newest stable release, or a prerelease if none exists. --operation resumes

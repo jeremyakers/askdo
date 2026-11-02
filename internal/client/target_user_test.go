@@ -106,6 +106,37 @@ func TestTargetUserAbsentKeepsWireIdentical(t *testing.T) {
 	}
 }
 
+func TestTargetUserRefusesBundleAndScriptLocally(t *testing.T) {
+	// Given a bundle directory and a script that must never be read for a
+	// non-root target, and no broker socket at all.
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "bundle")
+	if err := os.MkdirAll(bundle, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"run.sh", "script.sh"} {
+		if err := os.WriteFile(filepath.Join(bundle, name), []byte("#!/bin/sh\nid -u\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, args := range map[string][]string{
+		"bundle": {"-u", "tyme", "--bundle", bundle, "--entry", "run.sh"},
+		"script": {"--user", "#1001", "--script", filepath.Join(bundle, "script.sh")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			// When the CLI parses the combination.
+			code := Run(context.Background(), append([]string{"--detach", "--reason", "x"}, args...), Options{SocketPath: filepath.Join(dir, "absent.sock"), Stdout: &bytes.Buffer{}, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+			// Then it is refused with the broker's wording before any capture
+			// or reservation, naming the captured-stdin alternative.
+			want := proto.TargetUserBundleRefusal(args[1])
+			if code != 125 || !strings.Contains(stderr.String(), want) || strings.Contains(stderr.String(), "JOB_ID=") || strings.Contains(stderr.String(), "no such file") {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+		})
+	}
+}
+
 func TestTargetUserInvalidValuesFailBeforeReservation(t *testing.T) {
 	for name, args := range map[string][]string{
 		"empty":        {"-u", "", "--", "/usr/bin/id"},

@@ -863,7 +863,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	// launch would always fail opening its entry. Refuse before approval
 	// instead; captured stdin reaches the target as an inherited descriptor.
 	if !target.root() && request.Mode == "bundle" {
-		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: bundles and --script run as root only (the staged bundle is root-private); pipe the script to `askdo -u " + target.Name + " -- bash` instead"})
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: proto.TargetUserBundleRefusal(target.Name)})
 		return
 	}
 	identity := resolveSubmitterIdentity(uid)
@@ -951,7 +951,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: err.Error()})
 		return
 	}
-	operation, _ := json.Marshal(request)
+	operation := durableOperation(request, target)
 	var deadline *time.Time
 	if request.WaitTimeoutMS != nil {
 		value := time.Now().UTC().Add(time.Duration(*request.WaitTimeoutMS) * time.Millisecond)
