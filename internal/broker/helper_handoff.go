@@ -211,7 +211,7 @@ func (d *daemon) handleHelper(conn *net.UnixConn) {
 		return
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(frameDeadline))
-	if err := foreground.SendLaunch(conn, foreground.LaunchSpec{Argv: op.Argv, Env: op.Env, CWD: op.CWD, TargetUID: 0, Foreground: true, JobID: j.req.RequestID, CancelControl: claim.CancelControl}, []int{int(fd.Fd())}); err != nil {
+	if err := foreground.SendLaunch(conn, foreground.LaunchSpec{Argv: op.Argv, Env: op.Env, CWD: op.CWD, TargetUID: op.Target.UID, TargetGID: op.Target.GID, TargetGroups: op.Target.Groups, Foreground: true, JobID: j.req.RequestID, CancelControl: claim.CancelControl}, []int{int(fd.Fd())}); err != nil {
 		return
 	}
 	_ = conn.SetWriteDeadline(time.Time{})

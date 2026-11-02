@@ -850,6 +850,22 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "draining", Message: "new work is paused for upgrade"})
 		return
 	}
+	// Resolve the sudo-style target on this host before anything durable
+	// exists: an unknown account is a clear submission error with no spool, no
+	// job and no execution, and the resolved identity is fixed for the job.
+	target, err := resolveExecutionTarget(request.TargetUser)
+	if err != nil {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
+		return
+	}
+	// Bundles (--bundle, --script) are staged in the root-private spool
+	// (0700 root), which a non-root target cannot traverse: the approved
+	// launch would always fail opening its entry. Refuse before approval
+	// instead; captured stdin reaches the target as an inherited descriptor.
+	if !target.root() && request.Mode == "bundle" {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: bundles and --script run as root only (the staged bundle is root-private); pipe the script to `askdo -u " + target.Name + " -- bash` instead"})
+		return
+	}
 	identity := resolveSubmitterIdentity(uid)
 	var foreground *foregroundPeer
 	if request.Lifecycle == proto.LifecycleForeground {
@@ -958,6 +974,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	job := newJobRuntime(d, uid, request, spool, identity, cwd, resolveSubmitterName(uid))
+	job.target = target
 	if d.reloadConfig {
 		job.cfg, job.policy, job.fleetClient = cfg, policy, fleet
 		job.route = cfg.Telegram.RouteForUID(uid)

@@ -29,6 +29,7 @@ type Event struct {
 	SubmitterUID        uint32                      `json:"submitter_uid"`
 	SubmitterName       string                      `json:"submitter_name,omitempty"`
 	TargetUID           uint32                      `json:"target_uid"`
+	TargetName          string                      `json:"target_name,omitempty"`
 	Mode                string                      `json:"mode,omitempty"`
 	Argv                []string                    `json:"argv,omitempty"`
 	Entry               string                      `json:"entry,omitempty"`

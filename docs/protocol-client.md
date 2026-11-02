@@ -135,6 +135,36 @@ fields or secrets. No optional cancellation feature gates daemon startup.
 | `sensitive_inclusions` | string array | optional; see below |
 | `lifecycle` | string | required in v4–v6: `"foreground"` or `"detached"` |
 | `terminal_type` | string | required only for foreground; validated TERM token (1–128 ASCII-safe bytes), forbidden for detached. Hint only, not authenticated identity |
+| `target_user` | string | optional (v4–v6); CLI `-u USER` / `--user USER`. A login name or `#UID` (decimal, fits uint32), at most 256 bytes of printable non-space UTF-8. Absent means root and the wire is byte-identical to a pre-target client. See below |
+
+**Target user (`-u`, like `sudo -u`).** `askdo -u tyme ls -l` and
+`askdo --user tyme -- ls` submit `"target_user":"tyme"`. The broker resolves
+the name or `#UID` against the execution host's account database **before
+anything durable exists**: an unknown account (including a `#UID` with no
+account entry) fails the submit with
+`{"op":"error","code":"invalid_request","message":"target user: unknown user \"tyme\""}`,
+creating no job, spool or approval. `root` and `#0` are the unchanged root
+launch. Bundle mode (`--bundle`, `--script`) with a non-root target is refused
+the same way (`target user: bundles and --script run as root only …`): the
+staged bundle lives in the root-private spool, so the approved launch could
+only fail; captured stdin (`askdo -u tyme -- bash < script`) reaches the
+target as an inherited descriptor and is the supported form. The resolved
+uid, primary gid, supplementary groups, name and home
+directory are fixed for the job: the manifest binds `target_uid` and
+`target_user` (so the digest changes with the target), the reviewer bootstrap
+carries `target_uid`/`target_name`, the review journal records both, and every
+Telegram card shows `submitter → tyme (uid 1001)` instead of `→ root`. A
+non-root target runs with the same explicit environment allowlist plus
+`HOME=<target home>`, `USER` and `LOGNAME`; detached launches install the
+credential in the forked child (setgroups, setgid, setuid, each checked) and
+foreground launches have `askdo-launch` do the same before exec. The
+submitter's bound cwd is used as for root; if the target cannot search it the
+launch fails rather than running elsewhere. Approval-timestamp reuse, forced
+review, auto-approval policy and fleet tickets are unchanged; a fleet ticket's
+display identity carries `target_uid`/`target_user` so a gateway approver sees
+the same line. An older broker's strict decoder rejects the field (the CLI
+reports the error and runs nothing), an older gateway rejects a targeted ticket,
+and the self-upgrade bootstrap never sends it.
 
 The CLI chooses foreground when the caller has a controlling `/dev/tty`,
 and detached automatically when it does not (for example a sandboxed
@@ -164,6 +194,15 @@ chooses to read it through its path tools during review.
   "reason":"Install jq for this task","mode":"argv",
    "cwd":"/work/project",
   "argv":["/usr/bin/apt-get","install","-y","jq"]}
+```
+
+The same request for `askdo --detach -u tyme --reason 'List as tyme' -- ls -l`
+adds only `"target_user":"tyme"`:
+
+```json
+{"op":"submit","protocol_version":6,"lifecycle":"detached","request_id":"2026-09-27_#4",
+  "reason":"List as tyme","mode":"argv","cwd":"/work/project",
+  "argv":["ls","-l"],"target_user":"tyme"}
 ```
 
 For a forced review without a controlling TTY, the CLI form is

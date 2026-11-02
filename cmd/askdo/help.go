@@ -17,9 +17,9 @@ func isHelpWord(arg string) bool {
 }
 
 func writeTopHelp(w io.Writer) {
-	fmt.Fprint(w, `usage: askdo [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] -- COMMAND [ARG...]
-       askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
-       askdo [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
+	fmt.Fprint(w, `usage: askdo [-u USER] [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] -- COMMAND [ARG...]
+       askdo [-u USER] [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
+       askdo [-u USER] [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
        askdo status|attach JOB_ID
        askdo cancel --handle-file PATH [--force]
        askdo cancel JOB_ID                 legacy jobs, before dispatch only
@@ -28,6 +28,13 @@ func writeTopHelp(w io.Writer) {
 
 Run COMMAND with privilege after approval. Put -- before COMMAND so its own
 flags are passed to it unchanged.
+
+-u USER (or --user USER) runs COMMAND as that account instead of root, like
+sudo -u: a login name or #UID that must exist on this host. The broker
+resolves it before the request is recorded, the approval card shows
+"submitter → USER (uid N)", and the command gets that account's uid, groups,
+HOME, USER and LOGNAME. Omit -u to run as root. --bundle and --script run as
+root only; to run a script as USER, pipe it: askdo -u USER -- bash < script.
 
 Upgrade requires human approval and needs no sudo. Without --release, it selects
 the newest stable release, or a prerelease if none exists. --operation resumes

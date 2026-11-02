@@ -185,7 +185,11 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 			for i, arg := range command {
 				quoted[i] = fmt.Sprintf("%q", arg)
 			}
-			fmt.Fprintf(out, " host=%q submitter=%q(%d) risk=%q command=%s", r.Host, r.SubmitterName, r.SubmitterUID, risk, strings.Join(quoted, " "))
+			fmt.Fprintf(out, " host=%q submitter=%q(%d)", r.Host, r.SubmitterName, r.SubmitterUID)
+			if r.TargetUID != 0 {
+				fmt.Fprintf(out, " target=%q(%d)", r.TargetName, r.TargetUID)
+			}
+			fmt.Fprintf(out, " risk=%q command=%s", risk, strings.Join(quoted, " "))
 		}
 		if o := j.outcome; o != nil {
 			fmt.Fprintf(out, " state=%q decision=%q approval=%q", o.State, o.Decision, o.ApprovalKind)
