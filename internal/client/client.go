@@ -186,7 +186,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	}
 	// The broker refuses bundle mode for a non-root target; say so here, with
 	// its wording, before any bundle or script is read or a job is reserved.
-	if targetUser != "" && (bundle != "" || script != "") {
+	if targetUser != "" && targetUser != "root" && targetUser != "#0" && (bundle != "" || script != "") {
 		return usageError(options, proto.TargetUserBundleRefusal(targetUser))
 	}
 	rest := flags.Args()
