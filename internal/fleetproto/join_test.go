@@ -1,6 +1,7 @@
 package fleetproto
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -166,22 +167,37 @@ func quoteJoin(values []string) string {
 	return strings.Join(quoted, ",")
 }
 
-func Test_JoinRequestCode_derives_same_short_code_when_both_sides_compute(t *testing.T) {
-	// Given one host identity rendered by the CLI and the gateway.
-	id := ID("host_" + strings.Repeat("ab", 32))
-
-	// When both derive the operator-facing code.
-	first, second := JoinRequestCode(id), JoinRequestCode(id)
-
-	// Then they agree, stay short, and differ for another host.
-	if first != second {
-		t.Fatal("request code is not deterministic")
+func Test_JoinRequestCode_binds_request_and_gateway_certificate(t *testing.T) {
+	// Given a fixed request and leaf hash, with an independently calculated
+	// version-1 code vector (domain, version byte, NUL-delimited fields, digest).
+	request, err := ParseJoinRequest(validJoinRequestJSON())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(first) != 6 {
-		t.Fatalf("request code length: %q", first)
+	leaf := sha256.Sum256([]byte("fixture leaf DER"))
+	// When either side derives the short authentication string.
+	code := JoinRequestCode(request, leaf)
+	// Then the fixed vector is stable and each bound field affects the code.
+	if code != "C38ACD" || JoinRequestCode(request, leaf) != code {
+		t.Fatalf("wrong certificate-bound code: %q", code)
 	}
-	if other := JoinRequestCode(ID("host_" + strings.Repeat("ba", 32))); other == first {
-		t.Fatal("distinct hosts share a request code")
+	for _, field := range []string{"host", "bearer", "join", "certificate"} {
+		t.Run(field, func(t *testing.T) {
+			changed, otherLeaf := request, leaf
+			switch field {
+			case "host":
+				changed.HostID = ID("host_" + strings.Repeat("ba", 32))
+			case "bearer":
+				changed.BearerHash = Hash(strings.Repeat("dc", 32))
+			case "join":
+				changed.JoinHash = Hash(strings.Repeat("fe", 32))
+			case "certificate":
+				otherLeaf = sha256.Sum256([]byte("another leaf DER"))
+			}
+			if JoinRequestCode(changed, otherLeaf) == code {
+				t.Fatal("changed binding did not change authentication string")
+			}
+		})
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
@@ -50,13 +51,19 @@ var (
 // URL, the host identity and the in-memory join secret; nothing is read from
 // or written to disk. The bearer never passes through it.
 type JoinClient struct {
-	base      *url.URL
-	host      fleetproto.ID
-	secret    string
-	http      *http.Client
-	transport *http.Transport
+	base         *url.URL
+	host         fleetproto.ID
+	secret       string
+	http         *http.Client
+	transport    *http.Transport
+	trustMu      sync.Mutex
+	roots        *x509.CertPool
+	allowUnknown bool
+	leaf, anchor *x509.Certificate
 }
 
+// A nil caPEM means no --ca-file was supplied. A non-nil, empty CA file keeps
+// system-only verification; it must not enable provisional private-CA trust.
 func NewJoinClient(rawURL, hostID, joinSecret string, caPEM []byte) (*JoinClient, error) {
 	if err := config.ValidateHTTPSURL(rawURL); err != nil {
 		return nil, &Error{fleetproto.ErrCodeProtocol}
@@ -84,8 +91,11 @@ func NewJoinClient(rawURL, hostID, joinSecret string, caPEM []byte) (*JoinClient
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
-	return &JoinClient{base: base, host: host, secret: joinSecret, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}, nil
+	client := &JoinClient{base: base, host: host, secret: joinSecret, roots: roots, allowUnknown: caPEM == nil, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}
+	// Verification is performed explicitly so an unknown first-connection CA
+	// can be provisionally pinned before ANY HTTP bytes are sent.
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, VerifyConnection: client.verifyGateway}
+	return client, nil
 }
 
 func (c *JoinClient) Close() { c.transport.CloseIdleConnections() }
@@ -136,9 +146,12 @@ func (c *JoinClient) exchange(ctx context.Context, method, target, auth string, 
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		var verification *tls.CertificateVerificationError
-		if errors.As(err, &verification) {
-			return nil, &Error{fleetproto.ErrCodeSignature}
+		var certificate *JoinCertificateError
+		if errors.As(err, &certificate) {
+			return nil, certificate
+		}
+		if errors.Is(err, ErrJoinGatewayChanged) {
+			return nil, ErrJoinGatewayChanged
 		}
 		return nil, requestError(ctx, err)
 	}

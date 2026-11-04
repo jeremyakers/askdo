@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"sync"
@@ -11,9 +13,11 @@ import (
 	"github.com/jeremyakers/askdo/internal/telegram"
 )
 
-// Private fixture option; the public constructor always uses Telegram HTTPS.
+// The serving certificate is shared with HTTPS. Wire overrides remain private
+// to fixtures; the public constructor always uses Telegram HTTPS.
 type dispatcherOptions struct {
-	baseURL string
+	baseURL     string
+	certificate tls.Certificate
 	// Private wire-fixture override: gates, not deadlines, order regression I/O.
 	cosmeticTimeout time.Duration
 	pollWait        func(context.Context, time.Duration) bool
@@ -52,11 +56,15 @@ type dispatcher struct {
 	cosmeticTimeout time.Duration
 	pollWait        func(context.Context, time.Duration) bool
 	logger          *slog.Logger
+	gatewayLeafHash [sha256.Size]byte
 }
 
 func newDispatcher(ctx context.Context, store *TicketStore, cfg Config, ids map[string]int64, options dispatcherOptions) (*dispatcher, error) {
 	d := &dispatcher{store: store, ctx: ctx, bots: map[string]*dispatchBot{}, aliases: map[string]string{}, cosmetics: make(chan cosmeticJob, cosmeticQueueCapacity), cosmeticTimeout: options.cosmeticTimeout}
 	d.pollWait, d.logger = options.pollWait, options.logger
+	if len(options.certificate.Certificate) > 0 {
+		d.gatewayLeafHash = sha256.Sum256(options.certificate.Certificate[0])
+	}
 	for _, bot := range cfg.Bots {
 		client, err := telegram.NewClient(telegram.ClientConfig{TokenFile: bot.TokenFile, BaseURL: options.baseURL})
 		if err != nil {
@@ -314,7 +322,7 @@ func (d *dispatcher) deliverJoinCards() {
 func (d *dispatcher) deliverJoinCard(bot *dispatchBot, card JoinCard) error {
 	text, keyboard, err := telegram.RenderJoinCard(telegram.JoinCardInput{
 		Hostname: card.Hostname,
-		Code:     fleetproto.JoinRequestCode(fleetproto.ID(card.HostID)),
+		Code:     fleetproto.JoinRequestCode(fleetproto.JoinRequest{HostID: fleetproto.ID(card.HostID), BearerHash: card.BearerHash, JoinHash: card.JoinHash}, d.gatewayLeafHash),
 		Profiles: card.Profiles,
 		Channel:  card.Channel,
 		Expiry:   time.Unix(card.ExpiresAt, 0),

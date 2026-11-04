@@ -311,7 +311,7 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 			if !tc.setupFail && !strings.Contains(out.String(), "Log out and back in once") {
 				t.Fatal("missing final relogin instruction")
 			}
-			if strings.Count(out.String(), "Approve the matching fleet enrollment card") != 1 {
+			if strings.Count(out.String(), "Approve the Telegram card ONLY if it shows this same code.") != 1 {
 				t.Fatalf("accepted join must prompt exactly once: %q", out.String())
 			}
 		})
@@ -336,27 +336,40 @@ func TestFleetJoinOldGatewayExplainsUpgrade(t *testing.T) {
 		t.Fatalf("old gateway: %v %s", err, out.String())
 	}
 	// And it never promised a Telegram card the gateway did not create.
-	if strings.Contains(out.String(), "Approve the matching") {
+	if strings.Contains(out.String(), "Fleet enrollment request code:") {
 		t.Fatalf("approval prompt printed without a gateway card: %q", out.String())
 	}
 }
 
-func TestFleetJoinUntrustedGatewayCertificateExplainsCAFile(t *testing.T) {
-	// Given a gateway whose certificate this host does not trust.
-	path := fleetJoinHostFixture(t, localJoinConfig)
-	var posts atomic.Int32
-	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { posts.Add(1) }))
-	defer server.Close()
-	var out, stderr bytes.Buffer
-	runner := new(fakeFleetSetup)
-	// When join runs without --ca-file.
-	err := runFleetJoin(t.Context(), []string{server.URL}, path, runner, &out, &stderr)
-	// Then it names the trust problem and fix, sends nothing, and promises no card.
-	if err == nil || !strings.Contains(err.Error(), "--ca-file") || !strings.Contains(err.Error(), "no enrollment request was sent") {
-		t.Fatalf("untrusted gateway error: %v", err)
-	}
-	if posts.Load() != 0 || strings.Contains(out.String(), "Approve the matching") || len(runner.calls) != 0 || fileContent(t, path) != localJoinConfig {
-		t.Fatalf("untrusted gateway had effects: posts=%d out=%q", posts.Load(), out.String())
+func TestFleetJoinExplicitCAFailureDoesNotProvisionallyTrust(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty=%t", empty), func(t *testing.T) {
+			// Given an explicit CA file that does not trust the gateway certificate.
+			path := fleetJoinHostFixture(t, localJoinConfig)
+			var posts atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { posts.Add(1) }))
+			defer server.Close()
+			wrong, _ := fleetJoinTLSIdentity(t, false, "")
+			ca := filepath.Join(filepath.Dir(path), "wrong-ca.pem")
+			data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: wrong.Certificate[0]})
+			if empty {
+				data = nil
+			}
+			if err := os.WriteFile(ca, data, 0400); err != nil {
+				t.Fatal(err)
+			}
+			var out, stderr bytes.Buffer
+			runner := new(fakeFleetSetup)
+			// When join runs with --ca-file, automatic trust is never a fallback.
+			err := runFleetJoin(t.Context(), []string{server.URL, "--ca-file", ca}, path, runner, &out, &stderr)
+			// Then it names the trust problem and fix, sends nothing, and promises no card.
+			if err == nil || !strings.Contains(err.Error(), "--ca-file") || !strings.Contains(err.Error(), "no enrollment request was sent") {
+				t.Fatalf("untrusted gateway error: %v", err)
+			}
+			if posts.Load() != 0 || strings.Contains(out.String(), "Fleet enrollment request code:") || len(runner.calls) != 0 || fileContent(t, path) != localJoinConfig {
+				t.Fatalf("untrusted gateway had effects: posts=%d out=%q", posts.Load(), out.String())
+			}
+		})
 	}
 }
 

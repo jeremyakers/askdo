@@ -18,9 +18,10 @@ access.
 - A Linux host for the gateway (it needs inbound HTTPS from the fleet hosts
   and outbound HTTPS to providers and Telegram).
 - A TLS certificate and key for the gateway's public name, provisioned by
-  you. There is no self-signed auto-generation, insecure mode, or
-  trust-on-first-use: hosts verify the certificate chain with normal
-  hostname checks, optionally against an explicitly supplied additional CA.
+  you, with matching DNS/IP SANs and valid dates. There is no self-signed
+  auto-generation or insecure mode. Publicly trusted certificates and private
+  LAN certificates are supported; joining hosts confirm gateway identity by
+  comparing a certificate-bound request code with the Telegram card below.
 - A Telegram bot **dedicated to the gateway**. One running poller per bot
   token, ever (see [cutover](#exclusive-bot-cutover-and-rollback)).
 - Optional: provider API keys or a Codex subscription for central AI review.
@@ -83,15 +84,41 @@ With askdo installed, run **on the joining host**:
 
 ```sh
 sudo askdo fleet join https://gateway.example.com:8443
-# For a private CA, add --ca-file /path/to/root-owned-read-only-ca.pem
+# Optional explicit trust: --ca-file /path/to/root-owned-read-only-ca.pem
 ```
 
-Match the printed request code to the dedicated **fleet enrollment** card in
-Telegram, then tap **Approve**. No server-side host command, bundle copy,
-profile flag or channel flag is needed. Join automatically allows/selects the
+Approve the dedicated **fleet enrollment** card in Telegram **ONLY if its
+six-character request code matches the host terminal**. No server-side host
+command, bundle copy, profile flag or channel flag is needed. Join automatically allows/selects the
 gateway's configured profiles (up to the existing 16-profile selection limit)
 and uses the channel literally named `default`; no profiles means approval-only.
 The host generates its bearer locally; the gateway stores only its hash.
+
+### Gateway trust and the request code
+
+On a private LAN, no CA copying, fingerprint pasting or local trust prompt is
+needed. Without `--ca-file`, an **unknown certificate authority only** permits
+provisional trust of the certificate on the first TLS connection. The host pins
+the top-most certificate the gateway presented (a root/intermediate when sent,
+otherwise the leaf). Normal Go TLS verification still checks the chain,
+DNS/IP SANs, validity and server-auth usage; an expired, not-yet-valid or
+wrong-name certificate is refused, not provisionally trusted.
+
+The host's first leaf certificate and top-most anchor cannot change during that
+join, even to another valid leaf from the same CA. A change aborts enrollment;
+rerun `fleet join` and compare the new code. Only after approval is the anchor
+saved as the existing `<host_id>.ca.pem` credential for later fleet connections.
+An explicit `--ca-file` retains normal system-plus-supplied-CA verification and
+is saved unchanged; it never falls back to provisional trust.
+
+The request code binds the host ID, bearer hash, join-secret hash and SHA-256 of
+the gateway's **leaf certificate**. The host uses the leaf it actually received;
+the gateway uses its own serving leaf, including when system trust or
+`--ca-file` is used. A TLS relay with a different certificate therefore produces
+a different code on the host and the genuine gateway's Telegram card.
+**Approving a card whose code differs from the terminal is unsafe: do not approve
+it.** The code is not a credential or automatic approval. It is printed only
+after the gateway accepts the request, with the remaining enrollment wait time.
 
 Join preflights local policy before sending a card, installs the root-private
 v5 config and credentials, validates them offline, adds the invoking non-root

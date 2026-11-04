@@ -2,10 +2,13 @@ package fleetclient
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -165,26 +168,33 @@ func Test_JoinClient_classifies_status_errors_when_gateway_answers(t *testing.T)
 	}
 }
 
-func Test_JoinClient_rejects_unverifiable_peer_when_trust_missing(t *testing.T) {
-	// Given a join gateway whose certificate the host does not trust.
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(pendingResponse(t, joinHostID()))
-	}))
-	defer server.Close()
-	client, err := NewJoinClient(server.URL, joinHostID(), joinSecretText(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-	req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32))}
+func Test_JoinClient_pins_peer_with_system_or_provisional_trust(t *testing.T) {
+	for _, systemTrusted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("system trusted=%t", systemTrusted), func(t *testing.T) {
+			// Given a join gateway either present in the system-root fixture or unknown.
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write(pendingResponse(t, joinHostID()))
+			}))
+			defer server.Close()
+			client, err := NewJoinClient(server.URL, joinHostID(), joinSecretText(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if systemTrusted {
+				client.roots = x509.NewCertPool()
+				client.roots.AddCert(server.Certificate())
+			}
+			req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32))}
 
-	// When the host posts without the CA.
-	_, err = client.RequestJoin(context.Background(), req)
+			// When the host posts without a CA file.
+			_, err = client.RequestJoin(context.Background(), req)
 
-	// Then the failure is the typed signature rejection.
-	var wire *Error
-	if !errors.As(err, &wire) || wire.Code != fleetproto.ErrCodeSignature {
-		t.Fatalf("want signature rejection, got %v", err)
+			// Then the first certificate is provisionally trusted and retained exactly.
+			if err != nil || string(client.GatewayCAPEM()) != string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})) || client.GatewayLeafHash() != sha256.Sum256(server.Certificate().Raw) {
+				t.Fatalf("want pinned first certificate, got %v", err)
+			}
+		})
 	}
 }
 

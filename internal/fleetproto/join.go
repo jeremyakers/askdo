@@ -235,10 +235,15 @@ func validPort(port string) bool {
 	return err == nil && n > 0
 }
 
-// JoinRequestCode derives the short correlation code the CLI prints and the
-// enrollment card shows. Both sides compute it from the host identity; it is
-// display-only and confers no authority.
-func JoinRequestCode(hostID ID) string {
-	sum := sha256.Sum256([]byte("askdo-join-code\x00" + string(hostID)))
+// JoinRequestCode is a short authentication string binding the request to the
+// gateway's serving leaf. Encoding: domain "askdo-join-code\x00", code version
+// byte 1, NUL-terminated canonical host ID, bearer hash and join hash, then the
+// raw 32-byte SHA-256 of the leaf DER. The first three digest bytes are displayed
+// as six uppercase hex digits. Approval requires comparing both displays; the
+// code is not a credential and never authorizes enrollment by itself.
+func JoinRequestCode(request JoinRequest, gatewayLeafSHA256 [sha256.Size]byte) string {
+	payload := []byte("askdo-join-code\x00\x01" + string(request.HostID) + "\x00" + string(request.BearerHash) + "\x00" + string(request.JoinHash) + "\x00")
+	payload = append(payload, gatewayLeafSHA256[:]...)
+	sum := sha256.Sum256(payload)
 	return strings.ToUpper(hex.EncodeToString(sum[:3]))
 }

@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"crypto/tls"
 	"errors"
 	"net"
 	"net/url"
@@ -39,5 +40,9 @@ func NewFixtureServer(cfg Config, store *EnrollmentStore, telegramURL string) (*
 	if err != nil {
 		return nil, err
 	}
-	return newServer(cfg, store, key, ids, 256, dispatcherOptions{baseURL: telegramURL})
+	certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, errors.New("invalid gateway TLS key pair")
+	}
+	return newServer(cfg, store, key, ids, 256, dispatcherOptions{baseURL: telegramURL, certificate: certificate})
 }

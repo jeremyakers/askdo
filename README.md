@@ -172,8 +172,15 @@ Once your gateway is running, a fresh host can enroll itself:
 sudo askdo fleet join https://your.gateway:8443
 ```
 
-Match the request code in Telegram and tap **Approve**. The host installs its
-fleet config, adds the invoking user to `askdo` and starts the service. Log out
+Approve the Telegram card **ONLY if its request code matches the host terminal**.
+The code binds the request to the gateway's TLS certificate. Private LAN
+certificates need no CA copying or fingerprint pasting: the first certificate
+is provisionally pinned, with normal hostname and validity checks. A different
+code is unsafe—do not approve it. `--ca-file PATH` remains available for explicit
+CA trust.
+
+The host installs its fleet config, adds the invoking user to `askdo` and starts
+the service. Log out
 and back in once, and it's ready. No bundle copying or server-side enrollment
 command is needed.
 

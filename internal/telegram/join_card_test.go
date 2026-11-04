@@ -30,6 +30,9 @@ func Test_RenderJoinCard_dedicated_enrollment_text_when_host_requests_join(t *te
 	if !strings.Contains(text, "A1B2C3") || !strings.Contains(text, "codex") || !strings.Contains(text, "default") {
 		t.Fatalf("missing scope facts: %s", text)
 	}
+	if !strings.Contains(text, "Confirm this code matches the host terminal") || !strings.Contains(text, "Do not approve if the codes differ") {
+		t.Fatalf("missing certificate-bound code comparison warning: %s", text)
+	}
 	if !strings.Contains(text, "lauren-laptop &lt;b&gt;evil&lt;/b&gt;") {
 		t.Fatalf("hostname not escaped: %s", text)
 	}

@@ -6,13 +6,19 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +27,7 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/fleetclient"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/telegram"
 )
@@ -67,14 +74,31 @@ func joinWire(t *testing.T, failSend int, changes ...func(*Config)) *joinWireFix
 	for _, change := range changes {
 		change(&cfg)
 	}
-	service, err := newServer(cfg, db, key, map[string]int64{"bot": 12345}, 8, dispatcherOptions{baseURL: tg.URL, cosmeticTimeout: time.Minute})
+	identity := joinWireTLSIdentity(t)
+	service, err := newServer(cfg, db, key, map[string]int64{"bot": 12345}, 8, dispatcherOptions{baseURL: tg.URL, cosmeticTimeout: time.Minute, certificate: identity})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	tls := httptest.NewTLSServer(service.Handler())
-	t.Cleanup(tls.Close)
-	return &joinWireFixture{service: service, db: db, tls: tls, bot: bot, tgURL: tg.URL, key: key, cfg: cfg}
+	wire := httptest.NewUnstartedServer(service.Handler())
+	wire.TLS = &tls.Config{Certificates: []tls.Certificate{identity}}
+	wire.StartTLS()
+	t.Cleanup(wire.Close)
+	return &joinWireFixture{service: service, db: db, tls: wire, bot: bot, tgURL: tg.URL, key: key, cfg: cfg}
+}
+
+func joinWireTLSIdentity(t *testing.T) tls.Certificate {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, cert, cert, public, private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: private}
 }
 
 // hostJoinIdentity generates host-side material exactly as the CLI does:
@@ -167,7 +191,8 @@ func Test_JoinWire_happy_path_enrolls_and_authenticates_when_operator_approves(t
 		t.Fatalf("server did not set expiry: %d", pending.ExpiresAt)
 	}
 	card, cardID := f.joinCard(t)
-	if !strings.Contains(card.Text, "lauren-laptop") || !strings.Contains(card.Text, fleetproto.JoinRequestCode(fleetproto.ID(host))) || !strings.Contains(card.Text, "codex") || !strings.Contains(card.Text, "default") {
+	request := fleetproto.JoinRequest{HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:]))}
+	if !strings.Contains(card.Text, "lauren-laptop") || !strings.Contains(card.Text, fleetproto.JoinRequestCode(request, sha256.Sum256(f.tls.Certificate().Raw))) || !strings.Contains(card.Text, "codex") || !strings.Contains(card.Text, "default") {
 		t.Fatalf("card content: %s", card.Text)
 	}
 	if len(card.Buttons) != 2 || !strings.HasPrefix(card.Buttons[0].CallbackData, "a:") || !strings.HasPrefix(card.Buttons[1].CallbackData, "d:") {
@@ -210,6 +235,62 @@ func Test_JoinWire_happy_path_enrolls_and_authenticates_when_operator_approves(t
 	var sends int
 	if err = f.db.db.QueryRow("SELECT COUNT(*) FROM gateway_join_sends WHERE host_id=?", host).Scan(&sends); err != nil || sends != 2 {
 		t.Fatalf("delivered cards: %d %v", sends, err)
+	}
+}
+
+func TestJoinWireCertificateBoundCodeDetectsTLSRelay(t *testing.T) {
+	for _, relay := range []bool{false, true} {
+		t.Run(fmt.Sprintf("relay=%t", relay), func(t *testing.T) {
+			// Given a real gateway/card dispatcher and, optionally, a TLS MITM
+			// forwarding the identical host request under a different certificate.
+			f := joinWire(t, 0)
+			target := f.tls.URL
+			if relay {
+				upstream, _ := url.Parse(f.tls.URL)
+				proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					forward := r.Clone(r.Context())
+					forward.URL.Scheme, forward.URL.Host = upstream.Scheme, upstream.Host
+					forward.RequestURI, forward.Host = "", upstream.Host
+					response, err := f.tls.Client().Do(forward)
+					if err != nil {
+						t.Error(err)
+						w.WriteHeader(http.StatusBadGateway)
+						return
+					}
+					defer response.Body.Close()
+					w.WriteHeader(response.StatusCode)
+					_, _ = io.Copy(w, response.Body)
+				}))
+				proxy.TLS = &tls.Config{Certificates: []tls.Certificate{joinWireTLSIdentity(t)}}
+				proxy.StartTLS()
+				defer proxy.Close()
+				target = proxy.URL
+			}
+			host, _, secret, bearerHash, joinHash := hostJoinIdentity(7)
+			request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), Hostname: "relay-test", BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:]))}
+			client, err := fleetclient.NewJoinClient(target, host, secret, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			// When the host registers without CA files and both sides derive codes.
+			if _, err = client.RequestJoin(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			hostCode := fleetproto.JoinRequestCode(request, client.GatewayLeafHash())
+			gatewayCode := fleetproto.JoinRequestCode(request, sha256.Sum256(f.tls.Certificate().Raw))
+			card, _ := f.joinCard(t)
+
+			// Then direct codes match; a MITM cannot make the genuine gateway's
+			// Telegram card show the host's code for the MITM certificate.
+			if !strings.Contains(card.Text, "<code>"+gatewayCode+"</code>") || !strings.Contains(card.Text, "Do not approve if the codes differ") {
+				t.Fatal("gateway card not bound to its own serving leaf", card.Text)
+			}
+			if (hostCode != gatewayCode) != relay {
+				t.Fatalf("relay=%t host=%s gateway=%s", relay, hostCode, gatewayCode)
+			}
+		})
 	}
 }
 

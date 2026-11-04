@@ -22,7 +22,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const fleetUsage = "usage: sudo askdo fleet join https://gateway[:port] [--ca-file PATH]"
+const fleetUsage = "usage: sudo askdo fleet join https://gateway[:port] [--ca-file PATH]\nApprove the Telegram card ONLY if its certificate-bound request code matches the host terminal."
 
 type fleetConfigStore interface {
 	Config() *config.Config
@@ -142,10 +142,19 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	ctx, cancel := context.WithTimeout(parent, fleetproto.JoinTTLSeconds*time.Second)
 	defer cancel()
 	approved, err := waitFleetJoin(ctx, client, request, func() {
-		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the matching fleet enrollment card in Telegram. Waiting up to 10 minutes...\n", fleetproto.JoinRequestCode(host))
+		deadline, _ := ctx.Deadline()
+		minutes := max(1, int((time.Until(deadline)+time.Minute-1)/time.Minute))
+		unit := "minutes"
+		if minutes == 1 {
+			unit = "minute"
+		}
+		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the Telegram card ONLY if it shows this same code. Waiting up to %d %s...\n", fleetproto.JoinRequestCode(request, client.GatewayLeafHash()), minutes, unit)
 	})
 	if err != nil {
 		return err
+	}
+	if *caPath == "" {
+		ca = client.GatewayCAPEM()
 	}
 	bundle := gateway.EnrollmentBundle{Version: 1, URL: approved.URL, HostID: string(host), Bearer: base64.RawURLEncoding.EncodeToString(bearer[:]), VerificationKey: approved.VerificationKey, CAPEM: string(ca), AllowedProfiles: approved.AllowedProfiles, DefaultProfiles: approved.DefaultProfiles}
 	if err = connectFleet(store, bundle, bundle.DefaultProfiles, len(bundle.DefaultProfiles) == 0, fleetConnectOptions{configPath: path, join: true}, out); err != nil {
@@ -167,9 +176,8 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	return nil
 }
 
-// errJoinUntrustedGateway replaces the bare "fleet: signature" a TLS
-// verification failure produces: no request reached the gateway.
-var errJoinUntrustedGateway = errors.New("fleet join: this host does not trust the gateway's TLS certificate, so no enrollment request was sent; rerun with --ca-file PATH, where PATH is a copy of the gateway's CA certificate (for example /etc/askdo-gateway/ca.pem on the gateway host)")
+// Unknown authority with an explicit CA never falls back to provisional trust.
+var errJoinUntrustedGateway = errors.New("fleet join: this host does not trust the gateway's TLS certificate with --ca-file, so no enrollment request was sent; check the supplied CA, or rerun fleet join without --ca-file and confirm the certificate-bound request code")
 
 // waitFleetJoin calls accepted exactly once, when the gateway first confirms
 // the request exists, so the approval prompt never precedes a real card.
@@ -205,8 +213,8 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 			}
 		}
 		cancel()
-		var fleetErr *fleetclient.Error
-		if errors.As(err, &fleetErr) && fleetErr.Code == fleetproto.ErrCodeSignature {
+		var certificate *fleetclient.JoinCertificateError
+		if errors.As(err, &certificate) && certificate.UnknownAuthority {
 			return fleetproto.JoinResponse{}, errJoinUntrustedGateway
 		}
 		if ctx.Err() != nil {

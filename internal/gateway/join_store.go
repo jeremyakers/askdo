@@ -417,20 +417,22 @@ type queryContext interface {
 
 // JoinCard is one pending join whose enrollment card still needs delivery.
 type JoinCard struct {
-	HostID    string
-	Hostname  string
-	Nonce     string
-	Token     string
-	ExpiresAt int64
-	Targets   []fleetproto.Recipient
-	Profiles  []string
-	Channel   string
+	HostID     string
+	BearerHash fleetproto.Hash
+	JoinHash   fleetproto.Hash
+	Hostname   string
+	Nonce      string
+	Token      string
+	ExpiresAt  int64
+	Targets    []fleetproto.Recipient
+	Profiles   []string
+	Channel    string
 }
 
 // CardsDue lists pending joins whose cards have not been delivered, excluding
 // expired requests.
 func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
-	rows, err := s.enrollment.db.QueryContext(ctx, "SELECT host_id,hostname,nonce,token_hash,targets_json,expires_at,policy_json FROM gateway_pending_joins WHERE state='pending' AND card_state='new' AND expires_at>? ORDER BY created_at", s.now().Unix())
+	rows, err := s.enrollment.db.QueryContext(ctx, "SELECT host_id,bearer_hash,join_hash,hostname,nonce,token_hash,targets_json,expires_at,policy_json FROM gateway_pending_joins WHERE state='pending' AND card_state='new' AND expires_at>? ORDER BY created_at", s.now().Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -438,10 +440,11 @@ func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
 	var cards []JoinCard
 	for rows.Next() {
 		var card JoinCard
-		var targets, policy []byte
-		if err = rows.Scan(&card.HostID, &card.Hostname, &card.Nonce, &card.Token, &targets, &card.ExpiresAt, &policy); err != nil {
+		var targets, policy, bearerHash, joinHash []byte
+		if err = rows.Scan(&card.HostID, &bearerHash, &joinHash, &card.Hostname, &card.Nonce, &card.Token, &targets, &card.ExpiresAt, &policy); err != nil {
 			return nil, err
 		}
+		card.BearerHash, card.JoinHash = fleetproto.Hash(hex.EncodeToString(bearerHash)), fleetproto.Hash(hex.EncodeToString(joinHash))
 		if err = json.Unmarshal(targets, &card.Targets); err != nil {
 			return nil, err
 		}
