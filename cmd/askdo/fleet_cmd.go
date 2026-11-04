@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -48,6 +50,7 @@ var (
 	fleetTrustedDirectory = operator.TrustedDirectory
 	readFleetTrustFile    = operator.ReadRootTrust
 	newFleetFiles         = func() fleetFiles { return new(gatewayFiles) }
+	openFleetJoinTTY      = func() (io.ReadWriteCloser, error) { return os.OpenFile("/dev/tty", os.O_RDWR, 0) }
 	pauseFleetJoin        = func(ctx context.Context, delay time.Duration) bool {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
@@ -142,6 +145,7 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(parent, fleetproto.JoinTTLSeconds*time.Second)
 	defer cancel()
+	var requestCode string
 	approved, err := waitFleetJoin(ctx, client, request, hostNonceText, func(gatewayNonce fleetproto.Hash) {
 		deadline, _ := ctx.Deadline()
 		minutes := max(1, int((time.Until(deadline)+time.Minute-1)/time.Minute))
@@ -149,10 +153,19 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 		if minutes == 1 {
 			unit = "minute"
 		}
-		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the Telegram card ONLY if it shows this same code. Waiting up to %d %s...\n", fleetproto.JoinRequestCode(request, client.GatewayLeafHash(), hostNonceText, gatewayNonce), minutes, unit)
+		requestCode = fleetproto.JoinRequestCode(request, client.GatewayLeafHash(), hostNonceText, gatewayNonce)
+		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the Telegram card ONLY if it shows this same code. Waiting up to %d %s...\n", requestCode, minutes, unit)
+		if client.UsesProvisionalTrust() {
+			fmt.Fprintln(out, "A terminal confirmation question follows gateway approval; answer yes ONLY if you compared the code and approved that Telegram card.")
+		}
 	})
 	if err != nil {
 		return err
+	}
+	if client.UsesProvisionalTrust() {
+		if err := confirmFleetJoin(requestCode); err != nil {
+			return err
+		}
 	}
 	if *caPath == "" {
 		ca = client.GatewayCAPEM()
@@ -175,6 +188,30 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	}
 	fmt.Fprintln(out, "Fleet enrollment and setup succeeded.\nLog out and back in once for askdo group membership, then test askdo.")
 	return nil
+}
+
+// A provisionally pinned peer can claim approval without ever sending a card.
+// Only the operator's terminal answer authenticates that peer before any writes.
+func confirmFleetJoin(code string) error {
+	unconfirmed := errors.New("enrollment not confirmed; local configuration unchanged")
+	tty, err := openFleetJoinTTY()
+	if err != nil {
+		return fmt.Errorf("%w (cannot open /dev/tty for confirmation)", unconfirmed)
+	}
+	defer tty.Close()
+	if _, err := fmt.Fprintf(tty, "Did the Telegram card show code %s, and did you approve it? [y/N] ", code); err != nil {
+		return unconfirmed
+	}
+	answer, err := bufio.NewReader(tty).ReadString('\n')
+	if err != nil {
+		return unconfirmed
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return nil
+	default:
+		return unconfirmed
+	}
 }
 
 // Unknown authority with an explicit CA never falls back to provisional trust.

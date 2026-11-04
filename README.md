@@ -179,6 +179,14 @@ is provisionally pinned, with normal hostname and validity checks. A different
 code is unsafe—do not approve it. `--ca-file PATH` remains available for explicit
 CA trust.
 
+For provisional trust, after the gateway reports approval the host asks:
+`Did the Telegram card show code XXXXXX, and did you approve it? [y/N] `.
+Answer `y` or `yes` (case-insensitive) **only after comparing the code and
+approving that card yourself**. The answer comes from `/dev/tty`, never piped
+stdin. Any other answer, EOF or no terminal aborts without installing config,
+credentials or CA. A gateway can claim approval without sending a card.
+System-trusted gateways and `--ca-file` joins do not ask this extra question.
+
 The host installs its fleet config, adds the invoking user to `askdo` and starts
 the service. Log out
 and back in once, and it's ready. No bundle copying or server-side enrollment
