@@ -69,6 +69,34 @@ func TestReviewLogCLI(t *testing.T) {
 	}
 }
 
+func TestReviewLogOutcomeOnlyTarget(t *testing.T) {
+	oldPath, oldEUID := reviewLogPath, getEUID
+	t.Cleanup(func() { reviewLogPath, getEUID = oldPath, oldEUID })
+	getEUID = func() int { return 0 }
+	reviewLogPath = filepath.Join(t.TempDir(), "reviews.jsonl")
+	for _, tc := range []struct {
+		name string
+		uid  uint32
+		want string
+	}{
+		{"target", 1001, ` target="target"(1001)`},
+		{"", 1001, ` target=""(1001)`},
+		{"", 0, ""},
+	} {
+		encoded, _ := json.Marshal(reviewlog.Event{Version: 1, Event: "outcome", Time: time.Now(), JobID: "outcome-only", SubmitterUID: 1000, TargetUID: tc.uid, TargetName: tc.name, State: "failed"})
+		if err := os.WriteFile(reviewLogPath, append(encoded, '\n'), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var out, stderr bytes.Buffer
+		if code := runReview([]string{"log", "--since", "0"}, &out, &stderr); code != 0 {
+			t.Fatalf("code=%d err=%s", code, &stderr)
+		}
+		if tc.want != "" && !strings.Contains(out.String(), tc.want) || tc.want == "" && strings.Contains(out.String(), " target=") {
+			t.Errorf("target %d/%q absent or changed: %s", tc.uid, tc.name, &out)
+		}
+	}
+}
+
 func TestReviewLogSinceRejectsInvalidDurations(t *testing.T) {
 	// Given a root caller with a missing journal, so no history can hide a bad flag.
 	oldPath, oldEUID := reviewLogPath, getEUID

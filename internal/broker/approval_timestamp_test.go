@@ -59,7 +59,7 @@ func timestampWorker(approvals *atomic.Int32, action string, beforeExit func(str
 }
 
 func timestampAuthority(cfg *config.Config, uid uint32) string {
-	return approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, 0)
+	return approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, ExecutionTarget{})
 }
 
 func timestampConfig(t *testing.T) (*config.Config, uint32) {

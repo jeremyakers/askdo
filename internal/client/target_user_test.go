@@ -137,6 +137,40 @@ func TestTargetUserRefusesBundleAndScriptLocally(t *testing.T) {
 	}
 }
 
+func TestTargetUserRootAllowsBundleAndScript(t *testing.T) {
+	for _, target := range []string{"root", "#0"} {
+		for _, mode := range []string{"bundle", "script"} {
+			t.Run(target+"/"+mode, func(t *testing.T) {
+				dir := t.TempDir()
+				script := filepath.Join(dir, "run.sh")
+				if err := os.WriteFile(script, []byte("#!/bin/bash\nid -u\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				socket, bodies := captureSubmitWire(t)
+				args := []string{"--detach", "--reason", "root bundle", "-u", target}
+				if mode == "bundle" {
+					args = append(args, "--bundle", dir, "--entry", "run.sh")
+				} else {
+					args = append(args, "--script", script)
+				}
+				var stderr bytes.Buffer
+				if code := Run(context.Background(), args, Options{SocketPath: socket, Stdout: &bytes.Buffer{}, Stderr: &stderr, Interrupt: make(chan os.Signal)}); code != 0 {
+					t.Fatalf("root %s refused: code=%d stderr=%s", mode, code, &stderr)
+				}
+				select {
+				case body := <-bodies:
+					var req proto.SubmitRequest
+					if err := proto.StrictUnmarshal(body, &req); err != nil || req.TargetUser != target || req.Mode != "bundle" || len(req.Files) != 1 {
+						t.Fatalf("submit=%s err=%v", body, err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("no submit")
+				}
+			})
+		}
+	}
+}
+
 func TestTargetUserInvalidValuesFailBeforeReservation(t *testing.T) {
 	for name, args := range map[string][]string{
 		"empty":        {"-u", "", "--", "/usr/bin/id"},

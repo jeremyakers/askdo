@@ -159,7 +159,7 @@ dsm_paths() {
       dsm_acl "$P" 0 "$EXECUTABLE" || return 1
     fi
   done
-  if [ "${DSM_CONFIG_NEW:-0}" = 1 ]; then
+  if [ "${DSM_BACKUP_VOLUME:-0}" = 1 ]; then
     for P in /volume1 /volume1/@askdo /volume1/@askdo/upgrade-backups; do
       if [ -e "$P" ] || [ -L "$P" ]; then dsm_acl "$P" || return 1; fi
     done
@@ -884,17 +884,21 @@ if [ ! -e /etc/askdo/config.json ]; then
   DSM_CONFIG_NEW=1
   if [ "$DSM" = 1 ]; then
     # DSM's system partition is small. Existing configs are not migrated.
-    [ -d /volume1 ] && dsm_acl /volume1 || die 'trusted DSM data volume /volume1 is required'
-    for P in /volume1/@askdo /volume1/@askdo/upgrade-backups; do
-      if [ -e "$P" ] || [ -L "$P" ]; then
-        [ -d "$P" ] && dsm_acl "$P" || die 'untrusted DSM upgrade backup directory'
-      else
-        make_dir 700 0 0 "$P"
-      fi
-    done
-    sed '/"config_version":/a\
+    if [ -d /volume1 ] && dsm_acl /volume1; then
+      DSM_BACKUP_VOLUME=1
+      for P in /volume1/@askdo /volume1/@askdo/upgrade-backups; do
+        if [ -e "$P" ] || [ -L "$P" ]; then
+          [ -d "$P" ] && dsm_acl "$P" || die 'untrusted DSM upgrade backup directory'
+        else
+          make_dir 700 0 0 "$P"
+        fi
+      done
+      sed '/"config_version":/a\
   "upgrade_backup_dir": "/volume1/@askdo/upgrade-backups",' "$TMP/askdo-config.example.json" > "$TMP/dsm-config.json"
-    mv "$TMP/dsm-config.json" "$TMP/askdo-config.example.json"
+      mv "$TMP/dsm-config.json" "$TMP/askdo-config.example.json"
+    else
+      printf '%s\n' 'WARNING: keeping /var/backups/askdo; set upgrade_backup_dir to a trusted data-volume directory to avoid filling the DSM system partition.' >&2
+    fi
   fi
   install -m 0600 -o root -g root "$TMP/askdo-config.example.json" /etc/askdo/config.json
 fi

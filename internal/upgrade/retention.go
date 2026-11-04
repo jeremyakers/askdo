@@ -21,12 +21,13 @@ func (h Helper) failUnchanged(r Receipt, detail string) error {
 	if err := writeReceipt(h.ReceiptRoot, r); err != nil {
 		return err
 	}
+	launchErr := h.removeLaunchDirectory(r.ID)
 	err := h.removeStage(r.Stage)
 	r.Detail = detail + "; stage removed"
 	if err != nil {
 		r.Detail = detail + "; stage cleanup failed; inspect stage"
 	}
-	return errors.Join(err, writeReceipt(h.ReceiptRoot, r))
+	return errors.Join(launchErr, err, writeReceipt(h.ReceiptRoot, r))
 }
 
 func (h Helper) removeStage(stage string) error {

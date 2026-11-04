@@ -260,8 +260,8 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 			t.Fatalf("stage metadata: %v, %v", info, err)
 		}
 		cli, err := os.Stat(filepath.Join(stage, f.plan.CLIAsset))
-		if err != nil || cli.Mode().Perm() != 0o700 {
-			t.Fatalf("staged CLI must be executable after verification: %v, %v", cli, err)
+		if err != nil || cli.Mode().Perm() != 0o600 {
+			t.Fatalf("staged CLI must remain non-executable backup data: %v, %v", cli, err)
 		}
 		accepted = true
 		return nil
