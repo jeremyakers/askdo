@@ -86,8 +86,9 @@ func WritePlan(dir string, plan Plan) error {
 
 // ActivationManager accepts ownership outside the broker/gateway cgroups. A
 // successful Start means accepted, NOT that activation has succeeded.
+// The launched CLI inode must match cliDigest from the verified approval plan.
 type ActivationManager interface {
-	Start(context.Context, string, string) error
+	Start(ctx context.Context, id, stage, cliDigest string) error
 }
 
 // Layout is discovered from root configuration, never from a source plan.
@@ -264,7 +265,7 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	}
 	// Keep NewOperation's lock through acceptance. The activation process waits
 	// on this SAME lock before inspecting or updating the receipt.
-	if err := h.Manager.Start(ctx, id, stage); err != nil {
+	if err := h.Manager.Start(ctx, id, stage, plan.CLIDigest); err != nil {
 		state := stateFailed
 		detail := "manager rejected activation"
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

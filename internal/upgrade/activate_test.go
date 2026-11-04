@@ -16,10 +16,10 @@ import (
 	"time"
 )
 
-type activationManagerFunc func(context.Context, string, string) error
+type activationManagerFunc func(context.Context, string, string, string) error
 
-func (f activationManagerFunc) Start(ctx context.Context, id, stage string) error {
-	return f(ctx, id, stage)
+func (f activationManagerFunc) Start(ctx context.Context, id, stage, cliDigest string) error {
+	return f(ctx, id, stage, cliDigest)
 }
 
 // The fake models service state and preserves real temp-file preimages. It
@@ -214,7 +214,7 @@ func newActivationFixture(t *testing.T, gateway bool) *activationFixture {
 		t.Fatal(err)
 	}
 	put(filepath.Join(source, "plan.json"), string(encoded))
-	helper := Helper{BackupRoot: filepath.Join(root, "backups"), ReceiptRoot: filepath.Join(root, "receipts"), Host: host, Manager: activationManagerFunc(func(context.Context, string, string) error { return nil }), TrustDirectory: func(path string, create bool) error {
+	helper := Helper{BackupRoot: filepath.Join(root, "backups"), ReceiptRoot: filepath.Join(root, "receipts"), Host: host, Manager: activationManagerFunc(func(context.Context, string, string, string) error { return nil }), TrustDirectory: func(path string, create bool) error {
 		if create {
 			return os.MkdirAll(path, 0o755)
 		}
@@ -247,7 +247,10 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 	// Given: verified source bytes and a fake manager observing the durable receipt.
 	f := newActivationFixture(t, false)
 	accepted := false
-	f.helper.Manager = activationManagerFunc(func(_ context.Context, id, stage string) error {
+	f.helper.Manager = activationManagerFunc(func(_ context.Context, id, stage, cliDigest string) error {
+		if cliDigest != f.plan.CLIDigest {
+			t.Fatalf("manager digest=%q, want approved digest %q", cliDigest, f.plan.CLIDigest)
+		}
 		r := activationReceipt(t, f)
 		if r.State != "scheduled" || r.ID != id || r.Stage != stage {
 			t.Fatalf("initial receipt: %+v", r)
@@ -415,7 +418,7 @@ func TestHelperScheduleRejectsDuplicateWithoutNewAcceptance(t *testing.T) {
 	// Given
 	f := newActivationFixture(t, false)
 	f.schedule(t)
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error {
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error {
 		t.Fatal("duplicate sent to manager")
 		return nil
 	})
@@ -430,7 +433,7 @@ func TestHelperScheduleRejectsDuplicateWithoutNewAcceptance(t *testing.T) {
 func TestHelperScheduleManagerRejectionLeavesLiveFilesUntouched(t *testing.T) {
 	// Given
 	f := newActivationFixture(t, false)
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error { return errors.New("rejected") })
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error { return errors.New("rejected") })
 	// When
 	_, err := f.helper.Schedule(t.Context(), f.plan.Operation, f.source, f.captured)
 	// Then
@@ -497,7 +500,7 @@ func TestHelperActivateWaitsForManagerAcceptanceLock(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
 		result := make(chan error, 1)
-		f.helper.Manager = activationManagerFunc(func(_ context.Context, _ string, stage string) error {
+		f.helper.Manager = activationManagerFunc(func(_ context.Context, _ string, stage string, _ string) error {
 			go func() { result <- f.helper.Activate(ctx, stage) }()
 			synctest.Wait()
 			select {
@@ -522,7 +525,7 @@ func TestHelperActivateWaitsForManagerAcceptanceLock(t *testing.T) {
 func TestHelperScheduleInterruptedManagerAcceptanceIsUnknown(t *testing.T) {
 	// Given: the adapter's own deadline can expire after the manager accepts.
 	f := newActivationFixture(t, false)
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error {
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error {
 		return context.DeadlineExceeded
 	})
 	// When
@@ -811,7 +814,7 @@ func TestHelperScheduleCapturedPlanRejectsChangedAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := false
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error { called = true; return nil })
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error { called = true; return nil })
 	// When
 	_, err = f.helper.Schedule(t.Context(), f.plan.Operation, f.source, f.captured)
 	// Then: captured authority does not waive any asset verification.
@@ -829,7 +832,7 @@ func TestHelperScheduleRequiresValidBoundedCapturedPlan(t *testing.T) {
 			// Given: a valid mutable local plan MUST NOT substitute for bad captured input.
 			f := newActivationFixture(t, false)
 			called := false
-			f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error { called = true; return nil })
+			f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error { called = true; return nil })
 			// When
 			_, err := f.helper.Schedule(t.Context(), f.plan.Operation, f.source, tc.data)
 			// Then

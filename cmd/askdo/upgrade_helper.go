@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -142,10 +143,39 @@ type upgradeToolRunner interface {
 
 type upgradeSystemdManager struct{ tools upgradeToolRunner }
 
-func (m upgradeSystemdManager) Start(ctx context.Context, id, stage string) error {
+// Open once, verify that inode against the approval, then execute that same
+// descriptor. Neither a replaced stage entry nor a replaced parent directory
+// can redirect execution after verification. Arguments are data, not shell code.
+const upgradeActivationScript = `set -eu
+stage=$1
+digest=$2
+exec 3<"$stage/askdo-linux-` + runtime.GOARCH + `"
+printf '%s  %s\n' "$digest" /proc/self/fd/3 | /usr/bin/sha256sum -c -
+exec /proc/self/fd/3 upgrade-helper --activate "$stage"
+`
+
+func upgradeActivationArgs(id, stage, cliDigest string) ([]string, error) {
+	if !upgradeRuntimeOperation.MatchString(id) || !filepath.IsAbs(stage) || filepath.Clean(stage) != stage || filepath.Base(stage) != id || strings.ContainsRune(stage, 0) {
+		return nil, errors.New("activation stage must be a clean absolute operation directory")
+	}
+	if len(cliDigest) != 64 {
+		return nil, errors.New("activation CLI digest must be 64 hex digits")
+	}
+	if _, err := hex.DecodeString(cliDigest); err != nil {
+		return nil, errors.New("activation CLI digest must be 64 hex digits")
+	}
+	return []string{"/bin/sh", "-c", upgradeActivationScript, "sh", stage, cliDigest}, nil
+}
+
+func (m upgradeSystemdManager) Start(ctx context.Context, id, stage, cliDigest string) error {
+	command, err := upgradeActivationArgs(id, stage, cliDigest)
+	if err != nil {
+		return err
+	}
 	// --no-block is essential for Type=oneshot: wait-for-completion would
 	// deadlock against the scheduling job's own terminal/quietness gate.
-	_, err := m.tools.Run(ctx, upgradeSystemdRun, "--unit=askdo-upgrade-"+id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", filepath.Join(stage, "askdo-linux-"+runtime.GOARCH), "upgrade-helper", "--activate", stage)
+	args := append([]string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--"}, command...)
+	_, err = m.tools.Run(ctx, upgradeSystemdRun, args...)
 	return err
 }
 
@@ -162,13 +192,17 @@ func newUpgradeActivationManager(tools upgradeToolRunner) upgrade.ActivationMana
 	return upgradeDetachedManager{}
 }
 
-func (upgradeDetachedManager) Start(_ context.Context, id, stage string) error {
-	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
+func (upgradeDetachedManager) Start(_ context.Context, id, stage, cliDigest string) error {
+	command, err := upgradeActivationArgs(id, stage, cliDigest)
+	if err != nil {
+		return err
+	}
 	log, err := os.OpenFile(filepath.Join(stage, "activation.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(helper, "upgrade-helper", "--activate", stage)
+	defer log.Close()
+	cmd := exec.Command(command[0], command[1:]...)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "UPGRADE_STAGE=" + stage, "ASKDO_UPGRADE_DETACHED=1"}
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = log, log

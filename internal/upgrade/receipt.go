@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jeremyakers/askdo/internal/proto"
 )
 
 // Receipt schema and file layout.
@@ -70,6 +72,17 @@ type Receipt struct {
 
 func isActiveReceiptState(state string) bool {
 	return receiptStates[state] && state != stateSucceeded && state != stateFailed
+}
+
+func scheduledReceiptExpired(receipt Receipt, now time.Time) bool {
+	data, err := readRegular(filepath.Join(receipt.Stage, "activation.json"), receiptJSONMax)
+	var record activationRecord
+	if err == nil && proto.StrictUnmarshal(data, &record) == nil && record.Version == 1 && record.DeadlineUnixMS > 0 {
+		return now.After(time.UnixMilli(record.DeadlineUnixMS))
+	}
+	// An absent or damaged record must not expire a fresh schedule, nor wedge
+	// admission forever. Give it the same full window as a recorded activation.
+	return now.After(time.UnixMilli(receipt.UpdatedAtUnixMS).Add(OperationTimeout))
 }
 
 // validateOperationID requires the exact operation ID shape: up_ followed by
@@ -228,7 +241,9 @@ func writeReceipt(root string, receipt Receipt) error {
 // `scheduled` receipt atomically. The returned unlock releases the host lock;
 // a terminal receipt (succeeded/failed) with the same ID is replaced. A
 // symlinked receipt or lock, an invalid ID and a malformed existing receipt
-// all refuse, leaving nothing changed.
+// all refuse admission.
+// Scheduled receipts past their activation deadline are first failed under
+// this same lock, so a helper that never started cannot wedge later upgrades.
 func NewOperation(root, id, release, sourceCommit, stage string) (func(), error) {
 	if err := validateOperationID(id); err != nil {
 		return nil, err
@@ -256,16 +271,18 @@ func NewOperation(root, id, release, sourceCommit, stage string) (func(), error)
 		return failure(err)
 	}
 	// Host-wide single-operation rule: under the lock, every existing receipt
-	// in the root must be readable and none may be active. Terminal receipts
-	// do not block. Malformed, foreign or unexpected files fail closed rather
-	// than being ignored; dotfile staging artifacts (".<id>.temp-*") are not
-	// receipts and do not block a recovery operation. The captured root bootstrap
-	// also keeps its private bootstrap-<operation> directory here until scheduling
-	// returns; that exact directory namespace is not a receipt.
+	// in the root must be readable and none may be active after stale schedules
+	// are reconciled. Terminal receipts do not block. Malformed, foreign or
+	// unexpected files fail closed rather than being ignored; dotfile staging
+	// artifacts (".<id>.temp-*") are not receipts and do not block a recovery
+	// operation. The captured root bootstrap also keeps its private
+	// bootstrap-<operation> directory here until scheduling returns; that exact
+	// directory namespace is not a receipt.
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return failure(fmt.Errorf("scan receipt root %s: %w", root, err))
 	}
+	now := time.Now()
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") {
@@ -286,6 +303,14 @@ func NewOperation(root, id, release, sourceCommit, stage string) (func(), error)
 		existing, err := ReadReceipt(root, otherID)
 		if err != nil {
 			return failure(fmt.Errorf("refuse operation %s: receipt %s is not readable: %w", id, otherID, err))
+		}
+		if existing.State == stateScheduled && scheduledReceiptExpired(existing, now) {
+			existing.State = stateFailed
+			existing.Detail = "activation never started before its deadline; no live changes"
+			existing.UpdatedAtUnixMS = now.UnixMilli()
+			if err := writeReceipt(root, existing); err != nil {
+				return failure(fmt.Errorf("reconcile expired operation %s: %w", otherID, err))
+			}
 		}
 		if isActiveReceiptState(existing.State) {
 			return failure(fmt.Errorf("active operation %s exists in state %s", otherID, existing.State))
