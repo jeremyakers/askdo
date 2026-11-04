@@ -206,15 +206,21 @@ func (j *jobRuntime) recordApprovalTimestamp(ctx context.Context, expiry time.Ti
 func (j *jobRuntime) completeValidation(ctx context.Context, pending *approvalBinding, decision *proto.Decision) {
 	now := time.Now().UTC()
 	if !now.Before(pending.expiry) {
-		j.expireApproval(ctx)
+		// Both timestamp reuse and a human decision have already consumed this
+		// authorization. expireApproval deliberately ignores consumed bindings.
+		j.fail("approval expired before timestamp validation completed")
 		return
+	}
+	kind := "timestamp"
+	if decision != nil {
+		kind = "human"
 	}
 	approval, err := json.Marshal(struct {
 		Kind     string          `json:"kind"`
 		Decision string          `json:"decision"`
 		Digest   string          `json:"digest"`
 		Operator *proto.Decision `json:"operator_decision,omitempty"`
-	}{Kind: "timestamp_validation", Decision: "approved", Digest: pending.digest, Operator: decision})
+	}{Kind: kind, Decision: "approved", Digest: pending.digest, Operator: decision})
 	if err != nil {
 		j.fail("encode timestamp validation")
 		return

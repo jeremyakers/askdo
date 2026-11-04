@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"os/exec"
-	"os/user"
 	"strconv"
 	"strings"
 
@@ -45,25 +44,25 @@ func expandShortFlags(args []string, flags *flag.FlagSet) []string {
 
 // The target's passwd shell is deliberately not inherited from the submitter.
 // getent uses the host's NSS account database, including non-local accounts.
+var shellPasswd = func(ctx context.Context, key string) ([]byte, error) {
+	return exec.CommandContext(ctx, "/usr/bin/getent", "passwd", key).Output()
+}
+
 func shellCommand(ctx context.Context, target string, args []string, login bool) ([]string, string, error) {
 	if target == "" {
 		target = "root"
 	}
-	var account *user.User
-	var err error
+	key := target
 	if id, numeric := strings.CutPrefix(target, "#"); numeric {
 		uid, parseErr := strconv.ParseUint(id, 10, 32)
 		if parseErr != nil {
 			return nil, "", parseErr
 		}
-		account, err = user.LookupId(strconv.FormatUint(uid, 10))
-	} else {
-		account, err = user.Lookup(target)
+		key = strconv.FormatUint(uid, 10)
 	}
-	if err != nil {
-		return nil, "", err
-	}
-	data, err := exec.CommandContext(ctx, "/usr/bin/getent", "passwd", account.Uid).Output()
+	// A UID can have multiple login names with different homes and shells.
+	// Keep named targets named; only #UID requests select the canonical UID entry.
+	data, err := shellPasswd(ctx, key)
 	if err != nil {
 		return nil, "", fmt.Errorf("read target passwd entry: %w", err)
 	}
@@ -82,7 +81,7 @@ func shellCommand(ctx context.Context, target string, args []string, login bool)
 	if len(args) != 0 {
 		argv = append(argv, "-c", strings.Join(args, " "))
 	}
-	return argv, account.HomeDir, nil
+	return argv, fields[5], nil
 }
 
 func runTimestamp(ctx context.Context, action, target string, options Options) int {

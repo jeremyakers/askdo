@@ -30,6 +30,33 @@ func (store *Store) CompleteTimestampValidation(ctx context.Context, requestID, 
 		return false, err
 	}
 	defer tx.Rollback()
+	// Retain the notification binding, named-route targets and signed fleet
+	// proofs recorded before the decision, just as the normal decision commits do.
+	var raw []byte
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(approval_json, '{}') FROM jobs WHERE uid = ? AND request_id = ?`, stamp.UID, requestID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var audit, validation map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &audit); err != nil {
+		return false, err
+	}
+	if audit == nil {
+		audit = make(map[string]json.RawMessage)
+	}
+	if err := json.Unmarshal(approvalJSON, &validation); err != nil {
+		return false, err
+	}
+	for key, value := range validation {
+		audit[key] = value
+	}
+	approvalJSON, err = json.Marshal(audit)
+	if err != nil {
+		return false, err
+	}
 	zero := 0
 	result, _ := json.Marshal(Result{Kind: ResultExit, ExitCode: &zero})
 	n, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = 'finished', result_json = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = 'awaiting-human' AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, result, approvalJSON, stamp.ApprovedAt.UnixNano(), stamp.UID, requestID, digest, stamp.ApprovedAt.UnixNano())

@@ -4,11 +4,56 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCompleteTimestampValidationPreservesApprovalRecord(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id = "validation"
+	createTestJob(t, s, id, nil)
+	mustTransition(t, s, id, StateQueued, StateAwaitingHuman)
+	digest := strings.Repeat("a", 64)
+	if err := s.RecordManifest(ctx, testUID, id, "/manifest", digest); err != nil {
+		t.Fatal(err)
+	}
+	// These are existing recordApproval fields, including opaque signed fleet
+	// event bytes. Validation may add decision fields but must retain all of them.
+	binding := []byte(`{"card_id":41,"message_ids":[40,41],"digest":"` + digest + `","operator_user_id":101,"expiry_unix_ms":1900000000000,"channel_name":"ops","targets":[{"chat_id":11,"card_id":41,"operator_user_ids":[101]}],"fleet_events":["c2lnbmVkIGV2ZW50IHByb29m"]}`)
+	if err := s.RecordApproval(ctx, testUID, id, binding); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stamp := ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 12, TTYRdev: 34817, TTYInode: 789, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: strings.Repeat("b", 64)}
+	changed, err := s.CompleteTimestampValidation(ctx, id, digest, stamp, []byte(`{"kind":"human","decision":"approved","digest":"`+digest+`","operator_decision":{"action":"approve"}}`))
+	if err != nil || !changed {
+		t.Fatalf("complete=%t err=%v", changed, err)
+	}
+	job, err := s.GetJob(ctx, testUID, id)
+	if err != nil || job.State != StateFinished {
+		t.Fatalf("state=%s err=%v", job.State, err)
+	}
+	var before, after map[string]any
+	if err := json.Unmarshal(binding, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(job.ApprovalJSON, &after); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range before {
+		if !reflect.DeepEqual(after[key], want) {
+			t.Errorf("validation discarded %s: got=%v want=%v", key, after[key], want)
+		}
+	}
+	if after["kind"] != "human" || after["decision"] != "approved" || after["operator_decision"] == nil {
+		t.Errorf("missing validation decision: %s", job.ApprovalJSON)
+	}
+}
 
 func TestApprovalTimestampUpsertAndIdentity(t *testing.T) {
 	// Given an empty real store and a kernel-shaped terminal identity.
