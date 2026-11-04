@@ -15,6 +15,10 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, reviewUsage)
 		return 125
 	}
+	if len(args) == 1 && isHelpWord(args[0]) {
+		fmt.Fprintln(stdout, reviewUsage)
+		return 0
+	}
 	switch args[0] {
 	case "log":
 		return runReviewLog(args[1:], stdout, stderr)

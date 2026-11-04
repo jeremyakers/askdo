@@ -85,10 +85,19 @@ func writeConfigHelp(w io.Writer) {
   askdo-config logs JOB_ID [--uid UID] [--all]
   askdo-config daemon [--config PATH]                 service mode (root only)
 
-Root-only operations request the usual Telegram approval for askdo members and
-run in the foreground, including interactive prompts. Root executes directly.
-Read-only operations that do not require root run without approval. Fleet join
-has its own enrollment approval; it and service modes still require root.
+Run askdo-config as yourself; do not use sudo. Commands that change askdo's
+configuration or read root-only state (review mode/exempt/timestamp_timeout,
+channel, config install, auth, reviewer, gateway setup, logs) automatically
+request the usual Telegram approval and run in the foreground, including
+interactive prompts. Read-only views you can already access run without
+approval. Root executes directly. Exceptions that still need sudo: fleet join
+(it has its own enrollment approval) and the service modes daemon and
+gateway serve.
+
+  askdo-config review timestamp_timeout set jeremy 10    reuse approvals 10 minutes
+  askdo-config review timestamp_timeout clear jeremy     stop reusing approvals
+  askdo-config review exempt add jeremy                  skip AI review, keep Telegram
+  sudo askdo-config fleet join https://gateway:8443
 
 timestamp_timeout matches sudo: plain VALUE is minutes (decimals allowed).
 Go durations such as 90s, 10m and 1h also work; the range is 30s through 1h.

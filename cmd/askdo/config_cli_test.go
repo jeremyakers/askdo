@@ -67,6 +67,19 @@ func TestConfigMulticallHelp(t *testing.T) {
 	}
 }
 
+func TestConfigReviewHelpExitsZero(t *testing.T) {
+	// Given askdo-config invoked for review subcommand help.
+	cliIdentity(t, "/usr/local/bin/askdo-config", 1000)
+	for _, word := range []string{"--help", "-h", "help"} {
+		// When the help word follows the review verb.
+		code, out, stderr := captureCLI(t, func() int { return runWithClient([]string{"review", word}, noCLIClient(t)) })
+		// Then usage goes to stdout with success and names the subcommands.
+		if code != 0 || stderr != "" || !strings.Contains(out, "timestamp_timeout") || !strings.Contains(out, "exempt") {
+			t.Fatalf("review %s: code=%d stdout=%q stderr=%q", word, code, out, stderr)
+		}
+	}
+}
+
 func TestConfigNonrootApprovalAtRootGates(t *testing.T) {
 	cliIdentity(t, "askdo-config", 1000)
 	for _, args := range [][]string{
