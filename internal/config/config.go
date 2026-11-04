@@ -87,6 +87,11 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		MaxHashedBytesPerReview *int64 `json:"max_hashed_bytes_per_review,omitempty"`
 	}
 	limits := limitsJSON{LimitsConfig: c.Limits}
+	// Like the hash budgets, the runtime backup-directory default is not pinned
+	// into an older document on an unrelated save; explicit values are kept.
+	if c.UpgradeBackupDir == defaultUpgradeBackupDir && !hasField(c.present.top, "upgrade_backup_dir") {
+		c.UpgradeBackupDir = ""
+	}
 	if hasField(c.present.limits, "max_hash_file_bytes") || (c.Limits.MaxHashFileBytes != 0 && c.Limits.MaxHashFileBytes != MaxHashFileBytes) {
 		limits.MaxHashFileBytes = &c.Limits.MaxHashFileBytes
 	}

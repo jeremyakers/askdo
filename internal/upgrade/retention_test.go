@@ -103,3 +103,29 @@ func TestHelperSuccessfulActivationRetainsOnlyTwoNewestSuccessfulStages(t *testi
 		}
 	}
 }
+
+func TestHelperRetentionAlwaysKeepsTheJustActivatedStage(t *testing.T) {
+	// Given: a clock that moved backward, so two earlier successes carry
+	// later receipt timestamps than the operation being activated now.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+	f.helper.Now = func() time.Time { return time.UnixMilli(1000) }
+	for n, ts := range map[int]int64{10: 5000, 20: 6000} {
+		id := fmt.Sprintf("up_%032x", n)
+		stage := filepath.Join(f.helper.BackupRoot, id)
+		if err := os.Mkdir(stage, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeReceipt(f.helper.ReceiptRoot, Receipt{Version: 1, ID: id, Release: f.plan.Release, SourceCommit: f.plan.SourceCommit, State: stateSucceeded, Stage: stage, UpdatedAtUnixMS: ts}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// When: activation succeeds and retention runs.
+	if err := f.helper.Activate(t.Context(), f.stage); err != nil {
+		t.Fatal(err)
+	}
+	// Then: the backup for the release just installed is never pruned.
+	if _, err := os.Lstat(f.stage); err != nil {
+		t.Fatalf("just-activated stage removed: %v", err)
+	}
+}

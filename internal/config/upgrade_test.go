@@ -40,15 +40,8 @@ func TestLoadUpgradeBackupDirectory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			encoded, err := json.Marshal(cfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got struct {
-				Directory string `json:"upgrade_backup_dir"`
-			}
-			if err := json.Unmarshal(encoded, &got); err != nil || got.Directory != tc.want {
-				t.Fatalf("backup directory=%q, want %q, err=%v", got.Directory, tc.want, err)
+			if cfg.UpgradeBackupDir != tc.want {
+				t.Fatalf("backup directory=%q, want %q", cfg.UpgradeBackupDir, tc.want)
 			}
 		})
 	}
@@ -118,6 +111,36 @@ func TestLoadUpgradeBackupDirectoryMustFitReceiptStage(t *testing.T) {
 				}
 			} else if err == nil || (tc.name != "nul" && !strings.Contains(err.Error(), "upgrade_backup_dir must form a printable ASCII receipt stage of at most 512 bytes")) {
 				t.Fatalf("unrepresentable receipt stage accepted or unclear error: %v", err)
+			}
+		})
+	}
+}
+
+func TestMutationRoundTripPreservesUpgradeBackupDirectoryOmission(t *testing.T) {
+	defer stubCredentialChecks(t)()
+	base := `{"config_version":4,"inspection":{"read_roots":[]},"review":{"models":[{"name":"local","api":"openai_chat","base_url":"http://localhost:11434","model":"m","data_boundary":"local"}]},"limits":{},"telegram":{"token_file":"/keys/token","operator_user_id":1,"chat_id":-1}`
+	for _, tc := range []struct {
+		name, field string
+		present     bool
+	}{
+		{"omitted stays omitted", "", false},
+		{"explicit default kept", `,"upgrade_backup_dir":"/var/backups/askdo"`, true},
+		{"custom kept", `,"upgrade_backup_dir":"/volume1/@askdo/upgrade-backups"`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given: an older or explicit document decoded for an unrelated edit.
+			cfg, err := DecodeForMutation([]byte(base + tc.field + `}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// When: it is saved again.
+			out, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Then: an absent default is not pinned; explicit values survive.
+			if got := strings.Contains(string(out), `"upgrade_backup_dir"`); got != tc.present {
+				t.Fatalf("upgrade_backup_dir present=%v want %v: %s", got, tc.present, out)
 			}
 		})
 	}

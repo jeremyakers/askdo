@@ -784,7 +784,7 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		return err
 	}
 	succeeded = true
-	if err := h.pruneSuccessfulStages(); err != nil {
+	if err := h.pruneSuccessfulStages(stage); err != nil {
 		return errors.Join(err, update(stateSucceeded, success+"; older stage cleanup failed; inspect activation log"))
 	}
 	return nil

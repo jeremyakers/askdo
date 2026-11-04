@@ -35,10 +35,13 @@ uses native Synology role operations instead of ordinary Linux steps.
 
 - DSM uses the vendor `/usr/bin/python3` and `synoacltool`. Ordinary Linux
   installation needs no Python.
-- Fresh DSM installs set `upgrade_backup_dir` to `/volume1/@askdo/upgrade-backups`
-  and create that root-private directory on the data volume, avoiding the small
-  system partition. Existing configs and backups are not migrated; administrators
-  should set the field once (see [upgrade backup handling](upgrade.md#backup-location-and-retention)).
+- Fresh DSM installs with a trusted `/volume1` set `upgrade_backup_dir` to
+  `/volume1/@askdo/upgrade-backups` and create that root-private directory on the
+  data volume, avoiding the small system partition. If `/volume1` is missing or
+  fails the trust/ACL checks, the installer prints a WARNING and leaves the field
+  unset, so backups stay in `/var/backups/askdo` until an administrator sets a
+  trusted data-volume directory. Existing configs and backups are not migrated;
+  set the field once (see [upgrade backup handling](upgrade.md#backup-location-and-retention)).
 - A checked canonical native `visudo` may be used when it matches the
   installed sudo version/grammar. Otherwise the verified release validator
   runs temporarily from root-controlled executable staging (never `/tmp`),
