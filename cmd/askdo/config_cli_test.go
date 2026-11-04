@@ -187,6 +187,68 @@ func TestConfigProtectedCheckRoutesBeforeDecode(t *testing.T) {
 	}
 }
 
+// Under the installed root:root 0600 config, the read-only verbs must route a
+// permission-denied config load through approval like `config check` and
+// `auth`, instead of failing with a raw permission error.
+func TestConfigReadOpsRoutePermissionDeniedConfig(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an OS-unprivileged caller for a real permission denial")
+	}
+	cliIdentity(t, "askdo-config", 1000)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"review", "mode", "--config", path},
+		{"review", "exempt", "list", "--config", path},
+		{"channel", "list", "--config", path},
+		{"reviewer", "list", "--config", path},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			calls := 0
+			code, _, stderr := captureCLI(t, func() int {
+				return runWithClient(args, func(_ context.Context, got []string, _ client.Options) int {
+					calls++
+					want := append([]string{"--reason", "askdo-config " + args[0], "--", configCLIPath}, args...)
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("got %q want %q", got, want)
+					}
+					return 19
+				})
+			})
+			if code != 19 || calls != 1 || stderr != "" {
+				t.Fatalf("protected read %v: code=%d calls=%d stderr=%q", args, code, calls, stderr)
+			}
+		})
+	}
+}
+
+// Only a permission denial routes: a missing or invalid config is a real error
+// the approved root run would hit too, and must not burn an approval.
+func TestConfigReadOpsDoNotRouteNonPermissionLoadErrors(t *testing.T) {
+	cliIdentity(t, "askdo-config", 1000)
+	for _, args := range [][]string{
+		{"review", "mode", "--config", filepath.Join(t.TempDir(), "absent.json")},
+		{"review", "exempt", "list", "--config", filepath.Join(t.TempDir(), "absent.json")},
+		{"channel", "list", "--config", filepath.Join(t.TempDir(), "absent.json")},
+		{"reviewer", "list", "--config", filepath.Join(t.TempDir(), "absent.json")},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			calls := 0
+			code, _, stderr := captureCLI(t, func() int {
+				return runWithClient(args, func(_ context.Context, _ []string, _ client.Options) int {
+					calls++
+					return 19
+				})
+			})
+			if calls != 0 || code == 19 || !strings.Contains(stderr, "read config") {
+				t.Fatalf("unreadable-config read %v: code=%d calls=%d stderr=%q", args, code, calls, stderr)
+			}
+		})
+	}
+}
+
 func TestConfigAuthPermissionRouting(t *testing.T) {
 	cliIdentity(t, "askdo-config", 1000)
 	oldRead, oldDefaults := authReadConfig, authDefaultConfigs
@@ -229,6 +291,26 @@ func TestLegacyOperatorNoticeAndServiceSilence(t *testing.T) {
 		code, _, stderr := captureCLI(t, func() int { return runWithClient(args, noCLIClient(t)) })
 		if code != 125 || strings.Contains(stderr, "moved to") || !strings.Contains(stderr, "requires root") {
 			t.Fatalf("service %v: code=%d stderr=%q", args, code, stderr)
+		}
+	}
+}
+
+// The broker starts the internal reviewer worker as bare `askdo reviewer`.
+// That invocation must not print the moved notice (it would pollute every
+// reviewer-stderr.log); operator `askdo reviewer <verb>` keeps the notice.
+func TestAskdoBareReviewerWorkerEmitsNoMovedNotice(t *testing.T) {
+	cliIdentity(t, "/usr/local/bin/askdo", 1000)
+	// Bare worker mode: no bootstrap pipe in tests, so it fails cleanly, but
+	// stderr must not contain the notice.
+	_, _, stderr := captureCLI(t, func() int { return run([]string{"reviewer"}) })
+	if strings.Contains(stderr, "moved to askdo-config") {
+		t.Fatalf("bare reviewer worker notice: stderr=%q", stderr)
+	}
+	// Operator subcommands still announce the move.
+	for _, verb := range []string{"list", "add", "edit", "delete", "moveup", "movedown"} {
+		_, _, stderr := captureCLI(t, func() int { return runWithClient([]string{"reviewer", verb, "--help"}, noCLIClient(t)) })
+		if !strings.HasPrefix(stderr, "askdo: 'reviewer' moved to askdo-config; this form will be removed in a future release\n") {
+			t.Fatalf("reviewer %s: stderr=%q, want notice", verb, stderr)
 		}
 	}
 }

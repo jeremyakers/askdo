@@ -76,7 +76,8 @@ value, so a config edit cannot strand an already-scheduled operation.
 On Synology DSM, use a data volume rather than the small system partition:
 set `"upgrade_backup_dir": "/volume1/@askdo/upgrade-backups"` in the root config.
 Fresh DSM installations write this setting and create root-private directories
-on `/volume1`. Existing installations are **not** rewritten, and existing backups
+on `/volume1` when it is present and trusted; otherwise they print a WARNING and
+keep the `/var/backups/askdo` default, which an administrator should change. Existing installations are **not** rewritten, and existing backups
 are not moved: an administrator must set the value once. A different data-volume
 location is fine if it meets the same trust checks. Keep the data volume mounted
 and allow space for staged binaries and database snapshots.

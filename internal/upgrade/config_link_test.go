@@ -34,8 +34,12 @@ func TestActivationConfigMulticallLink(t *testing.T) {
 			f.schedule(t)
 			err = f.helper.Activate(t.Context(), f.stage)
 			if initial == "regular file" || initial == "directory" {
-				if err == nil || !strings.Contains(err.Error(), "askdo-config") || activationReceipt(t, f).State != stateFailed {
-					t.Fatalf("foreign path accepted: err=%v receipt=%+v", err, activationReceipt(t, f))
+				// A conflicting path must fail during activation preflight: the
+				// services are stopped before binaries install, so accepting a
+				// foreign regular file or directory (or detecting it only after
+				// the stops) leaves the host offline.
+				if err == nil || !strings.Contains(err.Error(), "askdo-config") || activationReceipt(t, f).State != stateFailed || len(f.host.events) != 0 {
+					t.Fatalf("foreign path accepted: err=%v receipt=%+v effects=%v", err, activationReceipt(t, f), f.host.events)
 				}
 				if initial == "regular file" {
 					data, readErr := os.ReadFile(link)
