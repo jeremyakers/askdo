@@ -11,11 +11,15 @@ import (
 	"github.com/jeremyakers/askdo/internal/upgrade"
 )
 
+// Keep executable bootstrap files outside the receipt root, whose scanner only
+// accepts receipts. Unlike /run or /tmp, this location is normally executable.
+const defaultUpgradeBootstrapRoot = "/var/lib/askdo-upgrade-bootstrap"
+
 // upgradeBootstrapScript verifies a root-owned copy before executing the new
 // helper through a pinned file descriptor. The old installed helper is not
 // involved, and path replacement cannot change the verified inode before exec.
-func upgradeBootstrapScript(plan upgrade.Plan, capturedPlan []byte, backupRoot string) ([]byte, error) {
-	if !filepath.IsAbs(backupRoot) || filepath.Clean(backupRoot) != backupRoot || strings.ContainsAny(backupRoot, "'\n\r") {
+func upgradeBootstrapScript(plan upgrade.Plan, capturedPlan []byte, bootstrapRoot string) ([]byte, error) {
+	if !filepath.IsAbs(bootstrapRoot) || filepath.Clean(bootstrapRoot) != bootstrapRoot || strings.ContainsAny(bootstrapRoot, "'\n\r") {
 		return nil, errors.New("upgrade bootstrap root must be a clean absolute path")
 	}
 	if len(capturedPlan) == 0 || strings.ContainsAny(string(capturedPlan), "'\n\r") {
@@ -27,27 +31,27 @@ func upgradeBootstrapScript(plan upgrade.Plan, capturedPlan []byte, backupRoot s
 	if _, err := hex.DecodeString(plan.CLIDigest); err != nil {
 		return nil, errors.New("upgrade bootstrap CLI digest is invalid")
 	}
-	bootstrap := filepath.Join(backupRoot, "bootstrap-"+plan.Operation)
+	bootstrap := filepath.Join(bootstrapRoot, "bootstrap-"+plan.Operation)
 	candidate := filepath.Join(bootstrap, plan.CLIAsset)
 	script := fmt.Sprintf(`set -eu
 operation=$1
 source=$2
-backup='%s'
+root='%s'
 bootstrap='%s'
 candidate='%s'
-if [ ! -e "$backup" ]; then
-  /usr/bin/install -d -m 0700 "$backup"
+if [ ! -e "$root" ]; then
+  /usr/bin/install -d -m 0700 "$root"
 fi
-owner=$(/usr/bin/stat -c '%%u' "$backup")
-mode=$(/usr/bin/stat -c '%%a' "$backup")
-kind=$(/usr/bin/stat -c '%%F' "$backup")
-if [ "$owner" != "$(/usr/bin/id -u)" ] || [ "$kind" != directory ] || [ -L "$backup" ]; then
-  printf 'untrusted backup root: %%s\n' "$backup" >&2
+owner=$(/usr/bin/stat -c '%%u' "$root")
+mode=$(/usr/bin/stat -c '%%a' "$root")
+kind=$(/usr/bin/stat -c '%%F' "$root")
+if [ "$owner" != "$(/usr/bin/id -u)" ] || [ "$kind" != directory ] || [ -L "$root" ]; then
+  printf 'untrusted bootstrap root: %%s\n' "$root" >&2
   exit 1
 fi
 case "$mode" in
   700|750|755) ;;
-  *) printf 'untrusted backup root mode: %%s\n' "$mode" >&2; exit 1 ;;
+  *) printf 'untrusted bootstrap root mode: %%s\n' "$mode" >&2; exit 1 ;;
 esac
 /bin/mkdir -m 0700 "$bootstrap"
 trap '/bin/rm -rf -- "$bootstrap"' EXIT
@@ -57,6 +61,6 @@ printf '%%s  %%s\n' '%s' /proc/self/fd/3 | /usr/bin/sha256sum -c -
 status=0
 printf '%%s' '%s' | /proc/self/fd/3 upgrade-helper --operation "$operation" --source "$source" || status=$?
 exit "$status"
-`, backupRoot, bootstrap, candidate, plan.CLIAsset, plan.CLIDigest, capturedPlan)
+`, bootstrapRoot, bootstrap, candidate, plan.CLIAsset, plan.CLIDigest, capturedPlan)
 	return []byte(script), nil
 }

@@ -289,6 +289,9 @@ func TestHelperFailScheduledIsTerminalAndNotReplayed(t *testing.T) {
 	if err := f.helper.FailScheduled(t.Context(), f.stage, "duplicate reconciliation must be a no-op"); err != nil {
 		t.Fatalf("terminal receipt reconciliation: %v", err)
 	}
+	if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+		t.Fatalf("failed scheduled stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
+	}
 }
 
 func TestHelperActivateInstallsAndVerifiesWithStoppedBackups(t *testing.T) {
@@ -374,6 +377,9 @@ func TestHelperActivateRefusesTamperedStageBeforeEffects(t *testing.T) {
 	if err == nil || activationReceipt(t, f).State != "failed" || len(f.host.events) != 0 {
 		t.Fatalf("tamper: %v receipt=%+v effects=%v", err, activationReceipt(t, f), f.host.events)
 	}
+	if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+		t.Fatalf("pre-activation stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
+	}
 }
 
 func TestHelperScheduleRejectsDuplicateWithoutNewAcceptance(t *testing.T) {
@@ -403,6 +409,9 @@ func TestHelperScheduleManagerRejectionLeavesLiveFilesUntouched(t *testing.T) {
 	if err == nil || readErr != nil || string(data) != "old cli" || len(f.host.events) != 0 || activationReceipt(t, f).State != "failed" {
 		t.Fatalf("rejection: %v receipt=%+v live=%q effects=%v", err, activationReceipt(t, f), data, f.host.events)
 	}
+	if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+		t.Fatalf("rejected stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
+	}
 }
 
 func TestHelperActivateStartFailurePreservesBackupAndDoesNotRetry(t *testing.T) {
@@ -431,6 +440,9 @@ func TestHelperActivateStartFailurePreservesBackupAndDoesNotRetry(t *testing.T) 
 	}
 	if err == nil || r.State != "failed" || starts != 1 || !strings.Contains(r.Detail, "backup") {
 		t.Fatalf("start failure: %v receipt=%+v starts=%d", err, r, starts)
+	}
+	if _, err := os.Stat(f.stage); err != nil || strings.Contains(r.Detail, "stage removed") {
+		t.Fatalf("post-stop failure lost recovery stage: %v, receipt=%+v", err, r)
 	}
 }
 

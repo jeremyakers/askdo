@@ -28,6 +28,7 @@ const (
 	maxInspectedBytes       = int64(66060288)
 	MaxHashFileBytes        = int64(32 << 20)
 	MaxHashedBytesPerReview = int64(64 << 20)
+	defaultUpgradeBackupDir = "/var/backups/askdo"
 )
 
 // Duration is a JSON Go-duration string.
@@ -60,14 +61,15 @@ func (d Duration) Value() time.Duration { return time.Duration(d) }
 // Config is a direct version 4 or explicit fleet version 5 document. Submit access is
 // controlled by Unix socket permissions, not a configuration section.
 type Config struct {
-	ConfigVersion int              `json:"config_version"`
-	Inspection    InspectionConfig `json:"inspection"`
-	Review        ReviewConfig     `json:"review"`
-	Limits        LimitsConfig     `json:"limits"`
-	Telegram      TelegramConfig   `json:"telegram"`
-	Fleet         *FleetConfig     `json:"fleet,omitempty"`
-	Warnings      []string         `json:"-"`
-	present       configPresence
+	ConfigVersion    int              `json:"config_version"`
+	UpgradeBackupDir string           `json:"upgrade_backup_dir,omitempty"`
+	Inspection       InspectionConfig `json:"inspection"`
+	Review           ReviewConfig     `json:"review"`
+	Limits           LimitsConfig     `json:"limits"`
+	Telegram         TelegramConfig   `json:"telegram"`
+	Fleet            *FleetConfig     `json:"fleet,omitempty"`
+	Warnings         []string         `json:"-"`
+	present          configPresence
 }
 
 // MarshalJSON preserves the direct document unchanged, but omits its forbidden
@@ -784,6 +786,9 @@ func (c *Config) Validate() error {
 		return errors.New("config is nil")
 	}
 	c.Warnings = c.Warnings[:0]
+	if err := c.ValidateUpgradeBackupDir(); err != nil {
+		return err
+	}
 	if c.Limits.MaxHashFileBytes == 0 && !hasField(c.present.limits, "max_hash_file_bytes") {
 		c.Limits.MaxHashFileBytes = MaxHashFileBytes
 	}
@@ -1215,6 +1220,9 @@ func validateModelList(models []ModelConfig, localOnly, checkFiles bool) error {
 }
 
 func applyDefaults(c *Config) {
+	if c.UpgradeBackupDir == "" && !hasField(c.present.top, "upgrade_backup_dir") {
+		c.UpgradeBackupDir = defaultUpgradeBackupDir
+	}
 	if c.Inspection.SudoPolicyUIDs == nil && !hasField(c.present.inspection, "sudo_policy_uids") {
 		c.Inspection.SudoPolicyUIDs = []uint32{}
 	}
@@ -1276,6 +1284,19 @@ func applyDefaults(c *Config) {
 		c.Telegram.ApprovalTTL = Duration(defaultApprovalTTL)
 	}
 }
+
+// ValidateUpgradeBackupDir checks only the root helper's backup location, so
+// reading it does not depend on unrelated reviewer or channel credentials.
+func (c *Config) ValidateUpgradeBackupDir() error {
+	if c.UpgradeBackupDir == "" && !hasField(c.present.top, "upgrade_backup_dir") {
+		c.UpgradeBackupDir = defaultUpgradeBackupDir
+	}
+	if !filepath.IsAbs(c.UpgradeBackupDir) || filepath.Clean(c.UpgradeBackupDir) != c.UpgradeBackupDir {
+		return errors.New("upgrade_backup_dir must be an absolute clean path")
+	}
+	return nil
+}
+
 func validatePathList(name string, paths []string, deduplicate bool) error {
 	seen := map[string]struct{}{}
 	for _, path := range paths {

@@ -37,18 +37,35 @@ const (
 
 // Hidden root entry point. Main command routing is deliberately separate from
 // the helper so an ordinary user can never select its privileged dependencies.
+var upgradeReadConfig = operator.ReadRootPrivate
+
 func runUpgradeHelper(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	return runUpgradeHelperWith(ctx, args, getEUID(), func() upgrade.Helper {
-		tools := upgradeSystemTools{}
-		return upgrade.Helper{BackupRoot: "/var/backups/askdo", ReceiptRoot: defaultUpgradeReceiptRoot, Manager: newUpgradeActivationManager(tools), Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
-			return preflightUpgradeTopology(defaultConfigPath, defaultGatewayConfig)
-		}}
+	return runUpgradeHelperWith(ctx, args, getEUID(), func() (upgrade.Helper, error) {
+		return newUpgradeHelper(defaultConfigPath, upgradeReadConfig)
 	}, stdin, stdout, stderr)
 }
 
-func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func() upgrade.Helper, stdin io.Reader, stdout, stderr io.Writer) int {
+func newUpgradeHelper(configPath string, readConfig func(string, int64) ([]byte, error)) (upgrade.Helper, error) {
+	data, err := readConfig(configPath, 1<<20)
+	if err != nil {
+		return upgrade.Helper{}, fmt.Errorf("read root upgrade config: %w", err)
+	}
+	cfg, err := config.DecodeForFleetMutation(data)
+	if err != nil {
+		return upgrade.Helper{}, err
+	}
+	if err := cfg.ValidateUpgradeBackupDir(); err != nil {
+		return upgrade.Helper{}, err
+	}
+	tools := upgradeSystemTools{}
+	return upgrade.Helper{BackupRoot: cfg.UpgradeBackupDir, ReceiptRoot: defaultUpgradeReceiptRoot, Manager: newUpgradeActivationManager(tools), Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
+		return preflightUpgradeTopology(configPath, defaultGatewayConfig)
+	}}, nil
+}
+
+func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func() (upgrade.Helper, error), stdin io.Reader, stdout, stderr io.Writer) int {
 	if euid != 0 {
 		fmt.Fprintln(stderr, "upgrade-helper requires root")
 		return 125
@@ -62,7 +79,11 @@ func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory 
 		fmt.Fprintln(stderr, "invalid upgrade-helper arguments")
 		return 125
 	}
-	helper := factory()
+	helper, err := factory()
+	if err != nil {
+		fmt.Fprintln(stderr, "upgrade-helper:", err)
+		return 1
+	}
 	if *activate != "" {
 		if host, ok := helper.Host.(*upgradeLocalHost); ok {
 			host.operation = filepath.Base(*activate)

@@ -139,7 +139,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		// complete script, so neither mutable source bytes nor obsolete installed
 		// helper behavior can select the scheduling or activation path. Captured
 		// stdin is always human-only, including on older brokers.
-		bootstrap, err := upgradeBootstrapScript(plan, capturedPlan, "/var/backups/askdo")
+		bootstrap, err := upgradeBootstrapScript(plan, capturedPlan, defaultUpgradeBootstrapRoot)
 		if err != nil {
 			fmt.Fprintln(stderr, "upgrade bootstrap; no command submitted:", err)
 			return 125

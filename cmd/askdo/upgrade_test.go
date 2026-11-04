@@ -163,9 +163,12 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				if err != nil || !bytes.Contains(captured, capturedPlan) || !bytes.Contains(captured, []byte(plan.CLIDigest)) || !bytes.Contains(captured, []byte("/usr/bin/sha256sum")) || !bytes.Contains(captured, []byte("upgrade-helper")) {
 					t.Fatalf("stdin is not the pinned bootstrap and approved plan: %s %v", captured, err)
 				}
+				if bytes.Contains(captured, []byte("/var/backups/askdo")) || !bytes.Contains(captured, []byte("/var/lib/askdo-upgrade-bootstrap/bootstrap-"+operation)) {
+					t.Fatalf("client bootstrap depends on backup storage: %s", captured)
+				}
 				// Model broker-frozen delivery through the real helper entry point.
 				// Manager acceptance is fake; no candidate or system tool runs.
-				factory := func() upgrade.Helper {
+				factory := func() (upgrade.Helper, error) {
 					return upgrade.Helper{BackupRoot: filepath.Join(temps, "root-stages"), ReceiptRoot: root, TrustDirectory: func(path string, create bool) error {
 						if create {
 							return os.MkdirAll(path, 0o755)
@@ -182,7 +185,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 							return fmt.Errorf("root used mutable source plan: %+v %v", receipt, err)
 						}
 						return nil
-					})}
+					})}, nil
 				}
 				if code := runUpgradeHelperWith(ctx, []string{"--operation", operation, "--source", source}, 0, factory, bytes.NewReader(capturedPlan), io.Discard, io.Discard); code != 0 {
 					t.Fatalf("captured helper scheduling code=%d", code)

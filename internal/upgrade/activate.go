@@ -189,6 +189,16 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 			return "", errors.New("upgrade roots must be clean absolute paths")
 		}
+		if root == h.BackupRoot {
+			if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+				if err := h.trust(filepath.Dir(root), true); err != nil {
+					return "", err
+				}
+				if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+					return "", err
+				}
+			}
+		}
 		if err := h.trust(root, true); err != nil {
 			return "", err
 		}
@@ -248,7 +258,7 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 		return "", err
 	}
 	defer unlock()
-	staged = true // The receipt now refers to evidence that must be preserved.
+	staged = true // Receipt-aware cleanup now owns this stage.
 	if err := ctx.Err(); err != nil {
 		return stage, errors.Join(err, h.scheduleFailure(id, "manager not called", stateFailed))
 	}
@@ -256,7 +266,7 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	// on this SAME lock before inspecting or updating the receipt.
 	if err := h.Manager.Start(ctx, id, stage); err != nil {
 		state := stateFailed
-		detail := "manager rejected activation; no live changes"
+		detail := "manager rejected activation"
 		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			state, detail = stateUnknown, "manager acceptance interrupted; inspect unit before recovery"
 		}
@@ -288,8 +298,7 @@ func (h Helper) FailScheduled(ctx context.Context, stage, detail string) error {
 	if r.State != stateScheduled {
 		return nil
 	}
-	r.State, r.Detail, r.UpdatedAtUnixMS = stateFailed, detail, h.now().UnixMilli()
-	return writeReceipt(h.ReceiptRoot, r)
+	return h.failUnchanged(r, detail)
 }
 
 // Called only while Schedule owns NewOperation's lock; UpdateReceipt would
@@ -298,6 +307,9 @@ func (h Helper) scheduleFailure(id, detail, state string) error {
 	r, err := ReadReceipt(h.ReceiptRoot, id)
 	if err != nil {
 		return err
+	}
+	if state == stateFailed {
+		return h.failUnchanged(r, detail)
 	}
 	r.State, r.Detail, r.UpdatedAtUnixMS = state, detail, h.now().UnixMilli()
 	return writeReceipt(h.ReceiptRoot, r)
@@ -416,14 +428,19 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		return errors.Join(errors.New("interrupted activation; inspect preserved evidence; no replay"), update(stateUnknown, "prior activation interrupted; no effects replayed; backup retained at stage/backup"))
 	}
 	phase, effects := "preflight", false
+	succeeded, recoveryFailed := false, false
 	backup := filepath.Join(stage, "backup")
 	defer func() {
-		if err != nil {
+		if err != nil && !succeeded {
 			state := stateFailed
 			if effects && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 				state = stateUnknown
 			}
-			err = errors.Join(err, update(state, phase+" failed; no automatic rollback; backup retained at stage/backup"))
+			if !effects && !recoveryFailed {
+				err = errors.Join(err, h.failUnchanged(r, phase+" failed"))
+			} else {
+				err = errors.Join(err, update(state, phase+" failed; no automatic rollback; backup retained at stage/backup"))
+			}
 			err = fmt.Errorf("upgrade %s (stage %s; backup %s): %w", phase, stage, backup, err)
 		}
 	}()
@@ -472,6 +489,7 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 			for i := len(drainAttempts) - 1; i >= 0; i-- {
 				name := drainAttempts[i]
 				if resumeErr := h.Host.SetDraining(resumeCtx, layout, name, before[name], false); resumeErr != nil {
+					recoveryFailed = true
 					err = errors.Join(err, fmt.Errorf("resume %s admission: %w", name, resumeErr))
 				}
 			}
@@ -671,7 +689,15 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 			return errors.New("running image changed during responsiveness verification")
 		}
 	}
-	return update(stateSucceeded, "running executable hashes and broker/gateway responsiveness verified; backup retained at stage/backup")
+	const success = "running executable hashes and broker/gateway responsiveness verified; backup retained at stage/backup"
+	if err := update(stateSucceeded, success); err != nil {
+		return err
+	}
+	succeeded = true
+	if err := h.pruneSuccessfulStages(); err != nil {
+		return errors.Join(err, update(stateSucceeded, success+"; older stage cleanup failed; inspect activation log"))
+	}
+	return nil
 }
 
 func (h Helper) waitQuiet(ctx context.Context, layout Layout, drained map[string]Unit) error {

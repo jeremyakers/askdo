@@ -89,6 +89,7 @@ when the key is absent.
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
 | `config_version` | yes | — | Must equal `4`. |
+| `upgrade_backup_dir` | no | `/var/backups/askdo` | Absolute clean path (no `..`, redundant separators or trailing slash). Applies to direct v4 and fleet v5 hosts. The root upgrade helper alone reads it; its directory and ancestors must pass the existing root-owned, nonsymlink, non-writable-by-group/others trust checks. Missing directories are created by root, with the backup directory at `0700`. |
 | `inspection` | yes | — | Object, below. |
 | `review` | yes | — | Object, below. |
 | `limits` | yes (object) | all fields defaulted | Object, below. |

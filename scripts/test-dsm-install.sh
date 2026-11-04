@@ -19,7 +19,7 @@ if [ "${1:-}" != --inside ]; then
 fi
 fail() { printf '%s\n' "$*" >&2; cat /tmp/result >&2; exit 1; }
 apt-get update -qq >/dev/null && apt-get install -y -qq sudo python3 >/dev/null
-mkdir -p /etc.defaults /usr/syno/sbin /usr/syno/bin /fixture /usr/local/libexec
+mkdir -p /etc.defaults /usr/syno/sbin /usr/syno/bin /fixture /usr/local/libexec /volume1
 # Native absence replies for synouser/synogroup adapters. The measured DSM user
 # reply lists the absence code before the source hint; shape files are per kind.
 cat > /fixture/absence.sh <<'EOF'
@@ -148,15 +148,19 @@ if grep -q forbidden-go /fixture/calls; then fail 'destination Go invoked'; fi
 cmp /etc/sudoers.d/askdo /src/contrib/askdo.sudoers || fail 'policy mismatch'
 test "$(stat -c %g /etc/askdo/credentials)" = "$(/usr/bin/getent group askdo-review | cut -d: -f3)" || fail 'named credential group mismatch'
 if grep -E '^service (enable|start|restart)' /fixture/calls; then fail 'service activated'; fi
+python3 -I -S -c 'import json; assert json.load(open("/etc/askdo/config.json"))["upgrade_backup_dir"] == "/volume1/@askdo/upgrade-backups"' || fail 'DSM backup directory not configured on data volume'
+test "$(stat -c %a:%u:%g /volume1/@askdo/upgrade-backups)" = 700:0:0 || fail 'DSM backup directory not root-private'
 printf 'DSM fresh success passed (native adapters only)\n'
 uid=$(id -u askdo-review)
 gid=$(/usr/bin/getent group askdo-review | cut -d: -f3)
 /usr/sbin/useradd -G askdo -s /usr/sbin/nologin existing-submitter
 printf 'operator configuration\n' > /etc/askdo/config.json
+rmdir /volume1/@askdo/upgrade-backups /volume1/@askdo
 : > /fixture/calls
 sh /src/install.sh > /tmp/result 2>&1 || fail 'repeat DSM install failed'
 test "$(id -u askdo-review)" = "$uid" && test "$(/usr/bin/getent group askdo-review | cut -d: -f3)" = "$gid" || fail 'repeat identities changed'
 grep -qx 'operator configuration' /etc/askdo/config.json || fail 'operator config changed'
+test ! -e /volume1/@askdo || fail 'existing install automatically created a backup directory'
 id -nG existing-submitter | grep -qw askdo || fail 'existing submitter membership changed'
 if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'repeat mutated roles or used generic backend'; fi
 reset_fixture() {
@@ -166,7 +170,7 @@ reset_fixture() {
   /usr/sbin/groupdel askdo 2>/dev/null || :
   sed -i '/^#/d' /etc/group /etc/passwd
   rm -f /fixture/nss-header
-  rm -rf /etc/askdo /var/lib/askdo /var/lib/askdo-review /run/askdo
+  rm -rf /etc/askdo /var/lib/askdo /var/lib/askdo-review /run/askdo /volume1/@askdo
   rm -f /usr/local/bin/askdo /usr/local/libexec/askdo-launch /etc/sudoers.d/askdo \
     /etc/systemd/system/askdo.service /etc/systemd/system/askdo-gateway.service
   rm -f /fixture/enabled /fixture/*-permission /fixture/acl-unknown /fixture/bad-* \

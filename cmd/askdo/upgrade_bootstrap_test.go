@@ -43,9 +43,10 @@ func runBootstrap(t *testing.T, source string, plan upgrade.Plan, captured []byt
 func TestUpgradeBootstrapExecutesOnlyPinnedCandidate(t *testing.T) {
 	// Given a downloaded candidate and its approved digest.
 	source, plan, captured := bootstrapFixture(t)
+	root := filepath.Join(t.TempDir(), "missing", "upgrade")
 
 	// When the captured bootstrap verifies and schedules the candidate.
-	output, err := runBootstrap(t, source, plan, captured, filepath.Join(t.TempDir(), "missing", "backups"))
+	output, err := runBootstrap(t, source, plan, captured, root)
 
 	// Then the root-private copy, not the mutable download, supplied the helper.
 	if err != nil {
@@ -55,6 +56,12 @@ func TestUpgradeBootstrapExecutesOnlyPinnedCandidate(t *testing.T) {
 	data, err := os.ReadFile(marker)
 	if err != nil || string(data) != "/proc/self/fd/3" {
 		t.Fatalf("executed path=%q, err=%v", data, err)
+	}
+	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("bootstrap parent: %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bootstrap-"+plan.Operation)); !os.IsNotExist(err) {
+		t.Fatalf("successful bootstrap was not cleaned up: %v", err)
 	}
 }
 
@@ -87,8 +94,8 @@ func TestUpgradeBootstrapRejectsReplacedCandidateBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestUpgradeBootstrapRejectsUntrustedBackupRoot(t *testing.T) {
-	// Given a writable backup root that must never supply root execution paths.
+func TestUpgradeBootstrapRejectsUntrustedBootstrapRoot(t *testing.T) {
+	// Given a writable bootstrap root that must never supply root execution paths.
 	source, plan, captured := bootstrapFixture(t)
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o777); err != nil {
@@ -99,7 +106,7 @@ func TestUpgradeBootstrapRejectsUntrustedBackupRoot(t *testing.T) {
 	output, err := runBootstrap(t, source, plan, captured, root)
 
 	// Then it refuses before installing or executing the candidate.
-	if err == nil || !strings.Contains(output, "untrusted backup root") {
+	if err == nil || !strings.Contains(output, "untrusted bootstrap root") {
 		t.Fatalf("untrusted root accepted: %v, output=%s", err, output)
 	}
 	if _, statErr := os.Stat(filepath.Join(source, "executed")); !os.IsNotExist(statErr) {

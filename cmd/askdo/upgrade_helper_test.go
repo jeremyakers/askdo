@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,9 +53,9 @@ func TestUpgradeHelperRequiresRootBeforeConstructingDependencies(t *testing.T) {
 	// Given
 	var stderr bytes.Buffer
 	called := false
-	factory := func() upgrade.Helper {
+	factory := func() (upgrade.Helper, error) {
 		called = true
-		return upgrade.Helper{}
+		return upgrade.Helper{}, nil
 	}
 	// When
 	code := runUpgradeHelperWith(t.Context(), []string{"--activate", "/stage"}, 1000, factory, nil, io.Discard, &stderr)
@@ -67,7 +70,7 @@ func TestUpgradeHelperRejectsAmbiguousArgumentsWithoutEffects(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			// Given
 			called := false
-			factory := func() upgrade.Helper { called = true; return upgrade.Helper{} }
+			factory := func() (upgrade.Helper, error) { called = true; return upgrade.Helper{}, nil }
 			// When
 			code := runUpgradeHelperWith(t.Context(), args, 0, factory, nil, io.Discard, io.Discard)
 			// Then
@@ -95,6 +98,72 @@ func (f upgradeScheduleManagerFunc) Start(ctx context.Context, id, stage string)
 	return f(ctx, id, stage)
 }
 
+func TestUpgradeHelperUsesRootConfiguredBackupDirectory(t *testing.T) {
+	// Given: the trusted config read seam; candidate, staging and receipts remain
+	// real files. No installed configuration, system tool or live service is used.
+	root := t.TempDir()
+	backup := filepath.Join(root, "data-volume", "upgrade-backups")
+	configPath := filepath.Join(root, "config.json")
+	body := strings.TrimSuffix(hostDoc(), "}") + `,"upgrade_backup_dir":` + strconv.Quote(backup) + `}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read := false
+	helper, err := newUpgradeHelper(configPath, func(path string, max int64) ([]byte, error) {
+		read = path == configPath && max == 1<<20
+		return os.ReadFile(path)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read || helper.BackupRoot != backup {
+		t.Fatalf("root config read=%v backup=%q, want %q", read, helper.BackupRoot, backup)
+	}
+	helper.Preflight = nil
+	helper.ReceiptRoot = filepath.Join(root, "receipts")
+	helper.TrustDirectory = func(path string, create bool) error {
+		if create {
+			return os.MkdirAll(path, 0o755)
+		}
+		_, err := os.Stat(path)
+		return err
+	}
+	accepted := false
+	helper.Manager = upgradeScheduleManagerFunc(func(_ context.Context, id, stage string) error {
+		accepted = id == cliUpgradeID && stage == filepath.Join(backup, cliUpgradeID)
+		return nil
+	})
+	source := t.TempDir()
+	raw, assets := cliReleaseFixture("v3.2.1")
+	assets["install-manifest.v1"] = []byte(raw)
+	for name, data := range assets {
+		if err := os.WriteFile(filepath.Join(source, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := upgrade.ParseManifest(strings.NewReader(raw), "v3.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := upgrade.NewPlan(cliUpgradeID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, _ := json.Marshal(plan)
+	// When: scheduling invokes the helper selected from root-only configuration.
+	_, err = helper.Schedule(t.Context(), cliUpgradeID, source, captured)
+	// Then: only the configured data-volume root contains the private stage.
+	info, statErr := os.Stat(backup)
+	if err != nil || !accepted || statErr != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("configured staging: err=%v accepted=%v root=%v stat=%v", err, accepted, info, statErr)
+	}
+	// A failed trusted read cannot silently fall back to the system partition.
+	_, err = newUpgradeHelper(configPath, func(string, int64) ([]byte, error) { return nil, os.ErrPermission })
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("config read failure ignored: %v", err)
+	}
+}
+
 func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 	for _, tc := range []struct {
 		name, data string
@@ -108,8 +177,8 @@ func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 				input = nil
 			}
 			called := false
-			factory := func() upgrade.Helper {
-				return upgrade.Helper{Manager: upgradeScheduleManagerFunc(func(context.Context, string, string) error { called = true; return nil })}
+			factory := func() (upgrade.Helper, error) {
+				return upgrade.Helper{Manager: upgradeScheduleManagerFunc(func(context.Context, string, string) error { called = true; return nil })}, nil
 			}
 			var stdout, stderr bytes.Buffer
 			// When
@@ -128,7 +197,7 @@ func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 func TestUpgradeHelperActivateDoesNotConsumeStdin(t *testing.T) {
 	// Given: activation reads the trusted stage, not a new approval stream.
 	input := &trackingUpgradeInput{Reader: strings.NewReader("must not be consumed")}
-	factory := func() upgrade.Helper { return upgrade.Helper{} }
+	factory := func() (upgrade.Helper, error) { return upgrade.Helper{}, nil }
 	// When: even a rejected activation must not inspect scheduling stdin.
 	code := runUpgradeHelperWith(t.Context(), []string{"--activate", "/not-a-stage"}, 0, factory, input, io.Discard, io.Discard)
 	// Then
@@ -150,9 +219,10 @@ func TestMainPassesStdinToUpgradeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer input.Close()
-	previousInput, previousUID := os.Stdin, getEUID
+	previousInput, previousUID, previousRead := os.Stdin, getEUID, upgradeReadConfig
 	os.Stdin, getEUID = input, func() int { return 0 }
-	defer func() { os.Stdin, getEUID = previousInput, previousUID }()
+	upgradeReadConfig = func(string, int64) ([]byte, error) { return []byte(hostDoc()), nil }
+	defer func() { os.Stdin, getEUID, upgradeReadConfig = previousInput, previousUID, previousRead }()
 	// When
 	code := runWithClient([]string{"upgrade-helper", "--operation", cliUpgradeID, "--source", t.TempDir()}, func(context.Context, []string, client.Options) int {
 		t.Fatal("helper routed to ordinary client")
