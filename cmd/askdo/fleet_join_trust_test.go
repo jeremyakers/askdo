@@ -111,9 +111,10 @@ func expectedFleetJoinCode(request fleetproto.JoinRequest, leafDER []byte, hostN
 func TestFleetJoinPinsFirstGatewayCertificate(t *testing.T) {
 	for _, mode := range []string{"leaf", "chain", "ca file"} {
 		t.Run(mode, func(t *testing.T) {
-			// Given a LAN gateway with an unknown issuer, with no terminal or
-			// pasted fingerprint. Only the optional explicit-CA case uses a file.
+			// Given a LAN gateway with an unknown issuer and a confirming operator.
+			// Only the optional explicit-CA case uses a file instead of confirmation.
 			path := fleetJoinHostFixture(t, localJoinConfig)
+			tty := stubFleetJoinTTY(t, "y\n")
 			identity, certs := fleetJoinTLSIdentity(t, mode == "chain", "")
 			pinned := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certs[len(certs)-1].Raw})
 			var posts, gets atomic.Int32
@@ -168,6 +169,9 @@ func TestFleetJoinPinsFirstGatewayCertificate(t *testing.T) {
 			// CAPEM, and the terminal code binds the leaf and both request hashes.
 			if err != nil {
 				t.Fatalf("join: %v\nout=%s", err, out.String())
+			}
+			if (tty.Len() > 0) != (mode != "ca file") {
+				t.Fatal("confirmation must be limited to provisional trust", tty.String())
 			}
 			cfg, err := config.Load(path)
 			if err != nil || cfg.Fleet == nil {

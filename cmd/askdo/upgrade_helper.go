@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -140,7 +139,10 @@ type upgradeToolRunner interface {
 	Run(context.Context, string, ...string) (string, error)
 }
 
-type upgradeSystemdManager struct{ tools upgradeToolRunner }
+type upgradeSystemdManager struct {
+	tools       upgradeToolRunner
+	receiptRoot string // Tests isolate the fixed executable namespace.
+}
 
 // Open once, verify that inode against the approval, then execute that same
 // descriptor. Neither a replaced stage entry nor a replaced parent directory
@@ -148,12 +150,13 @@ type upgradeSystemdManager struct{ tools upgradeToolRunner }
 const upgradeActivationScript = `set -eu
 stage=$1
 digest=$2
-exec 3<"$stage/askdo-linux-` + runtime.GOARCH + `"
+candidate=$3
+exec 3<"$candidate"
 printf '%s  %s\n' "$digest" /proc/self/fd/3 | /usr/bin/sha256sum -c -
 exec /proc/self/fd/3 upgrade-helper --activate "$stage"
 `
 
-func upgradeActivationArgs(id, stage, cliDigest string) ([]string, error) {
+func upgradeActivationArgs(id, stage, cliDigest, receiptRoot string) ([]string, error) {
 	if !upgradeRuntimeOperation.MatchString(id) || !filepath.IsAbs(stage) || filepath.Clean(stage) != stage || filepath.Base(stage) != id || strings.ContainsRune(stage, 0) {
 		return nil, errors.New("activation stage must be a clean absolute operation directory")
 	}
@@ -163,11 +166,15 @@ func upgradeActivationArgs(id, stage, cliDigest string) ([]string, error) {
 	if _, err := hex.DecodeString(cliDigest); err != nil {
 		return nil, errors.New("activation CLI digest must be 64 hex digits")
 	}
-	return []string{"/bin/sh", "-c", upgradeActivationScript, "sh", stage, cliDigest}, nil
+	if receiptRoot == "" {
+		receiptRoot = defaultUpgradeReceiptRoot
+	}
+	candidate := filepath.Join(receiptRoot, "activate-"+id, "askdo")
+	return []string{"/bin/sh", "-c", upgradeActivationScript, "sh", stage, cliDigest, candidate}, nil
 }
 
 func (m upgradeSystemdManager) Start(ctx context.Context, id, stage, cliDigest string) error {
-	command, err := upgradeActivationArgs(id, stage, cliDigest)
+	command, err := upgradeActivationArgs(id, stage, cliDigest, m.receiptRoot)
 	if err != nil {
 		return err
 	}
@@ -182,7 +189,7 @@ func (m upgradeSystemdManager) Start(ctx context.Context, id, stage, cliDigest s
 // The helper starts in a new session, outside the broker's process group, and
 // writes its own durable activation log. The broker does not cancel it during
 // shutdown, so activation can finish and report its receipt after restart.
-type upgradeDetachedManager struct{}
+type upgradeDetachedManager struct{ receiptRoot string }
 
 func newUpgradeActivationManager(tools upgradeToolRunner) upgrade.ActivationManager {
 	if info, err := os.Stat(upgradeSystemdRun); err == nil && !info.IsDir() {
@@ -191,8 +198,8 @@ func newUpgradeActivationManager(tools upgradeToolRunner) upgrade.ActivationMana
 	return upgradeDetachedManager{}
 }
 
-func (upgradeDetachedManager) Start(_ context.Context, id, stage, cliDigest string) error {
-	command, err := upgradeActivationArgs(id, stage, cliDigest)
+func (m upgradeDetachedManager) Start(_ context.Context, id, stage, cliDigest string) error {
+	command, err := upgradeActivationArgs(id, stage, cliDigest, m.receiptRoot)
 	if err != nil {
 		return err
 	}

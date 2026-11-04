@@ -81,3 +81,44 @@ func TestUpgradeBackupDirectoryExcludesReceiptAndBootstrapNamespace(t *testing.T
 		})
 	}
 }
+
+func TestLoadUpgradeBackupDirectoryMustFitReceiptStage(t *testing.T) {
+	defer stubCredentialChecks(t)()
+	for _, tc := range []struct {
+		name, root string
+		valid      bool
+	}{
+		{"maximum stage", "/" + strings.Repeat("a", 475), true},
+		{"oversized stage", "/" + strings.Repeat("a", 476), false},
+		{"space and punctuation", "/backups/askdo's releases", true},
+		{"unicode", "/backups/café", false},
+		{"newline", "/backups/askdo\n", false},
+		{"tab", "/backups/askdo\t", false},
+		{"nul", "/backups/askdo\x00", false},
+		{"delete", "/backups/askdo\x7f", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{UpgradeBackupDir: tc.root}
+			if err := cfg.ValidateUpgradeBackupDir(); (err == nil) != tc.valid {
+				t.Errorf("backup root validation: %v, valid=%v", err, tc.valid)
+			}
+			encoded, err := json.Marshal(tc.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			body := `{"config_version":4,"inspection":{"read_roots":[]},"review":{"models":[{"name":"local","api":"openai_chat","base_url":"http://localhost:11434","model":"m","data_boundary":"local"}]},"limits":{},"telegram":{"token_file":"/keys/token","operator_user_id":1,"chat_id":-1},"upgrade_backup_dir":` + string(encoded) + `}`
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err = Load(path)
+			if tc.valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || (tc.name != "nul" && !strings.Contains(err.Error(), "upgrade_backup_dir must form a printable ASCII receipt stage of at most 512 bytes")) {
+				t.Fatalf("unrepresentable receipt stage accepted or unclear error: %v", err)
+			}
+		})
+	}
+}

@@ -1586,6 +1586,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	}
 	return proto.Bootstrap{
 		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: j.target.UID, TargetName: j.target.Name, RequestID: j.req.RequestID,
+		TargetGID: j.target.gid(), TargetGroups: j.target.groups(), TargetGroupNames: j.target.groupNames(),
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
@@ -1636,7 +1637,7 @@ func (j *jobRuntime) operation() Operation {
 		env = append(env, "ASKDO_BUNDLE="+j.spool.bundle)
 	}
 	target := j.target
-	target.Groups = append([]uint32(nil), j.target.Groups...)
+	target.Groups = j.target.groups()
 	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd, Target: target}
 }
 

@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -311,7 +310,7 @@ func TestUpgradeSystemdManagerStartsUniqueIndependentOneShotWithoutWaiting(t *te
 	digest := strings.Repeat("ab", 32)
 	err := manager.Start(t.Context(), id, stage, digest)
 	// Then
-	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/bin/sh", "-c", upgradeActivationScript, "sh", stage, digest}}}
+	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/bin/sh", "-c", upgradeActivationScript, "sh", stage, digest, filepath.Join(defaultUpgradeReceiptRoot, "activate-"+id, "askdo")}}}
 	if err != nil || !reflect.DeepEqual(tools.calls, want) {
 		t.Fatalf("manager: %v calls=%+v", err, tools.calls)
 	}
@@ -469,19 +468,23 @@ type upgradeRoundTripFunc func(*http.Request) (*http.Response, error)
 func (f upgradeRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestUpgradeDetachedManagerStartsStagedHelper(t *testing.T) {
-	// Given a staged helper and no systemd-run dependency.
+	// Given a verified helper copied off the backup volume and no systemd-run dependency.
 	stage := filepath.Join(t.TempDir(), "quotes ' spaces $()", cliUpgradeID)
 	if err := os.MkdirAll(stage, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	helper := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
+	receipts := t.TempDir()
+	helper := filepath.Join(receipts, "activate-"+cliUpgradeID, "askdo")
+	if err := os.Mkdir(filepath.Dir(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	candidate := []byte("#!/bin/sh\nprintf '%s\\n' \"$0\" \"$UPGRADE_STAGE $ASKDO_UPGRADE_DETACHED\" \"$@\" \"$PWD\" \"$PATH\" \"$LANG $LC_ALL\" > \"$UPGRADE_STAGE/executed\"\nprintf 'stderr preserved\\n' >&2\n")
 	if err := os.WriteFile(helper, candidate, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(candidate)
 	// When the detached manager starts activation.
-	if err := (upgradeDetachedManager{}).Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err != nil {
+	if err := (upgradeDetachedManager{receiptRoot: receipts}).Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err != nil {
 		t.Fatal(err)
 	}
 	// Then the staged helper, not the old installed binary, produced the log.
@@ -536,7 +539,7 @@ func TestUpgradeActivationManagersRejectInvalidBindingsBeforeLaunch(t *testing.T
 type activationShellTools struct{ output string }
 
 func (s *activationShellTools) Run(ctx context.Context, path string, args ...string) (string, error) {
-	if path != upgradeSystemdRun || len(args) != 12 || args[5] != "--" {
+	if path != upgradeSystemdRun || len(args) != 13 || args[5] != "--" {
 		return "", fmt.Errorf("unexpected systemd command: %s %q", path, args)
 	}
 	output, err := exec.CommandContext(ctx, args[6], args[7:]...).CombinedOutput()
@@ -555,7 +558,11 @@ func TestUpgradeActivationRejectsReplacedCandidateBeforeExecution(t *testing.T) 
 			if err := os.Mkdir(stage, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			candidate := filepath.Join(stage, "askdo-linux-"+runtime.GOARCH)
+			receipts := t.TempDir()
+			candidate := filepath.Join(receipts, "activate-"+cliUpgradeID, "askdo")
+			if err := os.Mkdir(filepath.Dir(candidate), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			approved := []byte("#!/bin/sh\nprintf approved > \"$3/executed\"\n")
 			if err := os.WriteFile(candidate, approved, 0o700); err != nil {
 				t.Fatal(err)
@@ -572,7 +579,7 @@ func TestUpgradeActivationRejectsReplacedCandidateBeforeExecution(t *testing.T) 
 			}
 			if !detached {
 				tools := &activationShellTools{}
-				manager := upgradeSystemdManager{tools: tools}
+				manager := upgradeSystemdManager{tools: tools, receiptRoot: receipts}
 				if err := manager.Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err == nil {
 					t.Fatal("digest mismatch did not make shell exit nonzero")
 				}
@@ -580,13 +587,12 @@ func TestUpgradeActivationRejectsReplacedCandidateBeforeExecution(t *testing.T) 
 					t.Fatalf("shell failed for a reason other than digest mismatch: %s", tools.output)
 				}
 			} else {
-				receipts := filepath.Join(t.TempDir(), "receipts")
 				unlock, err := upgrade.NewOperation(receipts, cliUpgradeID, "v2.3.4", strings.Repeat("ab", 20), stage)
 				if err != nil {
 					t.Fatal(err)
 				}
 				unlock()
-				if err := (upgradeDetachedManager{}).Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err != nil {
+				if err := (upgradeDetachedManager{receiptRoot: receipts}).Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err != nil {
 					t.Fatalf("shell startup was not accepted: %v", err)
 				}
 				deadline := time.Now().Add(2 * time.Second)

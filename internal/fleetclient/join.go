@@ -59,6 +59,7 @@ type JoinClient struct {
 	trustMu      sync.Mutex
 	roots        *x509.CertPool
 	allowUnknown bool
+	provisional  bool
 	leaf, anchor *x509.Certificate
 	gatewayNonce fleetproto.Hash
 }

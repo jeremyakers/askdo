@@ -24,6 +24,8 @@ type approvalManifest struct {
 	// TargetUser is the broker-resolved account name of a non-root target
 	// (sudo -u); absent for root so existing root manifests hash unchanged.
 	TargetUser       string                      `json:"target_user,omitempty"`
+	TargetGID        *uint32                     `json:"target_gid,omitempty"`
+	TargetGroups     []uint32                    `json:"target_groups,omitempty"`
 	Context          manifestContext             `json:"context"`
 	Operation        manifestOperation           `json:"operation"`
 	Captures         []captureRecord             `json:"captures"`
@@ -50,6 +52,8 @@ type operationOnlyManifest struct {
 	RequestID           string                      `json:"request_id"`
 	TargetUID           uint32                      `json:"target_uid"`
 	TargetUser          string                      `json:"target_user,omitempty"`
+	TargetGID           *uint32                     `json:"target_gid,omitempty"`
+	TargetGroups        []uint32                    `json:"target_groups,omitempty"`
 	Context             manifestContext             `json:"context"`
 	Operation           manifestOperation           `json:"operation"`
 	Captures            []captureRecord             `json:"captures"`
@@ -86,6 +90,7 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 	}
 	manifest := operationOnlyManifest{
 		Version: 1, RequestID: j.req.RequestID, TargetUID: j.target.UID, TargetUser: j.target.Name,
+		TargetGID: j.target.gid(), TargetGroups: j.target.groups(),
 		Context:          manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
 		Operation:        manifestOperation{Mode: op.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), op.Argv...), Env: append([]string(nil), op.Env...), CWD: op.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:         append([]captureRecord{}, index.Files...),
@@ -213,6 +218,7 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 	}
 	manifest := approvalManifest{
 		Version: 1, RequestID: j.req.RequestID, TargetUID: j.target.UID, TargetUser: j.target.Name,
+		TargetGID: j.target.gid(), TargetGroups: j.target.groups(),
 		Context:   manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
 		Operation: manifestOperation{Mode: operation.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), operation.Argv...), Env: append([]string(nil), operation.Env...), CWD: operation.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:  append([]captureRecord(nil), index.Files...),

@@ -106,34 +106,37 @@ func TestTargetUserAbsentKeepsWireIdentical(t *testing.T) {
 	}
 }
 
-func TestTargetUserRefusesBundleAndScriptLocally(t *testing.T) {
-	// Given a bundle directory and a script that must never be read for a
-	// non-root target, and no broker socket at all.
-	dir := t.TempDir()
-	bundle := filepath.Join(dir, "bundle")
-	if err := os.MkdirAll(bundle, 0700); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"run.sh", "script.sh"} {
-		if err := os.WriteFile(filepath.Join(bundle, name), []byte("#!/bin/sh\nid -u\n"), 0600); err != nil {
-			t.Fatal(err)
+func TestTargetUserRootAllowsBundleAndScript(t *testing.T) {
+	for _, target := range []string{"root", "#0", "#00"} {
+		for _, mode := range []string{"bundle", "script"} {
+			t.Run(target+"/"+mode, func(t *testing.T) {
+				dir := t.TempDir()
+				script := filepath.Join(dir, "run.sh")
+				if err := os.WriteFile(script, []byte("#!/bin/bash\nid -u\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				socket, bodies := captureSubmitWire(t)
+				args := []string{"--detach", "--reason", "root bundle", "-u", target}
+				if mode == "bundle" {
+					args = append(args, "--bundle", dir, "--entry", "run.sh")
+				} else {
+					args = append(args, "--script", script)
+				}
+				var stderr bytes.Buffer
+				if code := Run(context.Background(), args, Options{SocketPath: socket, Stdout: &bytes.Buffer{}, Stderr: &stderr, Interrupt: make(chan os.Signal)}); code != 0 {
+					t.Fatalf("root %s refused: code=%d stderr=%s", mode, code, &stderr)
+				}
+				select {
+				case body := <-bodies:
+					var req proto.SubmitRequest
+					if err := proto.StrictUnmarshal(body, &req); err != nil || req.TargetUser != target || req.Mode != "bundle" || len(req.Files) != 1 {
+						t.Fatalf("submit=%s err=%v", body, err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("no submit")
+				}
+			})
 		}
-	}
-	for name, args := range map[string][]string{
-		"bundle": {"-u", "tyme", "--bundle", bundle, "--entry", "run.sh"},
-		"script": {"--user", "#1001", "--script", filepath.Join(bundle, "script.sh")},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var stderr bytes.Buffer
-			// When the CLI parses the combination.
-			code := Run(context.Background(), append([]string{"--detach", "--reason", "x"}, args...), Options{SocketPath: filepath.Join(dir, "absent.sock"), Stdout: &bytes.Buffer{}, Stderr: &stderr, Interrupt: make(chan os.Signal)})
-			// Then it is refused with the broker's wording before any capture
-			// or reservation, naming the captured-stdin alternative.
-			want := proto.TargetUserBundleRefusal(args[1])
-			if code != 125 || !strings.Contains(stderr.String(), want) || strings.Contains(stderr.String(), "JOB_ID=") || strings.Contains(stderr.String(), "no such file") {
-				t.Fatalf("code=%d stderr=%s", code, stderr.String())
-			}
-		})
 	}
 }
 

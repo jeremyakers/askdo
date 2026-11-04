@@ -66,6 +66,7 @@ cat > /usr/syno/bin/synoacltool <<'EOF'
 #!/bin/sh
 if [ -e /fixture/acl-unknown ]; then echo 'unknown ACL'; exit 255; fi
 if [ -e /fixture/acl-permission ]; then echo 'permission denied'; exit 1; fi
+if [ -e /fixture/volume-acl ] && [ "$2" = /volume1 ]; then echo 'native ACL'; exit 0; fi
 if [ -e /fixture/validator-foreign ]; then
   case "$2" in /usr/local/libexec/.askdo-validate.*) if [ -d "$2" ]; then echo foreign > "$2/foreign"; fi;; esac
 fi
@@ -185,6 +186,29 @@ expect_failure() {
 no_mutations() {
   if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'early failure mutated identity'; fi
 }
+# A data-volume recommendation must not become a fresh-install prerequisite.
+for volume in missing symlink writable nonroot acl; do
+  reset_fixture
+  case "$volume" in
+    missing) rmdir /volume1 ;;
+    symlink) rmdir /volume1; ln -s /fixture /volume1 ;;
+    writable) chmod 0777 /volume1 ;;
+    nonroot) chown 65534:65534 /volume1 ;;
+    acl) touch /fixture/volume-acl ;;
+  esac
+  sh /src/install.sh > /tmp/result 2>&1 || fail "DSM install without trusted volume failed ($volume)"
+  python3 -I -S -c 'import json; assert "upgrade_backup_dir" not in json.load(open("/etc/askdo/config.json"))' || fail 'fallback did not preserve the previous backup default'
+  grep -q 'WARNING.*upgrade_backup_dir.*trusted data-volume directory' /tmp/result || fail 'missing fallback recommendation'
+  test ! -e /volume1/@askdo || fail 'fallback touched untrusted volume'
+  case "$volume" in
+    missing) mkdir /volume1 ;;
+    symlink) rm /volume1; mkdir /volume1 ;;
+    writable) chmod 0755 /volume1 ;;
+    nonroot) chown 0:0 /volume1 ;;
+    acl) rm /fixture/volume-acl ;;
+  esac
+  printf 'DSM backup-volume fallback passed: %s\n' "$volume"
+done
 # Native absence diagnostics: both recognized lines, either order, only with 255 and no local row.
 for absent in user:reverse user:forward group:reverse group:forward; do
   reset_fixture

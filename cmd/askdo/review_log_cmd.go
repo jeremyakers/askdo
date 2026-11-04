@@ -191,6 +191,9 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(out, " risk=%q command=%s", risk, strings.Join(quoted, " "))
 		}
 		if o := j.outcome; o != nil {
+			if j.review == nil && o.TargetUID != 0 {
+				fmt.Fprintf(out, " target=%q(%d)", o.TargetName, o.TargetUID)
+			}
 			fmt.Fprintf(out, " state=%q decision=%q approval=%q", o.State, o.Decision, o.ApprovalKind)
 			if o.ResultKind != "" {
 				fmt.Fprintf(out, " result=%q", o.ResultKind)

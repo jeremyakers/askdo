@@ -13,20 +13,22 @@ import (
 
 // approvalAuthorityHash binds a timestamp to both its approval authority and
 // resolved execution target; name and #UID aliases of an account share a window.
-func approvalAuthorityHash(route config.TelegramRoute, fleet *config.FleetConfig, operatorID int64, profiles []string, targetUID uint32) string {
+func approvalAuthorityHash(route config.TelegramRoute, fleet *config.FleetConfig, operatorID int64, profiles []string, target ExecutionTarget) string {
 	payload := struct {
-		Route     config.TelegramRoute `json:"route"`
-		Fleet     *config.FleetConfig  `json:"fleet,omitempty"`
-		Operator  int64                `json:"operator_user_id"`
-		Profiles  []string             `json:"profiles,omitempty"`
-		TargetUID uint32               `json:"target_uid"`
-	}{Route: route, Fleet: fleet, Operator: operatorID, Profiles: profiles, TargetUID: targetUID}
+		Route        config.TelegramRoute `json:"route"`
+		Fleet        *config.FleetConfig  `json:"fleet,omitempty"`
+		Operator     int64                `json:"operator_user_id"`
+		Profiles     []string             `json:"profiles,omitempty"`
+		TargetUID    uint32               `json:"target_uid"`
+		TargetGID    *uint32              `json:"target_gid,omitempty"`
+		TargetGroups []uint32             `json:"target_groups,omitempty"`
+	}{Route: route, Fleet: fleet, Operator: operatorID, Profiles: profiles, TargetUID: target.UID, TargetGID: target.gid(), TargetGroups: target.groups()}
 	encoded, _ := json.Marshal(payload)
 	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 func (j *jobRuntime) approvalAuthorityHash() string {
-	return approvalAuthorityHash(j.route, j.configuration().Fleet, j.configuration().Telegram.OperatorUserID, j.configuration().Review.GatewayProfiles, j.target.UID)
+	return approvalAuthorityHash(j.route, j.configuration().Fleet, j.configuration().Telegram.OperatorUserID, j.configuration().Review.GatewayProfiles, j.target)
 }
 
 func (j *jobRuntime) approvalTimestampKey() store.ApprovalTimestampKey {

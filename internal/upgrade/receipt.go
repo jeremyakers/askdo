@@ -285,8 +285,8 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 	// unexpected files fail closed rather than being ignored; dotfile staging
 	// artifacts (".<id>.temp-*") are not receipts and do not block a recovery
 	// operation. The captured root bootstrap also keeps its private
-	// bootstrap-<operation> directory here until scheduling returns; that exact
-	// directory namespace is not a receipt.
+	// bootstrap-<operation> directory here until scheduling returns; activation
+	// uses activate-<operation>. These exact namespaces are not receipts.
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return failure(fmt.Errorf("scan receipt root %s: %w", root, err))
@@ -297,8 +297,11 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		if id, ok := strings.CutPrefix(name, "bootstrap-"); ok && validateOperationID(id) == nil && entry.IsDir() {
+		if otherID, ok := launchDirectoryOperation(name); ok && entry.IsDir() {
 			if info, err := entry.Info(); err == nil && info.Mode().Perm() == 0o700 {
+				if err := cleanupStaleLaunchDirectory(root, name, otherID, id, info, now); err != nil {
+					return failure(err)
+				}
 				continue
 			}
 		}

@@ -93,11 +93,16 @@ command, bundle copy, profile flag or channel flag is needed. Join automatically
 gateway's configured profiles (up to the existing 16-profile selection limit)
 and uses the channel literally named `default`; no profiles means approval-only.
 The host generates its bearer locally; the gateway stores only its hash.
+For a provisionally trusted private CA, keep the host terminal open: after the
+gateway reports approval, it asks `Did the Telegram card show code XXXXXX, and
+did you approve it? [y/N] `. Answer `y` or `yes` only after comparing the code
+and approving that card yourself. A gateway's approval claim alone is not proof
+that a Telegram card existed.
 
 ### Gateway trust and the request code
 
-On a private LAN, no CA copying, fingerprint pasting or local trust prompt is
-needed. Without `--ca-file`, an **unknown certificate authority only** permits
+On a private LAN, no CA copying or fingerprint pasting is needed. Without
+`--ca-file`, an **unknown certificate authority only** permits
 provisional trust of the certificate on the first TLS connection. The host pins
 the top-most certificate the gateway presented (a root/intermediate when sent,
 otherwise the leaf). Normal Go TLS verification still checks the chain,
@@ -106,10 +111,16 @@ wrong-name certificate is refused, not provisionally trusted.
 
 The host's first leaf certificate and top-most anchor cannot change during that
 join, even to another valid leaf from the same CA. A change aborts enrollment;
-rerun `fleet join` and compare the new code. Only after approval is the anchor
+rerun `fleet join` and compare the new code. Only after approval and terminal
+confirmation (when trust is provisional) is the anchor
 saved as the existing `<host_id>.ca.pem` credential for later fleet connections.
 An explicit `--ca-file` retains normal system-plus-supplied-CA verification and
-is saved unchanged; it never falls back to provisional trust.
+is saved unchanged; it never falls back to provisional trust. System-trusted
+gateways and `--ca-file` joins do not ask the terminal confirmation question.
+For provisional trust, the answer is read from `/dev/tty`, never piped stdin.
+Anything other than `y`/`yes` (case-insensitive), EOF, or an unavailable terminal
+aborts with `enrollment not confirmed; local configuration unchanged`: no local
+config, bearer, verification key or CA is installed, and setup does not run.
 
 The version-2 join first commits to a fresh host nonce without disclosing it.
 The gateway durably fixes its own random nonce and the request's hashes before

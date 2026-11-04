@@ -82,11 +82,20 @@ func (c *JoinClient) verifyGateway(state tls.ConnectionState) error {
 			return joinCertificateError(err)
 		}
 		c.roots = pinned
+		c.provisional = err != nil
 	}
 	if c.leaf == nil {
 		c.leaf, c.anchor = leaf, anchor
 	}
 	return nil
+}
+
+// UsesProvisionalTrust reports whether the first connection required an unknown
+// authority exception. Its pinned certificate is not operator-confirmed yet.
+func (c *JoinClient) UsesProvisionalTrust() bool {
+	c.trustMu.Lock()
+	defer c.trustMu.Unlock()
+	return c.provisional
 }
 
 // GatewayLeafHash is stable once a request has reached the gateway.

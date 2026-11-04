@@ -44,6 +44,7 @@ func testFleetJoinGatewayExchange(t *testing.T, lostRevealReply bool) {
 	// The fixture-tag gateway opener permits a private current-UID database;
 	// normal builds expose neither it nor the Telegram endpoint override.
 	hostPath := fleetJoinHostFixture(t, localJoinConfig)
+	stubFleetJoinTTY(t, "y\n")
 	dir := filepath.Dir(hostPath)
 	credential := filepath.Join(dir, "codex-fixture.json")
 	if err := os.WriteFile(credential, []byte("unused synthetic provider credential"), 0600); err != nil {

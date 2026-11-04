@@ -111,6 +111,9 @@ func Test_JoinClient_request_join_sends_hashes_when_fresh_host_registers(t *test
 	if approved.URL != "https://gateway.example" || approved.DefaultProfiles[0] != "codex" {
 		t.Fatal(approved)
 	}
+	if client.UsesProvisionalTrust() {
+		t.Fatal("explicit CA trust classified as provisional")
+	}
 }
 
 func Test_JoinClient_classifies_status_errors_when_gateway_answers(t *testing.T) {
@@ -173,6 +176,7 @@ func Test_JoinClient_pins_peer_with_system_or_provisional_trust(t *testing.T) {
 		t.Run(fmt.Sprintf("system trusted=%t", systemTrusted), func(t *testing.T) {
 			// Given a join gateway either present in the system-root fixture or unknown.
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Connection", "close")
 				_, _ = w.Write(pendingResponse(t, joinHostID()))
 			}))
 			defer server.Close()
@@ -193,6 +197,12 @@ func Test_JoinClient_pins_peer_with_system_or_provisional_trust(t *testing.T) {
 			// Then the first certificate is provisionally trusted and retained exactly.
 			if err != nil || string(client.GatewayCAPEM()) != string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})) || client.GatewayLeafHash() != sha256.Sum256(server.Certificate().Raw) {
 				t.Fatalf("want pinned first certificate, got %v", err)
+			}
+			if client.UsesProvisionalTrust() == systemTrusted {
+				t.Fatal("incorrect first-connection trust classification")
+			}
+			if _, err := client.Status(t.Context()); err != nil || client.UsesProvisionalTrust() == systemTrusted {
+				t.Fatal("pinned reconnect changed initial trust classification", err)
 			}
 		})
 	}

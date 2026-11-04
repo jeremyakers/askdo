@@ -1298,6 +1298,11 @@ func (c *Config) ValidateUpgradeBackupDir() error {
 	if !filepath.IsAbs(c.UpgradeBackupDir) || filepath.Clean(c.UpgradeBackupDir) != c.UpgradeBackupDir {
 		return errors.New("upgrade_backup_dir must be an absolute clean path")
 	}
+	// Receipts store the full stage, not just this root: reserve /up_<32hex>.
+	stage := filepath.Join(c.UpgradeBackupDir, "up_"+strings.Repeat("0", 32))
+	if len(stage) > 512 || strings.IndexFunc(stage, func(r rune) bool { return r < 0x20 || r > 0x7e }) != -1 {
+		return errors.New("upgrade_backup_dir must form a printable ASCII receipt stage of at most 512 bytes")
+	}
 	if c.UpgradeBackupDir == UpgradeReceiptRoot || strings.HasPrefix(c.UpgradeBackupDir, UpgradeReceiptRoot+string(filepath.Separator)) {
 		return fmt.Errorf("upgrade_backup_dir must be outside the receipt/bootstrap namespace %s", UpgradeReceiptRoot)
 	}

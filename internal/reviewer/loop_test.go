@@ -92,6 +92,29 @@ func TestModelReceivesCommandWithoutInternalCaptureMetadata(t *testing.T) {
 	}
 }
 
+func TestModelReceivesTargetCredential(t *testing.T) {
+	b := bootstrap(1, time.Now().Add(time.Minute))
+	// Inject the bootstrap wire fields so this regression also compiles on the
+	// old implementation, where the fields are silently lost before the model.
+	if err := json.Unmarshal([]byte(`{"target_uid":1001,"target_name":"target","target_gid":0,"target_groups":[0,17],"target_group_names":{"0":"root","17":"operators"}}`), &b); err != nil {
+		t.Fatal(err)
+	}
+	m := &fakemodel.Model{Steps: []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("report", "submit_review", reviewerTestReport("unknown"))}}}}}
+	if _, err := (&reviewer.Loop{Model: m, Tools: reviewer.NewToolExecutor(b, entryBroker{}), Bootstrap: b}).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, _ := strings.Cut(m.Requests[0].Messages[1].Content, "\n")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"target_gid": "0", "target_groups": "[0,17]", "target_group_names": `{"0":"root","17":"operators"}`} {
+		if string(fields[key]) != want {
+			t.Errorf("model %s=%s, want %s", key, fields[key], want)
+		}
+	}
+}
+
 func TestModelReceivesCapturedInputReferenceNotBody(t *testing.T) {
 	b := bootstrap(1, time.Now().Add(time.Minute))
 	b.Operation = proto.WorkerOperation{Mode: "argv", Argv: []string{"/usr/bin/bash"}, CWD: "/home/agent", CapturedStdin: &proto.CapturedInput{Path: "stdin", Size: 19, SHA256: strings.Repeat("a", 64)}}
