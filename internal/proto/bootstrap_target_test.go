@@ -1,6 +1,34 @@
 package proto
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestBootstrapTargetCredentialWire(t *testing.T) {
+	boot := targetBootstrap(1001, "target", nil)
+	body, _ := json.Marshal(boot)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(body, &fields)
+	fields["target_gid"] = json.RawMessage(`0`)
+	fields["target_groups"] = json.RawMessage(`[0,17]`)
+	fields["target_group_names"] = json.RawMessage(`{"0":"root","17":"operators"}`)
+	body, _ = json.Marshal(fields)
+	if err := StrictUnmarshal(body, &boot); err != nil {
+		t.Fatalf("credential bootstrap rejected: %v", err)
+	}
+	if err := ValidateWorkerMessage(&boot, BrokerToWorker); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(boot)
+	var got map[string]json.RawMessage
+	_ = json.Unmarshal(encoded, &got)
+	for _, key := range []string{"target_gid", "target_groups", "target_group_names"} {
+		if string(got[key]) != string(fields[key]) {
+			t.Errorf("lost %s: %s", key, encoded)
+		}
+	}
+}
 
 func targetBootstrap(uid uint32, name string, env []string) Bootstrap {
 	return Bootstrap{

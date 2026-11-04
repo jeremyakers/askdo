@@ -85,12 +85,17 @@ type Bootstrap struct {
 	TargetUID uint32 `json:"target_uid"`
 	// TargetName is the broker-resolved account name for a non-root
 	// TargetUID (sudo-style -u); root carries no name and renders as "root".
-	TargetName    string          `json:"target_name,omitempty"`
-	RequestID     string          `json:"request_id"`
-	SubmitterUID  uint32          `json:"submitter_uid"`
-	SubmitterName string          `json:"submitter_name"`
-	Container     string          `json:"container"`
-	Operation     WorkerOperation `json:"operation"`
+	TargetName string `json:"target_name,omitempty"`
+	// TargetGID and TargetGroups carry the complete non-root credential.
+	// Names are optional display labels keyed by numeric GID, not authority.
+	TargetGID        *uint32           `json:"target_gid,omitempty"`
+	TargetGroups     []uint32          `json:"target_groups,omitempty"`
+	TargetGroupNames map[uint32]string `json:"target_group_names,omitempty"`
+	RequestID        string            `json:"request_id"`
+	SubmitterUID     uint32            `json:"submitter_uid"`
+	SubmitterName    string            `json:"submitter_name"`
+	Container        string            `json:"container"`
+	Operation        WorkerOperation   `json:"operation"`
 	// Only the fixed, non-secret launch variables cross to the reviewer.
 	// ASKDO_BUNDLE contains a private spool path and is not projected.
 	ExecutionEnvironment []string         `json:"execution_environment,omitempty"`
@@ -1084,8 +1089,13 @@ func validateBootstrap(m Bootstrap) error {
 	}
 	// Root is displayed as "root" everywhere; a name may only accompany a
 	// non-root target so the reviewer never sees a misleading identity.
-	if !bounded(m.TargetName, 256) || (m.TargetUID == 0 && m.TargetName != "") {
+	if !bounded(m.TargetName, 256) || (m.TargetUID == 0 && (m.TargetName != "" || m.TargetGID != nil || len(m.TargetGroups) != 0 || len(m.TargetGroupNames) != 0)) {
 		return errors.New("invalid bootstrap target identity")
+	}
+	for _, name := range m.TargetGroupNames {
+		if !bounded(name, 256) {
+			return errors.New("invalid bootstrap target group name")
+		}
 	}
 	if err := validateOperation(m.Operation); err != nil {
 		return err
@@ -1103,6 +1113,9 @@ func validateBootstrap(m Bootstrap) error {
 	}
 	return validateProjectionMode(m.ConfigProjection, m.ApprovalOnly, m.FleetMode)
 }
+
+// MaxExecutionHomeBytes is the worker bootstrap's HOME value byte limit.
+const MaxExecutionHomeBytes = 4096
 
 // validateExecutionEnvironment pins the projected launch variables to the
 // fixed values the broker installs: PATH, LANG and PWD are constants of the
@@ -1141,7 +1154,7 @@ func validateExecutionEnvironment(m Bootstrap) error {
 			}
 			continue
 		}
-		if name == "HOME" && m.TargetUID != 0 && bounded(value, 4096) {
+		if name == "HOME" && m.TargetUID != 0 && bounded(value, MaxExecutionHomeBytes) {
 			continue
 		}
 		return errors.New("invalid execution environment projection")

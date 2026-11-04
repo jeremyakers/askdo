@@ -98,6 +98,44 @@ func TestTargetUserUnknownAccountIsRefusedBeforeAnythingDurable(t *testing.T) {
 	}
 }
 
+func TestTargetHomeInvalidIsRefusedBeforeAnythingDurable(t *testing.T) {
+	account := *nonRootTestAccount(t)
+	for name, home := range map[string]string{"invalid-utf8": "/home/\xff", "oversize": strings.Repeat("a", 4097)} {
+		t.Run(name, func(t *testing.T) {
+			old := lookupTargetAccount
+			t.Cleanup(func() { lookupTargetAccount = old })
+			account.HomeDir = home
+			lookupTargetAccount = func(string) (*user.User, error) { return &account, nil }
+			h := newBrokerHarness(t, nil, nil)
+			request := newReservedRequest(t, h, "invalid home")
+			body := submitAndReadTerminalBytes(t, h.socket, targetedSubmit(t, request, account.Username))
+			var event proto.ErrorEvent
+			if err := proto.StrictUnmarshal(body, &event); err != nil || event.Code != "invalid_request" || !strings.Contains(event.Message, "home directory") {
+				t.Errorf("home not refused at admission: %s (%v)", body, err)
+			}
+			if _, err := h.daemon.store.GetJob(context.Background(), testUID, request.RequestID); err == nil {
+				t.Error("invalid home created a durable row")
+			}
+			if entries, _ := os.ReadDir(h.daemon.spoolRoot); len(entries) != 0 || len(h.executor.Snapshot()) != 0 {
+				t.Errorf("invalid home created spool/execution: %v", entries)
+			}
+		})
+	}
+}
+
+func TestTargetHomeBootstrapBoundaryRemainsValid(t *testing.T) {
+	account := *nonRootTestAccount(t)
+	old := lookupTargetAccount
+	t.Cleanup(func() { lookupTargetAccount = old })
+	lookupTargetAccount = func(string) (*user.User, error) { return &account, nil }
+	for _, home := range []string{"", strings.Repeat("a", 4096), "/home/ünïcode"} {
+		account.HomeDir = home
+		if target, err := resolveExecutionTarget(account.Username); err != nil || target.Home != home {
+			t.Fatalf("valid home changed/refused: %q, %v", home, err)
+		}
+	}
+}
+
 func TestTargetUserBundleIsRefusedBeforeApproval(t *testing.T) {
 	account := nonRootTestAccount(t)
 	// Given a bundle submit for a non-root target: the staged bundle lives in
