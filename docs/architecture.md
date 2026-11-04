@@ -30,8 +30,9 @@ and loss of helper tracking after commit is `unknown`, not a retry signal.
 
 ### Daemon / broker (root, trusted)
 
-`askdo daemon` requires effective UID 0 (anything else exits 125). It is
-the only writer of job state and the only authority that commits a privileged
+`askdo-config daemon` requires effective UID 0 (anything else exits 125). It is
+also available as `askdo daemon`, the unchanged notice-free systemd entrypoint.
+The daemon is the only writer of job state and the only authority that commits a privileged
 dispatch. Detached children launch through its executor; the foreground
 helper launches only after claiming a broker-authenticated one-use grant.
 At startup it:
@@ -46,7 +47,7 @@ At startup it:
    mount IDs. Only feature absence (`ENOSYS`) selects the fallback;
    permission and resource errors fail closed on either path, there is no
    uname-based guessing, and every filesystem is still checked per object.
-   `askdo config check` displays which backend the same probe selected.
+   `askdo-config config check` displays which backend the same probe selected.
 3. Creates `/run/askdo/` (root:askdo 0750), the request socket
     `request.sock` (root:askdo 0660) and a separate root-only `launch.sock`.
 4. Opens the durable store (`/var/lib/askdo/jobs.sqlite3`) and calls
@@ -194,8 +195,9 @@ payloads. Neither adapter is a general execution or zero-side-effect boundary.
 *Implemented in source; not in the `v1.0.0-rc.1` release binaries.*
 
 A host may instead belong to a fleet (`config_version: 5`). The separate
-`askdo gateway serve` process owns shared model provider endpoints, the one
-Codex OAuth login/refresh path, Telegram bot tokens and approval cards. It
+`askdo-config gateway serve` process owns shared model provider endpoints, the one
+Codex OAuth login/refresh path, Telegram bot tokens and approval cards. The
+notice-free `askdo gateway serve` alias is retained for the unchanged unit. It
 never executes commands, never connects to hosts, and stores only enrollment
 records and ticket/delivery bookkeeping — no host job databases or raw model
 conversations. In fleet mode the reviewer worker receives **no** enrollment,

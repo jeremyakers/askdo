@@ -18,7 +18,7 @@ the model and just approve from your phone.
 On the server, you (or your agent) run:
 
 ```sh
-askdo --reason 'restart nginx after config change' -- /usr/bin/systemctl restart nginx
+askdo --reason 'restart nginx after config change' /usr/bin/systemctl restart nginx
 ```
 
 Your phone buzzes once per request. The approval card leads with the AI's risk
@@ -122,12 +122,15 @@ For the installer's verification model and Synology DSM specifics, see
 ### Set up a standalone server
 
 Standalone mode uses one bot per server, configured on that server.
+The first setup uses administrator access because no configured broker is
+running yet. After setup, askdo members use `askdo-config` without sudo: root-only
+operations request the normal Telegram approval and preserve interactive prompts.
 
 First, connect Telegram. The wizard asks for the bot token and can discover
 your Telegram IDs after you message the bot:
 
 ```sh
-sudo askdo channel add telegram
+sudo askdo-config channel add telegram
 ```
 
 Then choose how you want to approve.
@@ -135,14 +138,14 @@ Then choose how you want to approve.
 **With AI review:** add a hosted reviewer or your own local model:
 
 ```sh
-sudo askdo reviewer add my-reviewer
+sudo askdo-config reviewer add my-reviewer
 ```
 
 **Or, just use your phone:** no model or API key is needed. Cards will clearly
 say **NO AI REVIEW — Risks NOT assessed**; your tap is still required.
 
 ```sh
-sudo askdo review mode approval-only
+sudo askdo-config review mode approval-only
 ```
 
 Finally, add your account to the `askdo` group, validate the config and start
@@ -150,7 +153,7 @@ the service:
 
 ```sh
 sudo usermod -aG askdo "$USER"
-sudo askdo config check
+sudo askdo-config config check
 sudo systemctl enable --now askdo
 ```
 
@@ -158,7 +161,7 @@ Add a separate agent account too if you use one. Log out and back in, then try
 something harmless:
 
 ```sh
-askdo --reason 'Try my first Telegram approval' -- /usr/bin/id -u
+askdo --reason 'Try my first Telegram approval' /usr/bin/id -u
 ```
 
 Approve it in Telegram. Seeing `0` means it ran as root. For custom review
@@ -169,7 +172,7 @@ policies and inspection scope, see [configuration](docs/configuration.md).
 Once your gateway is running, a fresh host can enroll itself:
 
 ```sh
-sudo askdo fleet join https://your.gateway:8443
+sudo askdo-config fleet join https://your.gateway:8443
 ```
 
 Approve the Telegram card **ONLY if its request code matches the host terminal**.
@@ -186,11 +189,18 @@ command is needed.
 
 ## Everyday commands
 
+Use `askdo COMMAND [ARG...]` to run a command; use `askdo -- COMMAND` if its name
+collides with an askdo subcommand (including a legacy operator alias) or starts
+with `-`. Configuration and operator commands live in `askdo-config --help`;
+the old `askdo review|channel|config|auth|inspection|reviewer|gateway|fleet|logs`
+forms still work with a one-line deprecation notice. Service invocations
+`askdo daemon` and `askdo gateway serve` remain notice-free.
+
 Ask for a second opinion on one command, even if your account is normally
 exempt:
 
 ```sh
-askdo --review=yes --reason 'Review the service restart' -- /usr/bin/systemctl restart nginx
+askdo --review=yes --reason 'Review the service restart' /usr/bin/systemctl restart nginx
 ```
 
 Run a command as another account instead of root, like `sudo -u` (a login
@@ -199,9 +209,9 @@ name or `#UID` that exists on this host; the approval card shows
 `USER` and `LOGNAME`):
 
 ```sh
-askdo -u tyme --reason 'Rebuild the site as its owner' -- make -C /srv/site
-askdo --user '#1001' --reason 'Check the service account' -- /usr/bin/id
-askdo -u tyme --reason 'Run this script as tyme' -- bash < maintenance.sh
+askdo -u tyme --reason 'Rebuild the site as its owner' make -C /srv/site
+askdo --user '#1001' --reason 'Check the service account' /usr/bin/id
+askdo -u tyme --reason 'Run this script as tyme' bash < maintenance.sh
 ```
 
 `--bundle` and `--script` always run as root (their staged copy is
@@ -217,16 +227,18 @@ askdo attach '2026-09-28_#1'
 Keep AI review for agents but not for your own account:
 
 ```sh
-sudo askdo review exempt add "$USER"
+askdo-config review exempt add "$USER"
 ```
 
 Optionally reuse that approval for foreground unreviewed commands in the same
-terminal, with a sliding five-minute window:
+terminal, with a sliding five-minute window. The setting
+`timestamp_timeout` follows sudo: plain numbers are minutes (decimals allowed),
+or use a Go duration such as `90s`, `10m` or `1h` (30s–1h bounds).
 
 ```sh
-sudo askdo review timestamp set "$USER" 300
-sudo askdo review timestamp list
-sudo askdo review timestamp clear "$USER"  # disable reuse again
+askdo-config review timestamp_timeout set "$USER" 5
+askdo-config review timestamp_timeout list
+askdo-config review timestamp_timeout clear "$USER"  # disable reuse again
 ```
 
 The first command still needs approval. Reuse is per resolved target UID: a name
@@ -234,7 +246,7 @@ and `#UID` for the same account share the window, but changing target (including
 back to root by omitting `-u`) needs fresh approval and replaces the window on
 successful handoff. Each successful handoff resets the window; detached jobs and
 AI-required commands never use it. It is off by default.
-See [approval timestamps](docs/configuration.md#sliding-foreground-approval-timestamps).
+See [timestamp_timeout and approval reuse](docs/configuration.md#sliding-foreground-approval-timestamps).
 
 Headless agents get streamed output and a job ID they can return to later. If
 the client disconnects before launch, the pending request is cancelled; after
@@ -259,15 +271,15 @@ only after you approve:
 
 ```sh
 curl -fsSL https://example.com/install.sh | \
-  askdo --review=yes --reason 'Review this installer' -- bash
+  askdo --review=yes --reason 'Review this installer' bash
 ```
 
 A local script or a downloaded file works too:
 
 ```sh
 askdo --review=yes --reason 'Review this maintenance script' \
-  --script /tmp/maintenance.sh -- 'one script argument'
-askdo --review=yes --reason 'Review this installer' -- bash < installer.sh
+  --script /tmp/maintenance.sh 'one script argument'
+askdo --review=yes --reason 'Review this installer' bash < installer.sh
 ```
 
 **Scripts captured from stdin always need a human tap**, regardless of your
@@ -298,11 +310,12 @@ askdo --review=yes --reason 'Review this installer before running it' \
 ```sh
 CGO_ENABLED=0 go build -trimpath -o askdo ./cmd/askdo
 CGO_ENABLED=0 go build -trimpath -o askdo-launch ./cmd/askdo-launch
+ln -s askdo askdo-config
 ```
 
 Run `go vet ./...` and `go test -race ./...`; see [validation](docs/validation.md)
-for the full list. `./askdo --help` lists client flags and `./install.sh --help`
-lists installer options.
+for the full list. `./askdo --help` lists client flags, `./askdo-config --help`
+lists operator commands, and `./install.sh --help` lists installer options.
 
 ## License
 

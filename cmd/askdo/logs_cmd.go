@@ -42,8 +42,7 @@ const logsWarning = "warning: reviewer logs can contain provider text and secret
 // The root gate runs before any DB or log open.
 func runLogs(args []string, stdout, stderr io.Writer) int {
 	if getEUID() != 0 {
-		fmt.Fprintln(stderr, "askdo logs requires root: the job store and reviewer logs are root-only (re-run with sudo)")
-		return 125
+		return rootRequired(stderr, "askdo logs requires root: the job store and reviewer logs are root-only (re-run with sudo)")
 	}
 	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -51,13 +50,13 @@ func runLogs(args []string, stdout, stderr io.Writer) int {
 	uidFlag := flags.String("uid", "", "optional submitter UID; disambiguates historical ID collisions")
 	positional, err := parseInterleaved(flags, args)
 	if err != nil || len(positional) != 1 {
-		fmt.Fprintln(stderr, "usage: askdo logs JOB_ID [--uid UID] [--all]")
+		fmt.Fprintln(stderr, "usage: askdo-config logs JOB_ID [--uid UID] [--all]")
 		return 125
 	}
 	requestID := positional[0]
 	if jobid.Validate(requestID) != nil && !logsLegacyJobIDPattern.MatchString(requestID) {
 		fmt.Fprintf(stderr, "askdo logs: %q is not a job ID (YYYY-MM-DD_#N, or a historical 32 lowercase hex ID)\n", requestID)
-		fmt.Fprintln(stderr, "usage: askdo logs JOB_ID [--uid UID] [--all]")
+		fmt.Fprintln(stderr, "usage: askdo-config logs JOB_ID [--uid UID] [--all]")
 		return 125
 	}
 	var uid uint32

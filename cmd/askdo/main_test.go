@@ -30,7 +30,7 @@ func TestAskdoDefaultsAndUsage(t *testing.T) {
 		t.Fatalf("unexpected operator defaults: %q %q %q %q %q", defaultConfigPath, defaultCredentialsDir, telegramDiscoverySocketPath, logsStorePath, logsSpoolRoot)
 	}
 	var out, errOut bytes.Buffer
-	if code := runConfig(nil, &out, &errOut); code != 125 || !strings.Contains(errOut.String(), "usage: askdo config check") {
+	if code := runConfig(nil, &out, &errOut); code != 125 || !strings.Contains(errOut.String(), "usage: askdo-config config check") {
 		t.Fatalf("config usage: code=%d stderr=%q", code, errOut.String())
 	}
 }

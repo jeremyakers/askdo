@@ -93,7 +93,7 @@ func resolveCodexTarget(configPath string, explicit bool) (path, dir string, err
 		}
 		return path, dir, nil
 	case fleetDoc != "":
-		return "", "", fmt.Errorf("%s is a fleet host configuration with no local provider credentials; run auth on the gateway host (askdo auth login --config %s) instead of creating an unused local copy", fleetDoc, defaultGatewayConfig)
+		return "", "", fmt.Errorf("%s is a fleet host configuration with no local provider credentials; run auth on the gateway host (askdo-config auth login --config %s) instead of creating an unused local copy", fleetDoc, defaultGatewayConfig)
 	case explicit:
 		return "", "", fmt.Errorf("%s configures no openai_codex credential file", configPath)
 	}

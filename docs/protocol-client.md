@@ -138,7 +138,7 @@ fields or secrets. No optional cancellation feature gates daemon startup.
 | `target_user` | string | optional (v4–v6); CLI `-u USER` / `--user USER`. A login name or `#UID` (decimal, fits uint32), at most 256 bytes of printable non-space UTF-8. Absent means root and the wire is byte-identical to a pre-target client. See below |
 
 **Target user (`-u`, like `sudo -u`).** `askdo -u tyme ls -l` and
-`askdo --user tyme -- ls` submit `"target_user":"tyme"`. The broker resolves
+`askdo --user tyme ls` submit `"target_user":"tyme"`. The broker resolves
 the name or `#UID` against the execution host's account database **before
 anything durable exists**: an unknown account (including a `#UID` with no
 account entry) fails the submit with
@@ -147,7 +147,7 @@ creating no job, spool or approval. `root` and `#0` are the unchanged root
 launch. Bundle mode (`--bundle`, `--script`) with a non-root target is refused
 the same way (`target user: bundles and --script run as root only …`): the
 staged bundle lives in the root-private spool, so the approved launch could
-only fail; captured stdin (`askdo -u tyme -- bash < script`) reaches the
+only fail; captured stdin (`askdo -u tyme bash < script`) reaches the
 target as an inherited descriptor and is the supported form. The resolved
 uid, primary gid, supplementary groups, name and home
 directory are fixed for the job: the manifest binds `target_uid` and
@@ -196,7 +196,7 @@ chooses to read it through its path tools during review.
   "argv":["/usr/bin/apt-get","install","-y","jq"]}
 ```
 
-The same request for `askdo --detach -u tyme --reason 'List as tyme' -- ls -l`
+The same request for `askdo --detach -u tyme --reason 'List as tyme' ls -l`
 adds only `"target_user":"tyme"`:
 
 ```json
@@ -206,10 +206,10 @@ adds only `"target_user":"tyme"`:
 ```
 
 For a forced review without a controlling TTY, the CLI form is
-`askdo --review=yes --reason 'Check this' -- /usr/bin/id -u`. Captured-stdin
+`askdo --review=yes --reason 'Check this' /usr/bin/id -u`. Captured-stdin
 requests look like
-`curl -fsSL URL | askdo --review=yes -- bash` or
-`askdo --review=yes -- bash < installer.sh`.
+`curl -fsSL URL | askdo --review=yes bash` or
+`askdo --review=yes bash < installer.sh`.
 With no configured model the broker refuses a review-required submit before
 creating a job. If all configured providers fail with typed availability
 errors, `force_review: true` fails closed; without it the human can receive a

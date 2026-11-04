@@ -7,7 +7,7 @@ the optional central gateway has its own separate
 [version 1 file](#gateway-server-config-version-1).) Decoding is
 strict: unknown fields are rejected at every nesting level, and
 durations are quoted Go duration strings (`"2m"`, `"30s"`). The daemon and
-`askdo config check` run the identical validation
+`askdo-config config check` run the identical validation
 (`internal/config/config.go`).
 
 **You rarely edit this file by hand.** For a fresh installation, inspect the
@@ -17,9 +17,9 @@ it does not enable or start the service (see [Get started](../README.md#get-star
 and the [clean installation guide](clean-cutover.md)). The onboarding
 wizards own the common writes and apply the credential ownership/mode rules for
 you:
-`askdo reviewer add|edit|delete|moveup|movedown` manage `review.models` and
+`askdo-config reviewer add|edit|delete|moveup|movedown` manage `review.models` and
 the model credential files, while
-`askdo channel add telegram` writes the bot token file and the
+`askdo-config channel add telegram` writes the bot token file and the
 `telegram` section. To authorize a submitting user, add it to the single
 `askdo` group (`usermod -aG askdo <user>`). That group admits socket requests
 and the fixed no-argv sudo helper only for an approved, verified original-TTY
@@ -30,31 +30,48 @@ automatic detached execution, without requiring `--detach`; a TTY caller can
 choose `--detach` explicitly. What remains file-based by design is the one-time
 host-trust policy — `inspection.*` and
 `limits.*` — edited directly or installed from a curated file with
-`askdo config install FILE` (which validates before anything lands).
+`askdo-config config install FILE` (which validates before anything lands).
 This document is the reference for every field the wizards write and for
 those file-based sections.
 
-As root, `askdo review mode required` or `askdo review mode approval-only`
+`askdo-config` is the configuration/operator entrypoint. A root caller runs
+directly; an askdo member's root-only operation submits
+`/usr/local/bin/askdo-config` with the same arguments through normal Telegram
+approval, foreground output and TTY prompts. Read-only operations that already
+work without root do not request approval. Initial provisioning without a running
+broker still needs administrator access. `fleet join` has its own enrollment
+approval and, like `daemon` and `gateway serve`, must be started as root.
+
+`askdo-config review mode required` or `askdo-config review mode approval-only`
 sets the policy (`approval-only` on the CLI becomes
-`approval_only` in JSON). `askdo review exempt add <username>` and
-`askdo review exempt remove <username>` manage OS login exemptions in
-`required` mode; `askdo review mode` and `askdo review exempt list`
+`approval_only` in JSON). `askdo-config review exempt add <username>` and
+`askdo-config review exempt remove <username>` manage OS login exemptions in
+`required` mode; `askdo-config review mode` and `askdo-config review exempt list`
 display current settings. These commands do not grant socket access.
 
 For sudo-like approval reuse on your own account, opt in with
-`askdo review timestamp set <username> <seconds>` (root required, 30–3600
-integer seconds). `askdo review timestamp clear <username>` disables it;
-`askdo review timestamp list` displays the configured timeouts. All three
-commands require root. All accept `--config PATH` and work with direct v4 and fleet v5 host configurations.
+`askdo-config review timestamp_timeout set <username> <value>`.
+Like sudo's `timestamp_timeout`, a plain value is **minutes**, including decimals
+(`10` or `2.5`); Go durations such as `90s`, `10m` and `1h` also work. The range
+is 30 seconds through one hour, stored internally as whole seconds.
+`askdo-config review timestamp_timeout clear <username>` disables reuse;
+`askdo-config review timestamp_timeout list` displays the configured timeouts.
+This controls how long one approval is reused on the same terminal, per target
+user. All three require root and request normal Telegram approval for non-root
+askdo members. They accept `--config PATH` with direct v4 and fleet v5 configs.
+The legacy `review timestamp` alias still accepts plain integer **seconds** and
+prints a rename notice. The old `approval_timestamp_users` JSON key also means
+seconds; the new `timestamp_timeout_users` key uses numeric minutes. Either key
+is accepted, but specifying both is an error. Saves write only the new key.
 They use the same atomic, section-validated config mutation as the other review
 policy commands; adding a timestamp does not itself exempt an account from AI review.
 
 Validate with:
 
 ```sh
-askdo config check         # offline validation + warnings + kernel feature
+askdo-config config check         # offline validation + warnings + kernel feature
                            # probe (prints the actually selected backend)
-askdo config check --live  # additionally probes each model endpoint
+askdo-config config check --live  # additionally probes each model endpoint
                            # with a synthetic fixture (never host files)
 ```
 
@@ -167,12 +184,12 @@ Regardless of these lists, the broker hard-denies host inspection of
 pseudo-filesystems `/proc`, `/sys`, `/dev`. Hard
 denies apply to host inspection only, never to submitted bundle content.
 
-`askdo inspection check <path> [--config PATH]` runs as root and prints
+`askdo-config inspection check <path> [--config PATH]` runs as root and prints
 ALLOWED or DENIED with the decisive rule and resolved path where available.
 It opens metadata only; it does not print contents or change configuration.
 It reports an **inspection policy decision only**; incomplete reviewer or
 Telegram sections are intentionally permitted during onboarding. Run
-`askdo config check` for complete service configuration validation.
+`askdo-config config check` for complete service configuration validation.
 Inspection is selected by actual kernel feature probes, not a blind version
 check: `openat2` is preferred, and only its absence
 (`ENOSYS`) selects the legacy `os.Root` confined fallback with exact
@@ -182,7 +199,7 @@ without descriptor mount identity are denied per object — there is no
 blanket-filesystem support flag, no uname-based guessing, and no
 configuration override for the backend the probe selected. Legacy paths were
 tested on real Linux 3.10.108 (x86_64, ext4); native daemon and service-lifecycle
-acceptance remains deployment-specific. `askdo config check` prints which
+acceptance remains deployment-specific. `askdo-config config check` prints which
 backend the same probe selected.
 
 Go 1.27.1's Unix `os.Root` implementation opens intermediate directories
@@ -252,7 +269,7 @@ for the distinction between fixture checks and deployment evidence.
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
 | `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. **NO AI REVIEW** requires a human Telegram decision unless an explicitly enabled foreground approval timestamp is valid; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
 | `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. |
-| `approval_timestamp_users` | no | `{}` (off) | Map of OS login names to integer seconds, 30–3600. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse the sliding approval timestamp. Omit or clear a login to disable it; zero is not a configured timeout. |
+| `timestamp_timeout_users` | no | `{}` (off) | Map of OS login names to numeric **minutes**, matching sudo's `timestamp_timeout` (decimals allowed, 0.5–60). Controls how long one approval is reused on the same terminal, per target user. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse it. Omit or clear a login to disable it. Legacy `approval_timestamp_users` accepts integer **seconds** (30–3600); do not specify both keys. |
 | `account_notes` | no | absent | Additive administrator Markdown context: optional `users` and `groups` maps from OS login / Unix group names to absolute clean file paths. Names resolve at config load; files and membership are read per review. See [reviewer instruction layers and account notes](#reviewer-instruction-layers-and-account-notes). |
 | `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
 | `webfetch_enabled` | no | `false` | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. See [review tools](review-tools.md#optional-webfetch). |
@@ -446,10 +463,10 @@ an installed service.
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
 | `name` | yes | — | Non-empty, unique across the list. |
-| `api` | yes | — | Wire adapter: `openai_chat`, `openai_responses`, `anthropic_messages`, or `openai_codex`. The first three append their fixed suffix (`/chat/completions`, `/responses`, `/messages`) to `base_url` exactly once; a root may already carry a version prefix such as `/v1`. `openai_codex` is the ChatGPT-subscription Codex backend (OAuth via `askdo auth login openai-codex`, see below): it ignores the adapter-suffix rule and always uses the fixed backend URL `https://chatgpt.com/backend-api/codex`, and its `data_boundary` must be `external`. |
+| `api` | yes | — | Wire adapter: `openai_chat`, `openai_responses`, `anthropic_messages`, or `openai_codex`. The first three append their fixed suffix (`/chat/completions`, `/responses`, `/messages`) to `base_url` exactly once; a root may already carry a version prefix such as `/v1`. `openai_codex` is the ChatGPT-subscription Codex backend (OAuth via `askdo-config auth login openai-codex`, see below): it ignores the adapter-suffix rule and always uses the fixed backend URL `https://chatgpt.com/backend-api/codex`, and its `data_boundary` must be `external`. |
 | `base_url` | yes | — | Absolute `http` or `https` URL. Plaintext `http` to a non-loopback host is **accepted with a config warning** — LAN-hosted inference (Ollama on a Spark/GB10, SGLang on a cluster node) is a normal deployment — but reviewed content and any API key then cross the network unencrypted. Other schemes are rejected. For `openai_codex` the field stays required for schema uniformity but is overridden by the fixed Codex backend URL. |
 | `model` | yes | — | Non-empty opaque model identifier. |
-| `api_key_file` | conditional | — | Required unless `data_boundary` is `"local"`. Absolute path to a credential file (requirements below). When omitted, requests carry no authorization header at all — intended only for deliberately unauthenticated local services. **For `api: "openai_codex"`** it names the OAuth token JSON written by `askdo auth login openai-codex`: it is always required, is **broker-only** (the reviewer never opens it — the broker projects the refreshed access token into the worker bootstrap), and follows the stricter root:root `0600` rule below instead of the `askdo-review` key rule. |
+| `api_key_file` | conditional | — | Required unless `data_boundary` is `"local"`. Absolute path to a credential file (requirements below). When omitted, requests carry no authorization header at all — intended only for deliberately unauthenticated local services. **For `api: "openai_codex"`** it names the OAuth token JSON written by `askdo-config auth login openai-codex`: it is always required, is **broker-only** (the reviewer never opens it — the broker projects the refreshed access token into the worker bootstrap), and follows the stricter root:root `0600` rule below instead of the `askdo-review` key rule. |
 | `data_boundary` | no | `"external"` | `local` or `external`. Declares whether inspected content may leave the host through this provider. An explicitly present but empty value is rejected. |
 | `request_timeout` | no | `review.request_timeout` | Per-model override; Go duration > 0. |
 
@@ -605,7 +622,7 @@ validation and a numeric UID is rejected as a key. Unlisted submitters use
 | `routes` | no | — | Map of OS login → channel name for per-user routing, at most 128 entries. Keys must be login names, not numeric UIDs; each must resolve to an existing account at load, and two logins resolving to one UID are rejected. |
 
 The daemon enforces the same bounds at load, so a config that passes
-`askdo config check` behaves identically at service start.
+`askdo-config config check` behaves identically at service start.
 
 CLI ownership of these fields:
 
@@ -614,16 +631,16 @@ CLI ownership of these fields:
 # legacy config; on a fresh config it becomes the default channel).
 # With flags, --operator-user-id takes one ID; interactively (omit the
 # flag) you can enter the list of authorized IDs comma-separated:
-sudo askdo channel add telegram ops \
+askdo-config channel add telegram ops \
   --token-file /root/ops-bot.token --chat-id 123456789 \
   --operator-user-id 100111
 
 # List channels, chats, operator users and routes (token values are never printed):
-sudo askdo channel list
+askdo-config channel list
 
 # Pin a submitting login to a channel; everything else uses default_channel:
-sudo askdo channel route set alice ops
-sudo askdo channel route set deploy-agent ops
+askdo-config channel route set alice ops
+askdo-config channel route set deploy-agent ops
 ```
 
 `channel add telegram NAME` writes one recipient with one chat ID; to give a
@@ -634,11 +651,11 @@ login that would collide with another login on the same UID.
 The **untouched installer template** has a placeholder token path but zero
 operator/chat IDs, so adding the first named channel replaces that unusable
 placeholder without deleting any credential file. There is **no automatic
-migration of a configured legacy bot**: `askdo channel add telegram NAME`
+migration of a configured legacy bot**: `askdo-config channel add telegram NAME`
 refuses that case rather than dropping a working channel. To convert one by
 hand, back up `/etc/askdo/config.json`; create one token file per bot; move
 the legacy flat fields into a `channels` entry; set `default_channel`; then
-run `askdo config check`. New submissions use the new channels automatically;
+run `askdo-config config check`. New submissions use the new channels automatically;
 already-admitted jobs keep their original routes.
 
 The CLI also refuses a channel name that could not file a token: one
@@ -699,7 +716,7 @@ validation time (daemon startup and `config check`):
 
 **Exception — `openai_codex` OAuth token file:** `review.models[]` entries
 with `api: "openai_codex"` point `api_key_file` at the token JSON written by
-`askdo auth login openai-codex`. That file holds the OAuth refresh
+`askdo-config auth login openai-codex`. That file holds the OAuth refresh
 token, so it must be readable by the broker alone: owner **root**, group
 **root**, mode **exactly `0600`**. The reviewer never opens it — at review
 start the broker loads it, refreshes the access token when it is inside the
@@ -708,9 +725,9 @@ refresh tokens are one-time), and projects only the fresh access token and
 account ID into the worker bootstrap. A revoked/expired/already-used refresh
 token fails the model as an invalid-config availability failure (the
 fallback advances to the next configured model; if none remain the job fails
-before any review) until you re-run `askdo auth login openai-codex`.
+before any review) until you re-run `askdo-config auth login openai-codex`.
 
-`askdo auth login|status|logout` resolve the token file the same way, with
+`askdo-config auth login|status|logout` resolve the token file the same way, with
 the highest-priority applicable rule winning:
 
 1. `--token-file PATH` — explicit path (first provisioning); no config is read.
@@ -728,10 +745,12 @@ the highest-priority applicable rule winning:
 The config is only read, by its `config_version` and structure; unrelated
 sections (missing TLS or credential files, placeholders) do not block re-auth,
 so a missing or corrupt token can be repaired. An unreadable or malformed
-document is an error, never skipped. `askdo auth --help` shows this summary.
+document is an error, never skipped. `askdo-config auth --help` shows this summary.
 
-Use `sudo` for configuration-driven `auth login`, `auth status`, and `auth
-logout`: the installed config and OAuth file are root-private. Explicit
+`askdo-config auth login` requests Telegram approval when not root. Configuration-
+driven `auth status` and `auth logout` also request approval if the installed
+root-private config or OAuth file denies access; readable user-owned targets
+remain unprivileged. Explicit
 credential-path workflows retain their existing permission rules. Repeated
 slashes and `.` components can share a target, but authentication does not
 bypass its trusted-directory checks for `..` traversal or symlink ancestors.
@@ -753,7 +772,7 @@ A named channel's token file follows the same ownership and mode: owner
 most `0640` — never group- or world-writable, never owned by a submitting
 account.
 
-The Codex OAuth token file is not installed by hand — `sudo askdo auth
+The Codex OAuth token file is not installed by hand — `askdo-config auth
 login openai-codex` writes `/etc/askdo/credentials/openai-codex.json`
 as root:root `0600` itself.
 
@@ -790,15 +809,15 @@ It demonstrates inspection roots, limits, and review scalars with usual values,
 and it lists `inspection.sensitive_masks` explicitly — pinning the built-in
 default mask set until you edit that array (see the field reference above).
 Choose the explicit approval-only policy above if no reviewer is needed, or run
-`askdo reviewer add` once per model (each entry lands in
+`askdo-config reviewer add` once per model (each entry lands in
 `review.models` with its credential file installed under
-`/etc/askdo/credentials/`), `askdo channel add telegram` for the
-bot token and IDs (or `askdo channel add telegram NAME` for the named
+`/etc/askdo/credentials/`), `askdo-config channel add telegram` for the
+bot token and IDs (or `askdo-config channel add telegram NAME` for the named
 multi-channel form with several bots and admins). Add each submitting user to
 the `askdo` socket group.
 If your agent's scripts live outside the shipped
 `inspection.read_roots`, add that directory to the file directly. Then run
-`askdo config check`.
+`askdo-config config check`.
 
 ### Minimal local-only test config
 
@@ -864,7 +883,7 @@ this example is unchanged.
 
 **Fleet mode is implemented in source; it is not in the `v1.0.0-rc.1` release
 binaries.** A host that uses the optional shared gateway sets
-`config_version: 5` and a `fleet` object. `askdo gateway connect` writes this
+`config_version: 5` and a `fleet` object. `askdo-config gateway connect` writes this
 document; the rules below are what it and the daemon enforce. Mixed mode is
 rejected: a v5 file must **not** contain `telegram` or `review.models` (no
 local provider credentials or bots on a fleet host), and fleet fields are
@@ -877,7 +896,7 @@ and remain local — the gateway cannot widen them.
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
 | `url` | yes | — | Gateway base URL. Absolute `https` only, no userinfo, query or fragment; normal hostname/certificate verification. No insecure or trust-on-first-use mode exists. |
-| `host_id` | yes | — | This host's individual enrollment identity, issued by `askdo gateway hosts add`. |
+| `host_id` | yes | — | This host's individual enrollment identity, issued by `askdo-config gateway hosts add`. |
 | `enrollment_file` | yes | — | Bearer credential file for this host only. **Broker-only**: root:root, exactly `0600`. |
 | `verification_key_file` | yes | — | The gateway's **public** Ed25519 verification key (base64). Root-owned, non-writable trust file. |
 | `ca_file` | no | system roots | Additional CA for the gateway connection, explicitly supplied by the operator; same root-owned non-writable trust rule. |
@@ -914,7 +933,7 @@ Example: [`examples/fleet/host-config.example.json`](../examples/fleet/host-conf
 ## Gateway server config (version 1)
 
 The optional central gateway reads a separate server-only file — default
-`/etc/askdo-gateway/config.json` as written by `askdo gateway init`. It
+`/etc/askdo-gateway/config.json` as written by `askdo-config gateway init`. It
 contains **no execution policy**. Decoding is strict (unknown/duplicate
 fields rejected at every depth). Example:
 [`examples/fleet/gateway-config.example.json`](../examples/fleet/gateway-config.example.json).
@@ -927,7 +946,7 @@ fields rejected at every depth). Example:
 | `tls_cert_file` | yes | — | Operator-provisioned certificate. Root-owned, non-writable. |
 | `tls_key_file` | yes | — | Operator-provisioned key. Root:root, exactly `0600`. |
 | `signing_key_file` | yes | — | Gateway Ed25519 signing key, distinct from every host enrollment credential. Created by `gateway init` at `<config parent>/credentials/signing.seed` (the matching public key lands in `verification.pub` beside it). Root:root `0600`. |
-| `database` | yes | — | Absolute clean path of the gateway SQLite store (enrollments, ticket/delivery bookkeeping only — never host job databases or raw model conversations). `askdo gateway init` defaults it to `/var/lib/askdo-gateway/gateway.db`; an explicitly chosen custom path is the operator's own responsibility (uninstall never deletes custom paths). |
+| `database` | yes | — | Absolute clean path of the gateway SQLite store (enrollments, ticket/delivery bookkeeping only — never host job databases or raw model conversations). `askdo-config gateway init` defaults it to `/var/lib/askdo-gateway/gateway.db`; an explicitly chosen custom path is the operator's own responsibility (uninstall never deletes custom paths). |
 | `profiles` | yes | — | Explicit array (empty means approval-only: human Telegram decisions, no model). At most 128 entries; each entry uses the standalone [`review.models[]`](#reviewmodels) schema. Provider credential files are root:root `0600`. |
 | `bots` | yes | — | 1–128 entries: `name` plus `token_file` (root:root `0600`). One update listener per actual bot-token identity. |
 | `channels` | yes | — | 1–128 entries: `name`, `bot`, `approval_ttl` in **integer seconds** (≥ 30), and 1–8 `recipients` of `chat_id` plus 1–8 `operator_user_ids` — the same routing model as the standalone [named channels](#named-multi-channel-form). |

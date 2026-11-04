@@ -41,5 +41,5 @@
   proposal and current implementation differences; not deployment approval.
 
 Adapter/model compatibility and live validation are deployment-specific:
-exercise `askdo config check --live` and non-disruptive checks against your
+exercise `askdo-config config check --live` and non-disruptive checks against your
 own installation. None of this documentation is a security audit.

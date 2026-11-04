@@ -107,11 +107,11 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		profiles = []string{}
 	}
 	type fleetReviewJSON struct {
-		ReviewConfig
+		reviewWire
 		Models          json.RawMessage `json:"models,omitempty"`
 		GatewayProfiles []string        `json:"gateway_profiles"`
 	}
-	review := fleetReviewJSON{ReviewConfig: c.Review, GatewayProfiles: profiles}
+	review := fleetReviewJSON{reviewWire: reviewForJSON(c.Review), GatewayProfiles: profiles}
 	return json.Marshal(struct {
 		configJSON
 		Limits   limitsJSON      `json:"limits"`
@@ -302,9 +302,11 @@ type InspectionConfig struct {
 
 // ReviewConfig controls model review.
 type ReviewConfig struct {
-	Mode                    string         `json:"mode,omitempty"`
-	ApprovalOnlyUsers       []string       `json:"approval_only_users,omitempty"`
-	ApprovalTimestampUsers  map[string]int `json:"approval_timestamp_users,omitempty"`
+	Mode              string   `json:"mode,omitempty"`
+	ApprovalOnlyUsers []string `json:"approval_only_users,omitempty"`
+	// Internally stored in seconds; JSON uses sudo-style minutes under
+	// timestamp_timeout_users, with approval_timestamp_users as a seconds alias.
+	ApprovalTimestampUsers  map[string]int `json:"-"`
 	LocalOnly               bool           `json:"local_only"`
 	Models                  []ModelConfig  `json:"models"`
 	GatewayProfiles         []string       `json:"gateway_profiles,omitempty"`
@@ -932,10 +934,10 @@ func validateReviewPolicy(review ReviewConfig) error {
 	}
 	for name, seconds := range review.ApprovalTimestampUsers {
 		if name == "" || strings.TrimSpace(name) != name {
-			return errors.New("review.approval_timestamp_users contains an invalid login name")
+			return errors.New("review.timestamp_timeout_users contains an invalid login name")
 		}
 		if seconds < 30 || seconds > 3600 {
-			return errors.New("review.approval_timestamp_users seconds must be 30 through 3600")
+			return errors.New("review.timestamp_timeout_users must be 0.5 through 60 minutes (30 through 3600 seconds)")
 		}
 	}
 	if len(review.AutoApproveGrants) > 128 {

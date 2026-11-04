@@ -30,7 +30,7 @@ var (
 	checkCredDir   = validateCredentialsDir
 )
 
-const authUsage = "usage: askdo auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]"
+const authUsage = "usage: askdo-config auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]"
 
 // runAuth dispatches `askdo auth login|status|logout [openai-codex]`.
 // openai-codex is the only provider; the positional argument is optional and
@@ -110,7 +110,15 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "auth: --token-file must be an absolute clean path")
 			return 125
 		}
+		// Login needs root before inspecting a root-private token parent.
+		// Legacy invocations retain their existing path-validation behavior.
+		if _, ok := stderr.(*configApproval); ok && sub == "login" && getEUID() != 0 {
+			return rootRequired(stderr, "auth login requires root")
+		}
 		if err := authTrustedDir(filepath.Dir(*tokenFile), false); err != nil {
+			if requestRootForPermission(stderr, err) {
+				return 125
+			}
 			fmt.Fprintln(stderr, "auth: unsafe token parent:", err)
 			return 125
 		}
@@ -133,6 +141,9 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		}
 		var err error
 		if path, *credDir, err = resolveCodexTarget(*configPath, explicitConfig); err != nil {
+			if requestRootForPermission(stderr, err) {
+				return 125
+			}
 			fmt.Fprintln(stderr, "auth:", err)
 			return 125
 		}
@@ -152,8 +163,7 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 // readable by the broker alone — unlike worker-readable API key files.
 func authLogin(path, credDir string, stdout, stderr io.Writer) int {
 	if getEUID() != 0 {
-		fmt.Fprintln(stderr, "auth login requires root: the credential file holds the OAuth refresh token and must be root:root 0600 (re-run with sudo)")
-		return 125
+		return rootRequired(stderr, "auth login requires root: the credential file holds the OAuth refresh token and must be root:root 0600 (re-run with sudo)")
 	}
 	// The directory is provisioning, not login: fail with the install
 	// command rather than creating it with guessed ownership.
@@ -205,6 +215,9 @@ func authStatus(path string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if err != nil {
+		if requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintf(stderr, "auth status: %v\n", err)
 		return 1
 	}
@@ -236,6 +249,9 @@ func authLogout(path string, stdout, stderr io.Writer) int {
 	defer cancel()
 	code := 1
 	if err := codexauth.WithTokenLock(ctx, path, func() error { code = authLogoutLocked(ctx, path, stdout, stderr); return nil }); err != nil {
+		if requestRootForPermission(stderr, err) {
+			return 125
+		}
 		if errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stdout, "openai-codex: already logged out (no credential file at %s)\n", path)
 			return 0

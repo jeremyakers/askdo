@@ -217,6 +217,52 @@ func TestForegroundSudoContainer(t *testing.T) {
 		t.Fatalf("three foreground commands required %d approvals, want 1", approvals.Load())
 	}
 	assertNoExecutor()
+	t.Run("config-approval", func(t *testing.T) {
+		// Use the installed multicall name, the real member UID/socket and
+		// helper/TTY handoff. Configuration stays private to this fixture.
+		path := filepath.Join(root, "config.json")
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, verb := range []string{"timestamp_timeout", "timestamp"} {
+			before := approvals.Load()
+			command := "/usr/local/bin/askdo-config review " + verb + " list --config " + path + "; echo CONFIG_EXIT=$?"
+			out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
+			t.Logf("config %s approval/output: %q status=%d", verb, out, code)
+			if code != 0 || !strings.Contains(out, "CONFIG_EXIT=0") || !strings.Contains(out, `"askdo-human": 10 minutes`) || strings.Contains(out, "'review' moved") || approvals.Load() != before+1 {
+				t.Fatalf("config approval failed: %q approvals=%d (before %d)", out, approvals.Load(), before)
+			}
+			if verb == "timestamp" && strings.Count(out, "'review timestamp' moved") != 1 {
+				t.Fatalf("expected one alias notice through approval: %q", out)
+			}
+		}
+		p := startContainerPTY(t)
+		p.until(t, "ASKDO_PROMPT> ")
+		p.send(t, "/usr/local/bin/askdo-config reviewer add --config "+path+" --provider ollama-local --base-url http://127.0.0.1:11434 --model fixture --boundary local --timeout 1m; echo CONFIG_WIZARD_EXIT=$?\n")
+		p.until(t, "Reviewer name")
+		p.send(t, "config-pty-reviewer\n")
+		p.until(t, "CONFIG_WIZARD_EXIT=0\r\n")
+		t.Logf("config interactive wizard: %q", p.snapshot())
+		// A real operation failure is returned through the foreground job.
+		p.send(t, "/usr/local/bin/askdo-config review timestamp_timeout clear askdo-outsider --config "+path+"; echo CONFIG_FAILURE_EXIT=$?\n")
+		p.until(t, "has no timestamp policy")
+		p.until(t, "CONFIG_FAILURE_EXIT=1\r\n")
+		// Quiet client mode deliberately reports a generic socket connection
+		// error. Compare the real ordinary client rather than inventing a new
+		// permission-error format for askdo-config.
+		before := approvals.Load()
+		want, wantCode := run(10*time.Second, "runuser", "-u", "askdo-outsider", "--", "/usr/local/bin/askdo", "/usr/bin/true")
+		out, code := run(10*time.Second, "runuser", "-u", "askdo-outsider", "--", "/usr/local/bin/askdo-config", "review", "timestamp_timeout", "list", "--config", path)
+		t.Logf("nonmember config socket error: %q status=%d; ordinary client: %q status=%d", out, code, want, wantCode)
+		if code != 125 || code != wantCode || out != want || !strings.Contains(out, "connection failed") || approvals.Load() != before {
+			t.Fatalf("nonmember did not get normal socket error: status=%d %q", code, out)
+		}
+		assertNoExecutor()
+	})
 	// Interactive shell job control is essential: the user's original terminal
 	// receives VINTR/VSUSP; no signal is injected into a simulated helper.
 	t.Run("ctrl-c", func(t *testing.T) {

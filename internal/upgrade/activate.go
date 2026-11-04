@@ -656,6 +656,9 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 			return err
 		}
 	}
+	if err := ensureConfigLink(layout.CLI); err != nil {
+		return err
+	}
 	for _, name := range units {
 		phase = "start " + name
 		if err := update(stateVerifying, "start-intent "+name); err != nil {
@@ -907,6 +910,33 @@ func copyFrom(src io.Reader, dst string, max int64) error {
 		return errors.New("source changed beyond its size bound")
 	}
 	return f.Sync()
+}
+
+// The multicall name is not a release asset. Only replace symlinks, and never
+// open or chown their targets, in the already trusted binary directory.
+func ensureConfigLink(cli string) error {
+	path := filepath.Join(filepath.Dir(cli), "askdo-config")
+	info, err := os.Lstat(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("refusing to replace non-symlink %s", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	if err := os.Symlink(filepath.Base(cli), path); err != nil {
+		return err
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Lchown(path, 0, 0); err != nil {
+			return err
+		}
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 // Installation consumes only the verified snapshot, never a staged pathname.

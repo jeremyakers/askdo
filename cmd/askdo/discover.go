@@ -442,7 +442,7 @@ func telegramAPIErrorCode(err error) int {
 func explainDiscoveryFailure(err error, stdout io.Writer) error {
 	switch telegramAPIErrorCode(err) {
 	case 401, 404:
-		return fmt.Errorf("Telegram rejected the bot token (API error %d): the token is invalid or revoked. Nothing was written — fix the token and re-run `askdo channel add telegram`", telegramAPIErrorCode(err))
+		return fmt.Errorf("Telegram rejected the bot token (API error %d): the token is invalid or revoked. Nothing was written — fix the token and re-run `askdo-config channel add telegram`", telegramAPIErrorCode(err))
 	case 409:
 		fmt.Fprintln(stdout, "auto-discovery skipped: getUpdates conflict (409) — the bot token is already")
 		fmt.Fprintln(stdout, "in use by another getUpdates poller (e.g. the running askdo service, or any")

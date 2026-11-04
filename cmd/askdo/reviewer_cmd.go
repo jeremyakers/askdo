@@ -35,8 +35,10 @@ import (
 
 // runReviewer routes `askdo reviewer <subcommand>`. It is only called
 // with a non-empty args tail (the bare form is the worker mode in main.go).
+const reviewerUsage = "usage: askdo-config reviewer add [<name>] | edit <name> | delete <name> | moveup <name> | movedown <name> | list"
+
 func runReviewer(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
-	usage := "usage: askdo reviewer add [<name>] | edit <name> | delete <name> | moveup <name> | movedown <name> | list"
+	usage := reviewerUsage
 	switch args[0] {
 	case "add":
 		return reviewerAdd(args[1:], r, stdout, stderr)
@@ -114,7 +116,7 @@ func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) (exit
 		return 125
 	}
 	if len(positional) > 1 || (len(positional) == 1 && fl.name != "" && fl.name != positional[0]) {
-		fmt.Fprintln(stderr, "usage: askdo reviewer add [<name>] [flags]")
+		fmt.Fprintln(stderr, "usage: askdo-config reviewer add [<name>] [flags]")
 		return 125
 	}
 	if len(positional) == 1 {
@@ -181,7 +183,7 @@ func reviewerAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) (exit
 }
 
 func printNameTaken(stderr io.Writer, name string) {
-	fmt.Fprintf(stderr, "reviewer %q already exists; use `askdo reviewer edit %s` to change it or `askdo reviewer delete %s` to remove it\n", name, name, name)
+	fmt.Fprintf(stderr, "reviewer %q already exists; use `askdo-config reviewer edit %s` to change it or `askdo-config reviewer delete %s` to remove it\n", name, name, name)
 }
 
 // reviewerEdit implements `askdo reviewer edit <name>`: the same wizard
@@ -197,7 +199,7 @@ func reviewerEdit(args []string, r prompt.Reader, stdout, stderr io.Writer) (exi
 		return 125
 	}
 	if len(positional) != 1 {
-		fmt.Fprintln(stderr, "usage: askdo reviewer edit <name> [flags]")
+		fmt.Fprintln(stderr, "usage: askdo-config reviewer edit <name> [flags]")
 		return 125
 	}
 	if !requireRoot("reviewer edit", stderr) {
@@ -211,7 +213,7 @@ func reviewerEdit(args []string, r prompt.Reader, stdout, stderr io.Writer) (exi
 	models := store.Config().Review.Models
 	idx := findModelIndex(models, positional[0])
 	if idx < 0 {
-		fmt.Fprintf(stderr, "reviewer %q not found (configured: %s); use `askdo reviewer add` to create it\n", positional[0], modelNames(models))
+		fmt.Fprintf(stderr, "reviewer %q not found (configured: %s); use `askdo-config reviewer add` to create it\n", positional[0], modelNames(models))
 		return 1
 	}
 	existing := models[idx]
@@ -263,7 +265,7 @@ func reviewerDelete(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) != 1 {
-		fmt.Fprintln(stderr, "usage: askdo reviewer delete <name> [--delete-key]")
+		fmt.Fprintln(stderr, "usage: askdo-config reviewer delete <name> [--delete-key]")
 		return 125
 	}
 	if !requireRoot("reviewer delete", stderr) {
@@ -281,7 +283,7 @@ func reviewerDelete(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(models) == 1 {
-		fmt.Fprintln(stderr, "reviewer delete: refusing to delete the last reviewer: review.models must be non-empty (add a replacement first with `askdo reviewer add`)")
+		fmt.Fprintln(stderr, "reviewer delete: refusing to delete the last reviewer: review.models must be non-empty (add a replacement first with `askdo-config reviewer add`)")
 		return 1
 	}
 	entry := models[idx]
@@ -338,7 +340,7 @@ func reviewerMove(args []string, delta int, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) != 1 {
-		fmt.Fprintf(stderr, "usage: askdo reviewer %s <name>\n", op)
+		fmt.Fprintf(stderr, "usage: askdo-config reviewer %s <name>\n", op)
 		return 125
 	}
 	if !requireRoot("reviewer "+op, stderr) {
@@ -388,7 +390,7 @@ func reviewerList(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) != 0 {
-		fmt.Fprintln(stderr, "usage: askdo reviewer list")
+		fmt.Fprintln(stderr, "usage: askdo-config reviewer list")
 		return 125
 	}
 	store, err := operator.LoadForMutation(*configPath)
@@ -398,7 +400,7 @@ func reviewerList(args []string, stdout, stderr io.Writer) int {
 	}
 	models := store.Config().Review.Models
 	if len(models) == 0 {
-		fmt.Fprintln(stdout, "no reviewers configured (use `askdo reviewer add`)")
+		fmt.Fprintln(stdout, "no reviewers configured (use `askdo-config reviewer add`)")
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)

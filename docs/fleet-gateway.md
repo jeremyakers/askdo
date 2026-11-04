@@ -17,7 +17,7 @@ policy and privileged execution.
 
 ```text
 RPi ──────────┐
-Main server ──┼── askdo gateway ── Model providers
+Main server ──┼── askdo-config gateway ── Model providers
 Workstations ─┘                 └─ Telegram
                   │
                   └─ Decision returns to the originating host

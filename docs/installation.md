@@ -23,6 +23,10 @@ not an alternative install path.
   on the destination, falls back to source, or starts/stops services.
 - Manifest/hash binding relies on the owner's HTTPS release publication; it
   is not a signature or reproducible-build claim.
+- `/usr/local/bin/askdo-config` is a root-owned symlink to `askdo`, dispatching
+  the same binary by its invocation name. There is no extra release asset.
+  Installation creates or repairs the link and refuses an existing non-symlink;
+  uninstall removes the link without following its target.
 
 ## Synology DSM specifics
 

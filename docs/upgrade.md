@@ -23,6 +23,10 @@ replacement cannot change the verified inode. The new helper stages and verifies
 release again before activation. It drains new work while existing jobs finish,
 backs up the broker and gateway data,
 installs the release, and verifies the restarted services and gateway catalog.
+After installing the binaries, activation creates or repairs the root-owned
+`/usr/local/bin/askdo-config -> askdo` multicall symlink on existing hosts. It
+refuses to replace a non-symlink at that path; a foreign file is never opened,
+followed or overwritten.
 On hosts without `systemd-run`, a detached activation starts a new session and
 moves to the root of each cgroup hierarchy before stopping the broker. The
 result is not called successful until those checks pass.

@@ -9,10 +9,10 @@ reject approvals, execution, terminal transitions, or daemon startup.
 Read it locally as root:
 
 ```sh
-askdo review log                         # jobs active in the last 24 hours
-askdo review log --since 7d               # equivalently, --since 168h
-askdo review log --job '2026-10-22_#1' --since 0
-askdo review log --since 0 --json         # all original JSONL records
+askdo-config review log                         # jobs active in the last 24 hours
+askdo-config review log --since 7d               # equivalently, --since 168h
+askdo-config review log --job '2026-10-22_#1' --since 0
+askdo-config review log --since 0 --json         # all original JSONL records
 ```
 
 The compact view joins by (`job_id`, `submitter_uid`), sorts newest activity first

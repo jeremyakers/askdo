@@ -22,7 +22,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const fleetUsage = "usage: sudo askdo fleet join https://gateway[:port] [--ca-file PATH]\nApprove the Telegram card ONLY if its certificate-bound request code matches the host terminal."
+const fleetUsage = "usage: sudo askdo-config fleet join https://gateway[:port] [--ca-file PATH]\nApprove the Telegram card ONLY if its certificate-bound request code matches the host terminal."
 
 type fleetConfigStore interface {
 	Config() *config.Config

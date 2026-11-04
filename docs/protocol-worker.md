@@ -22,7 +22,7 @@ The broker launches the worker as
   `config check --live` resolves the same identity before provider preparation,
   then clears supplementary groups and drops GID before UID for live checks. The
   reviewer binary refuses to run as root (exit 1). Bare `askdo reviewer` is
-  worker mode; subcommands such as `askdo reviewer add` are operator CLI, not
+  worker mode; subcommands such as `askdo-config reviewer add` are operator CLI, not
   worker invocations.
 - **Environment:** exactly `PATH=/usr/bin:/bin`,
   `HOME=/var/lib/askdo-review`, `LANG=C.UTF-8`. Nothing is inherited
@@ -512,7 +512,7 @@ submitter's result carries only the generic broker-authored explanation
 and malformed pipe frames may contain provider text, including echoed
 credentials, so they stay in the root-owned spool log and are never forwarded
 to the submitter. An operator reads that log with the root-only
-`askdo logs JOB_ID` command. A job with no model report is never labeled
+`askdo-config logs JOB_ID` command. A job with no model report is never labeled
 reviewed.
 
 ### `approval_only_frozen` (B→W)

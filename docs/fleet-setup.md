@@ -46,7 +46,7 @@ sudo install -d -m 0700 /etc/askdo-gateway /etc/askdo-gateway/credentials
 sudo install -m 0444 -o root -g root tls.crt /etc/askdo-gateway/tls.crt   # your cert (0400 also fine)
 sudo install -m 0600 -o root -g root tls.key /etc/askdo-gateway/tls.key   # your key
 sudo install -m 0600 -o root -g root /dev/stdin /etc/askdo-gateway/credentials/telegram.token  # paste the bot token
-sudo askdo gateway init \
+sudo askdo-config gateway init \
   --url https://gateway.example.com:8443 \
   --listen 0.0.0.0:8443 \
   --tls-cert /etc/askdo-gateway/tls.crt \
@@ -71,7 +71,7 @@ files is refused; `--force` is not a signing-key rotation command.
 Start the service explicitly when ready:
 
 ```sh
-sudo askdo gateway check --config /etc/askdo-gateway/config.json
+sudo askdo-config gateway check --config /etc/askdo-gateway/config.json
 sudo systemctl enable --now askdo-gateway
 ```
 
@@ -83,7 +83,7 @@ configured provider endpoints with a synthetic fixture (never host files).
 With askdo installed, run **on the joining host**:
 
 ```sh
-sudo askdo fleet join https://gateway.example.com:8443
+sudo askdo-config fleet join https://gateway.example.com:8443
 # Optional explicit trust: --ca-file /path/to/root-owned-read-only-ca.pem
 ```
 
@@ -153,11 +153,11 @@ created (individual credentials; one fleet-wide key would lose isolation and
 revocation):
 
 ```sh
-sudo askdo gateway hosts add --config /etc/askdo-gateway/config.json \
+askdo-config gateway hosts add --config /etc/askdo-gateway/config.json \
   --output /root/host-pi-bundle.json \
   --channel default --default-channel default
 # optional extras:  --uid-channel 1000=default   --ca-file /etc/askdo-gateway/ca.pem
-sudo askdo gateway hosts list --config /etc/askdo-gateway/config.json
+askdo-config gateway hosts list --config /etc/askdo-gateway/config.json
 ```
 
 The bundle is written root-only `0600` and contains the individual host ID,
@@ -167,8 +167,8 @@ database. Treat the bundle as a secret until it is imported on the host;
 copy it over a trusted channel, then on the host:
 
 ```sh
-sudo askdo gateway connect --enrollment /root/host-pi-bundle.json --approval-only
-sudo askdo config check
+sudo askdo-config gateway connect --enrollment /root/host-pi-bundle.json --approval-only
+sudo askdo-config config check
 ```
 
 A running host broker uses the new connection for its next submitted job;
@@ -231,7 +231,7 @@ then validate and restart:
 ```
 
 ```sh
-sudo askdo gateway check --config /etc/askdo-gateway/config.json
+askdo-config gateway check --config /etc/askdo-gateway/config.json
 sudo systemctl restart askdo-gateway
 ```
 
@@ -239,7 +239,7 @@ For the ChatGPT-subscription Codex backend, log in centrally — exactly once,
 on the gateway:
 
 ```sh
-sudo askdo auth login openai-codex --token-file /etc/askdo-gateway/credentials/openai-codex.json
+askdo-config auth login openai-codex --token-file /etc/askdo-gateway/credentials/openai-codex.json
 ```
 
 and use a profile with `"api": "openai_codex"`, `"api_key_file"` pointing at
@@ -252,7 +252,7 @@ whose outcome is uncertain (`refresh_pending`) requires re-login; an old
 refresh token is never retried. Hosts never hold OAuth copies.
 
 Once the profile is configured, re-authorize with no path:
-`sudo askdo auth login` (also `auth status` / `auth logout`) reads
+`askdo-config auth login` (also `auth status` / `auth logout`) reads
 `/etc/askdo-gateway/config.json` and `/etc/askdo/config.json`, and uses the
 one configured `openai_codex` token file. If both name different files the
 command stops and asks for `--config PATH` (or `--token-file`). On a
@@ -262,7 +262,7 @@ instead of creating an unused local copy.
 Then enroll (or re-enroll) hosts with the profile allowed and selected:
 
 ```sh
-sudo askdo gateway hosts add --config /etc/askdo-gateway/config.json \
+askdo-config gateway hosts add --config /etc/askdo-gateway/config.json \
   --output /root/host-pi-ai-bundle.json \
   --profile local --channel default --default-channel default
 ```
@@ -271,7 +271,7 @@ Use a fresh bundle filename: `hosts add` does not overwrite the approval-only
 bundle from step 2. Transfer the new bundle to the host, then:
 
 ```sh
-sudo askdo gateway connect --enrollment /root/host-pi-ai-bundle.json --profile local
+askdo-config gateway connect --enrollment /root/host-pi-ai-bundle.json --profile local
 ```
 
 If the host used step 2's `--approval-only`, edit its root-owned
@@ -280,8 +280,8 @@ review. Keep the other local policy fields unchanged; selecting `local` does
 not itself change the mode. Validate the new configuration:
 
 ```sh
-sudo askdo config check
-sudo askdo config check --live
+askdo-config config check
+askdo-config config check --live
 ```
 
 New submissions use that policy without restarting the local broker; queued,
@@ -297,7 +297,7 @@ working; creating a new enrollment does not revoke the old credential.
 ## Revocation and its limits
 
 ```sh
-sudo askdo gateway hosts revoke HOST_ID --config /etc/askdo-gateway/config.json
+askdo-config gateway hosts revoke HOST_ID --config /etc/askdo-gateway/config.json
 ```
 
 Revocation takes effect live in the gateway database: the host's

@@ -17,7 +17,7 @@ func isHelpWord(arg string) bool {
 }
 
 func writeTopHelp(w io.Writer) {
-	fmt.Fprint(w, `usage: askdo [-u USER] [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] -- COMMAND [ARG...]
+	fmt.Fprint(w, `usage: askdo [-u USER] [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] COMMAND [ARG...]
        askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
        askdo [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
        askdo status|attach JOB_ID
@@ -26,24 +26,25 @@ func writeTopHelp(w io.Writer) {
        askdo auto-approve status | set N | off
        askdo upgrade [--release TAG] [--operation ID]
 
-Run COMMAND with privilege after approval. Put -- before COMMAND so its own
-flags are passed to it unchanged.
+Run COMMAND with privilege after approval. Use -- before COMMAND if its name
+collides with an askdo subcommand (including a legacy operator command) or starts
+with -; command flags are passed through unchanged either way.
 
 -u USER (or --user USER) runs COMMAND as that account instead of root, like
 sudo -u: a login name or #UID that must exist on this host. The broker
 resolves it before the request is recorded, the approval card shows
 "submitter → USER (uid N)", and the command gets that account's uid, groups,
 HOME, USER and LOGNAME. Omit -u to run as root. --bundle and --script run as
-root only; to run a script as USER, pipe it: askdo -u USER -- bash < script.
+root only; to run a script as USER, pipe it: askdo -u USER bash < script.
 If foreground approval timestamps are enabled, reuse is per resolved target UID:
 a name and #UID for the same account share a window. Changing target (including
 omitting -u for root) requires fresh approval and replaces the window on handoff.
 
-  askdo -u tyme -- npm start                  run as the tyme account
-  askdo -u '#1001' -- id -u                   by numeric uid; quote #UID so
+  askdo -u tyme npm start                     run as the tyme account
+  askdo -u '#1001' id -u                      by numeric uid; quote #UID so
                                               the shell does not read # as
                                               a comment
-  askdo -u tyme --reason 'Rebuild' -- make    with the usual flags before --
+  askdo -u tyme --reason 'Rebuild' make       with runner flags before COMMAND
 
 Upgrade requires human approval and needs no sudo. Without --release, it selects
 the newest stable release, or a prerelease if none exists. --operation resumes
@@ -62,21 +63,44 @@ jobs always print them. Keep the handle file to interrupt your own running
 command; --force requests SIGKILL explicitly. A stop acknowledgment is not
 proof of exit. Use status or attach to confirm.
 
-Operator commands (root):
-  askdo fleet join https://gateway[:port] [--ca-file PATH]
-  askdo auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]
-  askdo config check [--config PATH] [--live] | config install FILE [--config PATH] [--force]
-  askdo gateway ...        askdo channel ...        askdo reviewer ...
-  askdo review ...         askdo inspection ...     askdo logs ...
-  askdo daemon [--config PATH]
+Configuration and operator commands: askdo-config --help
+Re-authorize Codex: askdo-config auth login
+Details: askdo-config auth --help
+`)
+}
 
-Re-authorize Codex with no flags: sudo askdo auth login
-Details: askdo auth --help
+func writeConfigHelp(w io.Writer) {
+	fmt.Fprint(w, `usage: askdo-config COMMAND [ARG...]
+
+  askdo-config review mode [required|approval-only] | exempt add|remove|list ...
+  askdo-config review timestamp_timeout set USER VALUE | clear USER | list
+  askdo-config review log [--since DURATION] [--job ID] [--json]
+  askdo-config channel add telegram [NAME] | list | route set LOGIN CHANNEL
+  askdo-config config check [--config PATH] [--live] | install FILE [--force]
+  askdo-config auth login|status|logout [openai-codex] [--config PATH]
+  askdo-config inspection check PATH [--config PATH]
+  askdo-config reviewer add|edit|delete|moveup|movedown|list ...
+  askdo-config gateway init|hosts add|hosts list|hosts revoke|connect|check|serve ...
+  askdo-config fleet join https://gateway[:port] [--ca-file PATH]
+  askdo-config logs JOB_ID [--uid UID] [--all]
+  askdo-config daemon [--config PATH]                 service mode (root only)
+
+Root-only operations request the usual Telegram approval for askdo members and
+run in the foreground, including interactive prompts. Root executes directly.
+Read-only operations that do not require root run without approval. Fleet join
+has its own enrollment approval; it and service modes still require root.
+
+timestamp_timeout matches sudo: plain VALUE is minutes (decimals allowed).
+Go durations such as 90s, 10m and 1h also work; the range is 30s through 1h.
+It controls how long one approval is reused on the same terminal, per target
+user. The legacy review timestamp alias still interprets plain values as seconds.
+
+Run shell commands and manage your own jobs with askdo; see askdo --help.
 `)
 }
 
 func writeAuthHelp(w io.Writer) {
-	fmt.Fprint(w, `usage: askdo auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]
+	fmt.Fprint(w, `usage: askdo-config auth login|status|logout [openai-codex] [--config PATH] [--credentials-dir DIR] [--token-file PATH]
 
   login    run the ChatGPT device flow and save the token (root; run again to re-authorize)
   status   show account and token expiry (never prints token material)
@@ -95,9 +119,9 @@ Target selection, highest priority first:
   (none)                  installed configs, else /etc/askdo/credentials/openai-codex.json
 
 The token file is saved root:root 0600. Examples:
-  sudo askdo auth login
-  sudo askdo auth login --config /etc/askdo-gateway/config.json
-  sudo askdo auth login --token-file /etc/askdo-gateway/credentials/codex.json
-  sudo askdo auth status
+  askdo-config auth login
+  askdo-config auth login --config /etc/askdo-gateway/config.json
+  askdo-config auth login --token-file /etc/askdo-gateway/credentials/codex.json
+  askdo-config auth status
 `)
 }

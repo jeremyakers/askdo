@@ -44,15 +44,15 @@ the two services have independent sockets and state.
    agent and human account with the operator's explicit approval. The narrow
    no-argv helper rule for approved original-TTY grants
    uses that same group; no second foreground membership is needed. Set up a
-   reviewer with `askdo reviewer add` or explicitly choose
-   `askdo review mode approval-only`;
-   complete `askdo channel add telegram` with the intended bot token and IDs
-   (`askdo channel add telegram NAME` for the named multi-channel form).
+   reviewer with `askdo-config reviewer add` or explicitly choose
+   `askdo-config review mode approval-only`;
+   complete `askdo-config channel add telegram` with the intended bot token and IDs
+   (`askdo-config channel add telegram NAME` for the named multi-channel form).
    Review `/etc/askdo/config.json`, credential file ownership/modes and
    inspection policy against [configuration](configuration.md). Telegram
    remains required even in approval-only mode; an empty model list alone does
    not enable approval-only behavior.
-3. Run `askdo config check` as root. Resolve any validation errors before
+3. Run `askdo-config config check` as root. Resolve any validation errors before
    starting askdo. When ready, start/enable `askdo.service` from an independent
    root administration session (`systemctl enable --now askdo`); with a bot
    token another service already uses, first arrange the approved handoff so

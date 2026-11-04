@@ -6,7 +6,7 @@ if [ "${1:-}" != --inside ]; then
   case "$(docker info --format '{{json .SecurityOptions}}')" in
     *'"name=rootless"'*) ;; *) exit 1 ;;
   esac
-  C=$(docker create --tmpfs /stage:rw,noexec,mode=0700 -w /src golang:1.27 sh /src/scripts/test-dsm-install.sh --inside "${1:-}")
+  C=$(docker create -e GOMAXPROCS -e GOFLAGS --tmpfs /stage:rw,noexec,mode=0700 -w /src golang:1.27 sh /src/scripts/test-dsm-install.sh --inside "${1:-}")
   trap 'docker rm -f "$C" >/dev/null 2>&1 || :' EXIT
   git -C "$ROOT" ls-files -z | tar -C "$ROOT" --null -T - -cf - | docker cp - "$C:/src"
   docker cp "$0" "$C:/src/scripts/test-dsm-install.sh"

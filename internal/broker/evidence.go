@@ -63,8 +63,19 @@ func (j *jobRuntime) captureEvidence() error {
 			j.recordWithheldPath(resolved)
 		}
 	}
-	j.resolvedArgv = append([]string{resolved}, j.req.Argv[1:]...)
+	j.resolvedArgv = append([]string{executionName(j.req.Argv[0], resolved)}, j.req.Argv[1:]...)
 	return nil
+}
+
+// Canonical paths remain the execution name for ordinary commands. The fixed
+// installed multicall link must retain its name or approval would re-enter the
+// legacy askdo CLI instead of askdo-config. Metadata/sensitive-path checks above
+// still use the resolved binary, and no other symlink behavior changes.
+func executionName(requested, resolved string) string {
+	if requested == "/usr/local/bin/askdo-config" && resolved == "/usr/local/bin/askdo" {
+		return requested
+	}
+	return resolved
 }
 
 func resolveExecutableMetadata(path string) (string, error) {

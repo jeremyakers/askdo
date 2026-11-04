@@ -23,8 +23,7 @@ var reviewLogRetainedJobs func(int)
 
 func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	if getEUID() != 0 {
-		fmt.Fprintln(stderr, "askdo review log requires root: the review journal is root-only (re-run with sudo)")
-		return 125
+		return rootRequired(stderr, "askdo review log requires root: the review journal is root-only (re-run with sudo)")
 	}
 	fs := flag.NewFlagSet("review log", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -54,7 +53,7 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	raw := fs.Bool("json", false, "emit original JSONL records rather than joined summaries")
 	positional, err := parseInterleaved(fs, args)
 	if err != nil || len(positional) != 0 {
-		fmt.Fprintln(stderr, "usage: askdo review log [--since DURATION] [--job ID] [--json]")
+		fmt.Fprintln(stderr, "usage: askdo-config review log [--since DURATION] [--job ID] [--json]")
 		return 125
 	}
 	file, err := os.Open(reviewLogPath)

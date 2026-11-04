@@ -91,6 +91,7 @@ for ENTRY in askdo askdo-foreground; do
   fi
 done
 rm -f /etc/systemd/system/askdo.service /usr/local/bin/askdo
+[ ! -L /usr/local/bin/askdo-config ] || rm -f /usr/local/bin/askdo-config
 # Removal follows the same recognition computed above; an unrecognized unit
 # already aborted the uninstall before any service control or removal.
 if [ "$GW_RECOGNIZED" = 1 ]; then rm -f "$GWUNIT"; fi

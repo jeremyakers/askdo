@@ -16,14 +16,14 @@ func (review *ReviewConfig) ResolveApprovalTimestampUsers() error {
 	for name, seconds := range review.ApprovalTimestampUsers {
 		account, err := lookupUser(name)
 		if err != nil {
-			return fmt.Errorf("resolve review.approval_timestamp_users %q: %w", name, err)
+			return fmt.Errorf("resolve review.timestamp_timeout_users %q: %w", name, err)
 		}
 		uid, err := strconv.ParseUint(account.Uid, 10, 32)
 		if err != nil {
-			return fmt.Errorf("invalid UID for review.approval_timestamp_users %q: %w", name, err)
+			return fmt.Errorf("invalid UID for review.timestamp_timeout_users %q: %w", name, err)
 		}
 		if _, exists := timeouts[uint32(uid)]; exists {
-			return fmt.Errorf("duplicate review.approval_timestamp_users UID %d", uid)
+			return fmt.Errorf("duplicate review.timestamp_timeout_users UID %d", uid)
 		}
 		timeouts[uint32(uid)] = time.Duration(seconds) * time.Second
 	}

@@ -75,8 +75,7 @@ func newUpgradeHelper(configPath, stage string, readConfig func(string, int64) (
 
 func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func(string) (upgrade.Helper, error), stdin io.Reader, stdout, stderr io.Writer) int {
 	if euid != 0 {
-		fmt.Fprintln(stderr, "upgrade-helper requires root")
-		return 125
+		return rootRequired(stderr, "upgrade-helper requires root")
 	}
 	flags := flag.NewFlagSet("upgrade-helper", flag.ContinueOnError)
 	flags.SetOutput(io.Discard) // Never echo mistaken secret-valued arguments.
