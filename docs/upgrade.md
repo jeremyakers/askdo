@@ -73,12 +73,13 @@ location is fine if it meets the same trust checks. Keep the data volume mounted
 and allow space for staged binaries and database snapshots.
 
 The unprivileged client never needs to read this setting. Its captured shell uses
-the fixed, transient `/var/lib/askdo-upgrade-bootstrap/bootstrap-<operation>` directory for
+the fixed, transient `/var/lib/askdo-upgrade/bootstrap-<operation>` directory for
 the pinned candidate, with exclusive `0700` creation, parent trust checks,
 descriptor pinning, digest verification and EXIT-trap cleanup. A missing parent
 is created `0700` by root. This executable-filesystem location deliberately avoids
-`/run` and `/tmp`, which may be mounted `noexec`. It is separate from the receipt
-root, whose scanner accepts receipt files only.
+`/run` and `/tmp`, which may be mounted `noexec`. The receipt scanner recognizes
+only private, nonsymlink `bootstrap-up_<32 lowercase hex digits>` directories as
+bootstrap artifacts; other unexpected entries still block scheduling.
 
 When a failure is known to have made no live changes (including manager rejection,
 scheduling cancellation before manager acceptance, or a pre-activation failure),

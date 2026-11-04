@@ -11,9 +11,9 @@ import (
 	"github.com/jeremyakers/askdo/internal/upgrade"
 )
 
-// Keep executable bootstrap files outside the receipt root, whose scanner only
-// accepts receipts. Unlike /run or /tmp, this location is normally executable.
-const defaultUpgradeBootstrapRoot = "/var/lib/askdo-upgrade-bootstrap"
+// The bootstrap shares the receipt parent on an executable filesystem, not
+// /run or /tmp. Receipt scanning recognizes its private operation directories.
+const defaultUpgradeBootstrapRoot = defaultUpgradeReceiptRoot
 
 // upgradeBootstrapScript verifies a root-owned copy before executing the new
 // helper through a pinned file descriptor. The old installed helper is not

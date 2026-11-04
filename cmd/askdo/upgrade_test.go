@@ -163,7 +163,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				if err != nil || !bytes.Contains(captured, capturedPlan) || !bytes.Contains(captured, []byte(plan.CLIDigest)) || !bytes.Contains(captured, []byte("/usr/bin/sha256sum")) || !bytes.Contains(captured, []byte("upgrade-helper")) {
 					t.Fatalf("stdin is not the pinned bootstrap and approved plan: %s %v", captured, err)
 				}
-				if bytes.Contains(captured, []byte("/var/backups/askdo")) || !bytes.Contains(captured, []byte("/var/lib/askdo-upgrade-bootstrap/bootstrap-"+operation)) {
+				if bytes.Contains(captured, []byte("/var/backups/askdo")) || !bytes.Contains(captured, []byte("/var/lib/askdo-upgrade/bootstrap-"+operation)) {
 					t.Fatalf("client bootstrap depends on backup storage: %s", captured)
 				}
 				// Model broker-frozen delivery through the real helper entry point.

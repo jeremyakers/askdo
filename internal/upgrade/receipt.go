@@ -259,7 +259,9 @@ func NewOperation(root, id, release, sourceCommit, stage string) (func(), error)
 	// in the root must be readable and none may be active. Terminal receipts
 	// do not block. Malformed, foreign or unexpected files fail closed rather
 	// than being ignored; dotfile staging artifacts (".<id>.temp-*") are not
-	// receipts and do not block a recovery operation.
+	// receipts and do not block a recovery operation. The captured root bootstrap
+	// also keeps its private bootstrap-<operation> directory here until scheduling
+	// returns; that exact directory namespace is not a receipt.
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return failure(fmt.Errorf("scan receipt root %s: %w", root, err))
@@ -268,6 +270,11 @@ func NewOperation(root, id, release, sourceCommit, stage string) (func(), error)
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") {
 			continue
+		}
+		if id, ok := strings.CutPrefix(name, "bootstrap-"); ok && validateOperationID(id) == nil && entry.IsDir() {
+			if info, err := entry.Info(); err == nil && info.Mode().Perm() == 0o700 {
+				continue
+			}
 		}
 		if !strings.HasSuffix(name, ".json") {
 			return failure(fmt.Errorf("receipt root %s contains unexpected file %q", root, name))

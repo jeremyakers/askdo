@@ -85,6 +85,36 @@ func TestNewOperationWritesScheduledReceipt(t *testing.T) {
 	}
 }
 
+func TestNewOperationAcceptsPrivateBootstrapWithoutHidingReceipts(t *testing.T) {
+	// Given: the pinned candidate is still executing under the receipt parent.
+	root := t.TempDir()
+	bootstrap := filepath.Join(root, "bootstrap-"+testOpID)
+	if err := os.Mkdir(bootstrap, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(bootstrap, "candidate")
+	if err := os.WriteFile(candidate, []byte("pinned candidate"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// When
+	unlock, err := NewOperation(root, testOpID, testRelease, testSourceCommit, testStage)
+	// Then: scheduling permits only the recognized bootstrap namespace, without
+	// touching it or overlooking an active receipt beside it.
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if data, err := os.ReadFile(candidate); err != nil || string(data) != "pinned candidate" {
+		t.Fatalf("bootstrap changed: %q, %v", data, err)
+	}
+	if unlock, err := NewOperation(root, testOpID2, testRelease, testSourceCommit, testStage); err == nil {
+		unlock()
+		t.Fatal("bootstrap hid an active receipt")
+	} else if !strings.Contains(err.Error(), "active operation "+testOpID) {
+		t.Fatalf("did not inspect active receipt: %v", err)
+	}
+}
+
 // Given a receipt root that is an existing file, When NewOperation runs,
 // Then it fails without leaving a lock file, and malformed IDs are always
 // refused before any path is touched.
@@ -316,6 +346,30 @@ func TestMalformedOtherReceiptRefuses(t *testing.T) {
 		},
 		"unexpected non-json file": func(t *testing.T, root string) {
 			if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"bootstrap-named file": func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "bootstrap-"+testOpID), []byte("foreign"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"malformed bootstrap directory": func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, "bootstrap-up_bad"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"public bootstrap directory": func(t *testing.T, root string) {
+			path := filepath.Join(root, "bootstrap-"+testOpID)
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"bootstrap directory symlink": func(t *testing.T, root string) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(root, "bootstrap-"+testOpID)); err != nil {
 				t.Fatal(err)
 			}
 		},
