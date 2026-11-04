@@ -125,15 +125,16 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	}
 	// The identity, bearer and join secret are independently generated on the
 	// host. Only hashes go in the public POST; the bearer never leaves here.
-	var identity, bearer, joinSecret [32]byte
-	for _, raw := range []*[32]byte{&identity, &bearer, &joinSecret} {
+	var identity, bearer, joinSecret, hostNonce [32]byte
+	for _, raw := range []*[32]byte{&identity, &bearer, &joinSecret, &hostNonce} {
 		if _, err = rand.Read(raw[:]); err != nil {
 			return errors.New("could not generate fleet join identity")
 		}
 	}
 	host := fleetproto.ID("host_" + hex.EncodeToString(identity[:]))
 	bearerHash, joinHash := sha256.Sum256(bearer[:]), sha256.Sum256(joinSecret[:])
-	request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: host, Hostname: hostname, BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:]))}
+	request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: host, Hostname: hostname, BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Commit: fleetproto.JoinCommit(hostNonce)}
+	hostNonceText := fleetproto.Hash(hex.EncodeToString(hostNonce[:]))
 	client, err := fleetclient.NewJoinClient(pos[0], string(host), base64.RawURLEncoding.EncodeToString(joinSecret[:]), ca)
 	if err != nil {
 		return err
@@ -141,14 +142,14 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	defer client.Close()
 	ctx, cancel := context.WithTimeout(parent, fleetproto.JoinTTLSeconds*time.Second)
 	defer cancel()
-	approved, err := waitFleetJoin(ctx, client, request, func() {
+	approved, err := waitFleetJoin(ctx, client, request, hostNonceText, func(gatewayNonce fleetproto.Hash) {
 		deadline, _ := ctx.Deadline()
 		minutes := max(1, int((time.Until(deadline)+time.Minute-1)/time.Minute))
 		unit := "minutes"
 		if minutes == 1 {
 			unit = "minute"
 		}
-		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the Telegram card ONLY if it shows this same code. Waiting up to %d %s...\n", fleetproto.JoinRequestCode(request, client.GatewayLeafHash()), minutes, unit)
+		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the Telegram card ONLY if it shows this same code. Waiting up to %d %s...\n", fleetproto.JoinRequestCode(request, client.GatewayLeafHash(), hostNonceText, gatewayNonce), minutes, unit)
 	})
 	if err != nil {
 		return err
@@ -179,17 +180,12 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 // Unknown authority with an explicit CA never falls back to provisional trust.
 var errJoinUntrustedGateway = errors.New("fleet join: this host does not trust the gateway's TLS certificate with --ca-file, so no enrollment request was sent; check the supplied CA, or rerun fleet join without --ca-file and confirm the certificate-bound request code")
 
-// waitFleetJoin calls accepted exactly once, when the gateway first confirms
-// the request exists, so the approval prompt never precedes a real card.
-func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request fleetproto.JoinRequest, accepted func()) (fleetproto.JoinResponse, error) {
+// waitFleetJoin announces only after the reveal is accepted, never merely after
+// commitment admission. Nonces and credentials survive all transport retries.
+func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request fleetproto.JoinRequest, hostNonce fleetproto.Hash, accepted func(fleetproto.Hash)) (fleetproto.JoinResponse, error) {
 	registered := false
 	announced := false
-	announce := func() {
-		if registered && !announced {
-			announced = true
-			accepted()
-		}
-	}
+	revealSent := false
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		var response fleetproto.JoinResponse
@@ -199,8 +195,8 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 		} else {
 			response, err = client.RequestJoin(callCtx, request)
 			if errors.Is(err, fleetclient.ErrJoinDuplicate) {
-				registered, err = true, nil
-				announce()
+				registered = true
+				response, err = client.Status(callCtx)
 			}
 			// A POST response may be lost after creation. Reconcile with the
 			// same identity/secret before retrying the identical POST.
@@ -210,6 +206,13 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 					// The request was not created. Retry the same POST below.
 					err = &fleetclient.Error{Code: fleetproto.ErrCodeTransport}
 				}
+			}
+		}
+		if err == nil && response.State == fleetproto.JoinCommitted {
+			registered, revealSent = true, true
+			response, err = client.Reveal(callCtx, hostNonce)
+			if errors.Is(err, fleetclient.ErrJoinDuplicate) || joinTransportError(err) && callCtx.Err() == nil {
+				response, err = client.Status(callCtx)
 			}
 		}
 		cancel()
@@ -232,7 +235,15 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 		}
 		if err == nil && response.State != "" {
 			registered = true
-			announce()
+			if response.State == fleetproto.JoinPending || response.State == fleetproto.JoinApproved || response.State == fleetproto.JoinDenied {
+				if !revealSent {
+					return fleetproto.JoinResponse{}, &fleetclient.Error{Code: fleetproto.ErrCodeProtocol}
+				}
+				if !announced {
+					announced = true
+					accepted(response.GatewayNonce)
+				}
+			}
 			if time.Now().Unix() >= response.ExpiresAt {
 				return fleetproto.JoinResponse{}, errors.New("fleet enrollment request expired; rerun fleet join")
 			}
@@ -243,7 +254,7 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 				return fleetproto.JoinResponse{}, errors.New("fleet enrollment denied; local configuration unchanged")
 			case fleetproto.JoinExpired:
 				return fleetproto.JoinResponse{}, errors.New("fleet enrollment request expired; rerun fleet join")
-			case fleetproto.JoinPending:
+			case fleetproto.JoinCommitted, fleetproto.JoinPending:
 			}
 		}
 		// The existing ten-minute context bounds transport and cooldown waits;

@@ -68,11 +68,42 @@ func fleetJoinTLSIdentity(t *testing.T, chain bool, validity string) (tls.Certif
 	return tls.Certificate{Certificate: ders, PrivateKey: key}, certs
 }
 
-func expectedFleetJoinCode(request fleetproto.JoinRequest, leafDER []byte) string {
+const fixtureGatewayNonce fleetproto.Hash = "2222222222222222222222222222222222222222222222222222222222222222"
+
+// Shared fake-wire reveal step: verify the actual CLI's commitment and ensure
+// that the approval/code announcement has not happened before this response.
+func fleetJoinRevealFixture(t *testing.T, w http.ResponseWriter, r *http.Request, request fleetproto.JoinRequest, out *bytes.Buffer, nonce *fleetproto.Hash) bool {
+	t.Helper()
+	if !strings.HasSuffix(r.URL.Path, "/reveal") {
+		return false
+	}
+	data, _ := io.ReadAll(r.Body)
+	reveal, err := fleetproto.ParseJoinReveal(data)
+	raw, _ := hex.DecodeString(string(reveal.HostNonce))
+	commit := sha256.Sum256(append([]byte("askdo-join-commit\x00"), raw...))
+	if err != nil || hex.EncodeToString(commit[:]) != string(request.Commit) || r.Header.Get("Authorization") == "" || strings.Contains(out.String(), "Fleet enrollment request code:") {
+		t.Error("invalid or prematurely announced reveal", err)
+	}
+	if nonce != nil {
+		*nonce = reveal.HostNonce
+	}
+	wire, err := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinPending, HostID: request.HostID, GatewayNonce: fixtureGatewayNonce, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write(wire)
+	return true
+}
+
+func expectedFleetJoinCode(request fleetproto.JoinRequest, leafDER []byte, hostNonce fleetproto.Hash) string {
 	leafHash := sha256.Sum256(leafDER)
-	// Independent encoding of the documented version-1 authentication string.
-	payload := []byte("askdo-join-code\x00\x01" + string(request.HostID) + "\x00" + string(request.BearerHash) + "\x00" + string(request.JoinHash) + "\x00")
+	// Independent encoding of the documented version-2 authentication string.
+	payload := []byte("askdo-join-code\x00\x02" + string(request.HostID) + "\x00" + string(request.BearerHash) + "\x00" + string(request.JoinHash) + "\x00")
 	payload = append(payload, leafHash[:]...)
+	for _, hash := range []fleetproto.Hash{request.Commit, hostNonce, fixtureGatewayNonce} {
+		raw, _ := hex.DecodeString(string(hash))
+		payload = append(payload, raw...)
+	}
 	hash := sha256.Sum256(payload)
 	return strings.ToUpper(hex.EncodeToString(hash[:3]))
 }
@@ -87,9 +118,13 @@ func TestFleetJoinPinsFirstGatewayCertificate(t *testing.T) {
 			pinned := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certs[len(certs)-1].Raw})
 			var posts, gets atomic.Int32
 			var requested fleetproto.JoinRequest
+			var revealed fleetproto.Hash
 			var server *httptest.Server
 			var out, stderr bytes.Buffer
 			server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if fleetJoinRevealFixture(t, w, r, requested, &out, &revealed) {
+					return
+				}
 				if r.Method == http.MethodPost {
 					posts.Add(1)
 					if strings.Contains(out.String(), "Fleet enrollment request code:") {
@@ -102,12 +137,12 @@ func TestFleetJoinPinsFirstGatewayCertificate(t *testing.T) {
 						t.Error("invalid join request", err, r.URL.Path)
 					}
 					w.Header().Set("Connection", "close") // Require later TLS verification too.
-					wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinPending, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+					wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, GatewayNonce: fixtureGatewayNonce, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
 					_, _ = w.Write(wire)
 					return
 				}
 				gets.Add(1)
-				wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinApproved, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix(), URL: server.URL, VerificationKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), AllowedProfiles: []string{}, DefaultProfiles: []string{}})
+				wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinApproved, GatewayNonce: fixtureGatewayNonce, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix(), URL: server.URL, VerificationKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), AllowedProfiles: []string{}, DefaultProfiles: []string{}})
 				_, _ = w.Write(wire)
 			}))
 			server.TLS = &tls.Config{Certificates: []tls.Certificate{identity}}
@@ -144,7 +179,7 @@ func TestFleetJoinPinsFirstGatewayCertificate(t *testing.T) {
 			if posts.Load() != 1 || gets.Load() != 1 || len(runner.calls) == 0 {
 				t.Fatal("join did not complete exactly once", posts.Load(), gets.Load(), runner.calls)
 			}
-			if !strings.Contains(out.String(), "Fleet enrollment request code: "+expectedFleetJoinCode(requested, certs[0].Raw)) || strings.Count(out.String(), "Approve the Telegram card ONLY if it shows this same code.") != 1 {
+			if !strings.Contains(out.String(), "Fleet enrollment request code: "+expectedFleetJoinCode(requested, certs[0].Raw, revealed)) || strings.Count(out.String(), "Approve the Telegram card ONLY if it shows this same code.") != 1 {
 				t.Fatal("missing certificate-bound code or comparison warning", out.String())
 			}
 			// Existing enrolled traffic verifies using that same saved anchor.
@@ -233,7 +268,7 @@ func TestFleetJoinCertificateChangeAborts(t *testing.T) {
 		data, _ := io.ReadAll(r.Body)
 		request, _ := fleetproto.ParseJoinRequest(data)
 		w.Header().Set("Connection", "close")
-		wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinPending, HostID: request.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+		wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, GatewayNonce: fixtureGatewayNonce, HostID: request.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
 		_, _ = w.Write(wire)
 	}))
 	server.TLS = &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
@@ -255,7 +290,7 @@ func TestFleetJoinCertificateChangeAborts(t *testing.T) {
 	err = runFleetJoin(ctx, []string{server.URL}, path, new(fakeFleetSetup), &out, &stderr)
 
 	// Then pinning rejects even a different valid leaf from the same CA.
-	if err == nil || !strings.Contains(err.Error(), "gateway certificate changed") || posts.Load() != 1 || gets.Load() != 0 || fileContent(t, path) != localJoinConfig {
+	if err == nil || !strings.Contains(err.Error(), "gateway certificate changed") || posts.Load() != 1 || gets.Load() != 0 || strings.Contains(out.String(), "Fleet enrollment request code:") || fileContent(t, path) != localJoinConfig {
 		t.Fatalf("err=%v connections=%d posts=%d gets=%d", err, connections.Load(), posts.Load(), gets.Load())
 	}
 }
@@ -266,18 +301,27 @@ func TestFleetJoinApprovalPromptUsesRemainingDeadline(t *testing.T) {
 	var posts atomic.Int32
 	var out, stderr bytes.Buffer
 	var server *httptest.Server
+	var request fleetproto.JoinRequest
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(out.String(), "Fleet enrollment request code:") {
+		if fleetJoinRevealFixture(t, w, r, request, &out, nil) {
+			return
+		}
+		if r.Method == http.MethodPost && strings.Contains(out.String(), "Fleet enrollment request code:") {
 			t.Error("approval prompt preceded acceptance")
 		}
-		if posts.Add(1) == 1 {
+		if r.Method == http.MethodPost && posts.Add(1) == 1 {
 			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		data, _ := io.ReadAll(r.Body)
-		request, _ := fleetproto.ParseJoinRequest(data)
-		wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinApproved, HostID: request.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix(), URL: server.URL, VerificationKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), AllowedProfiles: []string{}, DefaultProfiles: []string{}})
+		if r.Method == http.MethodPost {
+			data, _ := io.ReadAll(r.Body)
+			request, _ = fleetproto.ParseJoinRequest(data)
+			wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, GatewayNonce: fixtureGatewayNonce, HostID: request.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+			_, _ = w.Write(wire)
+			return
+		}
+		wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinApproved, GatewayNonce: fixtureGatewayNonce, HostID: request.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix(), URL: server.URL, VerificationKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), AllowedProfiles: []string{}, DefaultProfiles: []string{}})
 		_, _ = w.Write(wire)
 	}))
 	defer server.Close()
@@ -302,7 +346,7 @@ func TestFleetJoinApprovalPromptUsesRemainingDeadline(t *testing.T) {
 	err := runFleetJoin(ctx, []string{server.URL, "--ca-file", caPath}, path, new(fakeFleetSetup), &out, &stderr)
 
 	// Then the acceptance-only message uses the remaining budget.
-	if err != nil || posts.Load() != 2 || waits != 1 || !strings.Contains(out.String(), "Waiting up to 7 minutes...") {
+	if err != nil || posts.Load() != 2 || waits != 2 || !strings.Contains(out.String(), "Waiting up to 7 minutes...") {
 		t.Fatalf("err=%v posts=%d waits=%d out=%q", err, posts.Load(), waits, out.String())
 	}
 }

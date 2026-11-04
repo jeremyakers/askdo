@@ -50,8 +50,8 @@ func TestJoinServeUsesTheCardCertificateSnapshot(t *testing.T) {
 	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport}
-	host, _, _, bearerHash, joinHash := hostJoinIdentity(9)
-	request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), Hostname: "serving-certificate", BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:]))}
+	host, _, secret, bearerHash, joinHash := hostJoinIdentity(9)
+	request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), Hostname: "serving-certificate", BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Commit: fleetproto.JoinCommit([32]byte{})}
 	wire, err := fleetproto.MarshalJoinRequest(request)
 	if err != nil {
 		t.Fatal(err)
@@ -77,8 +77,13 @@ func TestJoinServeUsesTheCardCertificateSnapshot(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !bytes.Equal(response.TLS.PeerCertificates[0].Raw, f.tls.Certificate().Raw) {
 		t.Fatal("Serve did not use the loaded certificate", response.StatusCode)
 	}
+	nonce := fleetproto.Hash(strings.Repeat("00", 32))
+	revealed, err := f.service.joins.Reveal(t.Context(), host, secret, fleetproto.JoinReveal{Version: fleetproto.JoinVersion, HostNonce: nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
 	card, _ := f.joinCard(t)
-	code := fleetproto.JoinRequestCode(request, sha256.Sum256(response.TLS.PeerCertificates[0].Raw))
+	code := fleetproto.JoinRequestCode(request, sha256.Sum256(response.TLS.PeerCertificates[0].Raw), nonce, revealed.GatewayNonce)
 	if !strings.Contains(card.Text, "<code>"+code+"</code>") {
 		t.Fatal("serving leaf differs from card identity", card.Text)
 	}

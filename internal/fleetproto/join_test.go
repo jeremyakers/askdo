@@ -8,11 +8,11 @@ import (
 )
 
 func validJoinRequestJSON() []byte {
-	return []byte(`{"version":1,"host_id":"host_` + strings.Repeat("ab", 32) + `","bearer_hash":"` + strings.Repeat("cd", 32) + `","join_hash":"` + strings.Repeat("ef", 32) + `","hostname":"lauren-laptop"}`)
+	return []byte(`{"version":2,"host_id":"host_` + strings.Repeat("ab", 32) + `","bearer_hash":"` + strings.Repeat("cd", 32) + `","join_hash":"` + strings.Repeat("ef", 32) + `","commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581","hostname":"lauren-laptop"}`)
 }
 
 func approvedJoinResponseJSON() []byte {
-	return []byte(`{"version":1,"state":"approved","host_id":"host_` + strings.Repeat("ab", 32) + `","expires_at":1790000000,"url":"https://gateway.example","verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":["codex"],"default_profiles":["codex"]}`)
+	return []byte(`{"version":2,"state":"approved","host_id":"host_` + strings.Repeat("ab", 32) + `","gateway_nonce":"2222222222222222222222222222222222222222222222222222222222222222","expires_at":1790000000,"url":"https://gateway.example","verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":["codex"],"default_profiles":["codex"]}`)
 }
 
 func Test_JoinRequest_parse_accepts_valid_request_when_fresh_host_joins(t *testing.T) {
@@ -45,35 +45,41 @@ func Test_JoinRequest_parse_rejects_malformed_input_when_fields_violate_contract
 		fix  func([]byte) []byte
 	}{
 		{"wrong version", func(d []byte) []byte {
-			return []byte(strings.Replace(string(d), `"version":1`, `"version":2`, 1))
+			return []byte(strings.Replace(string(d), `"version":2`, `"version":1`, 1))
 		}},
 		{"missing version", func(d []byte) []byte {
-			return []byte(strings.Replace(string(d), `"version":1,`, ``, 1))
+			return []byte(strings.Replace(string(d), `"version":2,`, ``, 1))
+		}},
+		{"missing commitment", func(d []byte) []byte {
+			return []byte(strings.Replace(string(d), `,"commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581"`, "", 1))
+		}},
+		{"malformed commitment", func(d []byte) []byte {
+			return []byte(strings.Replace(string(d), "e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581", "bad", 1))
 		}},
 		{"unknown field", func(d []byte) []byte {
 			return []byte(strings.Replace(string(d), `"hostname"`, `"extra":1,"hostname"`, 1))
 		}},
 		{"duplicate key", func(d []byte) []byte {
-			return []byte(strings.Replace(string(d), `"hostname"`, `"version":1,"hostname"`, 1))
+			return []byte(strings.Replace(string(d), `"hostname"`, `"version":2,"hostname"`, 1))
 		}},
 		{"null body", func([]byte) []byte { return []byte("null") }},
 		{"wrong host id format", func(d []byte) []byte {
-			return []byte(`{"version":1,"host_id":"host_short","bearer_hash":"` + hash + `","join_hash":"` + hash + `","hostname":"h"}`)
+			return []byte(`{"version":2,"host_id":"host_short","bearer_hash":"` + hash + `","join_hash":"` + hash + `","commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581","hostname":"h"}`)
 		}},
 		{"uppercase host id hex", func(d []byte) []byte {
-			return []byte(`{"version":1,"host_id":"host_` + strings.Repeat("AB", 32) + `","bearer_hash":"` + hash + `","join_hash":"` + hash + `","hostname":"h"}`)
+			return []byte(`{"version":2,"host_id":"host_` + strings.Repeat("AB", 32) + `","bearer_hash":"` + hash + `","join_hash":"` + hash + `","commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581","hostname":"h"}`)
 		}},
 		{"bad bearer hash", func(d []byte) []byte {
-			return []byte(`{"version":1,"host_id":"` + host + `","bearer_hash":"` + strings.Repeat("cD", 32) + `","join_hash":"` + hash + `","hostname":"h"}`)
+			return []byte(`{"version":2,"host_id":"` + host + `","bearer_hash":"` + strings.Repeat("cD", 32) + `","join_hash":"` + hash + `","commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581","hostname":"h"}`)
 		}},
 		{"hostname control character", func(d []byte) []byte {
-			return []byte(`{"version":1,"host_id":"` + host + `","bearer_hash":"` + hash + `","join_hash":"` + hash + `","hostname":"h\u0000x"}`)
+			return []byte(`{"version":2,"host_id":"` + host + `","bearer_hash":"` + hash + `","join_hash":"` + hash + `","commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581","hostname":"h\u0000x"}`)
 		}},
 		{"hostname too long", func(d []byte) []byte {
-			return []byte(`{"version":1,"host_id":"` + host + `","bearer_hash":"` + hash + `","join_hash":"` + hash + `","hostname":"` + strings.Repeat("h", 257) + `"}`)
+			return []byte(`{"version":2,"host_id":"` + host + `","bearer_hash":"` + hash + `","join_hash":"` + hash + `","commit":"e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581","hostname":"` + strings.Repeat("h", 257) + `"}`)
 		}},
 		{"body too large", func(d []byte) []byte {
-			return append(append([]byte(`{"version":1,"host_id":"`), d...), []byte(strings.Repeat("x", 8192))...)
+			return append(append([]byte(`{"version":2,"host_id":"`), d...), []byte(strings.Repeat("x", 8192))...)
 		}},
 	}
 	for _, tt := range tests {
@@ -121,30 +127,43 @@ func Test_JoinResponse_parse_accepts_approved_facts_when_gateway_approves(t *tes
 }
 
 func Test_JoinResponse_parse_rejects_state_facts_mismatch_when_inconsistent(t *testing.T) {
-	host := ID("host_" + strings.Repeat("ab", 32))
+	invalid := func(change func(map[string]any)) []byte {
+		var value map[string]any
+		if err := json.Unmarshal(approvedJoinResponseJSON(), &value); err != nil {
+			t.Fatal(err)
+		}
+		change(value)
+		wire, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wire
+	}
 	tests := []struct {
 		name string
 		data []byte
 	}{
-		{"pending with enrollment facts", []byte(`{"version":1,"state":"pending","host_id":"` + string(host) + `","expires_at":1790000000,"url":"https://gateway.example"}`)},
-		{"denied with verification key", []byte(`{"version":1,"state":"denied","host_id":"` + string(host) + `","expires_at":1790000000,"verification_key":"` + strings.Repeat("A", 43) + "=" + `"}`)},
-		{"expired with profiles", []byte(`{"version":1,"state":"expired","host_id":"` + string(host) + `","expires_at":1790000000,"allowed_profiles":["codex"]}`)},
-		{"approved without url", []byte(`{"version":1,"state":"approved","host_id":"` + string(host) + `","expires_at":1790000000,"verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":["codex"],"default_profiles":["codex"]}`)},
-		{"approved with plain http", []byte(`{"version":1,"state":"approved","host_id":"` + string(host) + `","expires_at":1790000000,"url":"http://gateway.example","verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":["codex"],"default_profiles":["codex"]}`)},
-		{"approved with bad key", []byte(`{"version":1,"state":"approved","host_id":"` + string(host) + `","expires_at":1790000000,"url":"https://gateway.example","verification_key":"not-base64!","allowed_profiles":["codex"],"default_profiles":["codex"]}`)},
-		{"approved default outside allowed", []byte(`{"version":1,"state":"approved","host_id":"` + string(host) + `","expires_at":1790000000,"url":"https://gateway.example","verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":["codex"],"default_profiles":["other"]}`)},
-		{"approved duplicate profiles", []byte(`{"version":1,"state":"approved","host_id":"` + string(host) + `","expires_at":1790000000,"url":"https://gateway.example","verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":["codex","codex"],"default_profiles":["codex"]}`)},
-		{"unknown state", []byte(`{"version":1,"state":"later","host_id":"` + string(host) + `","expires_at":1790000000}`)},
-		{"missing expiry", []byte(`{"version":1,"state":"pending","host_id":"` + string(host) + `"}`)},
-		{"host id not join-shaped", []byte(`{"version":1,"state":"pending","host_id":"anything","expires_at":1790000000}`)},
-		{"too many default profiles", func() []byte {
+		{"pending with enrollment facts", invalid(func(v map[string]any) { v["state"] = "pending" })},
+		{"denied with verification key", invalid(func(v map[string]any) { v["state"] = "denied" })},
+		{"expired with profiles", invalid(func(v map[string]any) { v["state"] = "expired" })},
+		{"approved without url", invalid(func(v map[string]any) { delete(v, "url") })},
+		{"approved with plain http", invalid(func(v map[string]any) { v["url"] = "http://gateway.example" })},
+		{"approved with bad key", invalid(func(v map[string]any) { v["verification_key"] = "not-base64!" })},
+		{"approved default outside allowed", invalid(func(v map[string]any) { v["default_profiles"] = []string{"other"} })},
+		{"approved duplicate profiles", invalid(func(v map[string]any) { v["allowed_profiles"] = []string{"codex", "codex"} })},
+		{"unknown state", invalid(func(v map[string]any) { v["state"] = "later" })},
+		{"missing expiry", invalid(func(v map[string]any) { delete(v, "expires_at") })},
+		{"host id not join-shaped", invalid(func(v map[string]any) { v["host_id"] = "anything" })},
+		{"missing gateway nonce", invalid(func(v map[string]any) { delete(v, "gateway_nonce") })},
+		{"malformed gateway nonce", invalid(func(v map[string]any) { v["gateway_nonce"] = "bad" })},
+		{"old version", invalid(func(v map[string]any) { v["version"] = 1 })},
+		{"too many default profiles", invalid(func(v map[string]any) {
 			ids := make([]string, 17)
 			for i := range ids {
 				ids[i] = "profile-" + string(rune('a'+i))
 			}
-			data := `{"version":1,"state":"approved","host_id":"` + string(host) + `","expires_at":1790000000,"url":"https://gateway.example","verification_key":"` + strings.Repeat("A", 43) + "=" + `","allowed_profiles":[` + quoteJoin(ids) + `],"default_profiles":[` + quoteJoin(ids) + `]}`
-			return []byte(data)
-		}()},
+			v["allowed_profiles"], v["default_profiles"] = ids, ids
+		})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -158,32 +177,24 @@ func Test_JoinResponse_parse_rejects_state_facts_mismatch_when_inconsistent(t *t
 	}
 }
 
-func quoteJoin(values []string) string {
-	quoted := make([]string, len(values))
-	for i, v := range values {
-		b, _ := json.Marshal(v)
-		quoted[i] = string(b)
-	}
-	return strings.Join(quoted, ",")
-}
-
 func Test_JoinRequestCode_binds_request_and_gateway_certificate(t *testing.T) {
 	// Given a fixed request and leaf hash, with an independently calculated
-	// version-1 code vector (domain, version byte, NUL-delimited fields, digest).
+	// version-2 code vector, including the commitment and both nonces.
 	request, err := ParseJoinRequest(validJoinRequestJSON())
 	if err != nil {
 		t.Fatal(err)
 	}
 	leaf := sha256.Sum256([]byte("fixture leaf DER"))
 	// When either side derives the short authentication string.
-	code := JoinRequestCode(request, leaf)
+	code := JoinRequestCode(request, leaf, Hash(strings.Repeat("00", 32)), Hash(strings.Repeat("22", 32)))
 	// Then the fixed vector is stable and each bound field affects the code.
-	if code != "C38ACD" || JoinRequestCode(request, leaf) != code {
+	if code != "28AC12" || JoinRequestCode(request, leaf, Hash(strings.Repeat("00", 32)), Hash(strings.Repeat("22", 32))) != code {
 		t.Fatalf("wrong certificate-bound code: %q", code)
 	}
-	for _, field := range []string{"host", "bearer", "join", "certificate"} {
+	for _, field := range []string{"host", "bearer", "join", "certificate", "commit", "host nonce", "gateway nonce"} {
 		t.Run(field, func(t *testing.T) {
 			changed, otherLeaf := request, leaf
+			hostNonce, gatewayNonce := Hash(strings.Repeat("00", 32)), Hash(strings.Repeat("22", 32))
 			switch field {
 			case "host":
 				changed.HostID = ID("host_" + strings.Repeat("ba", 32))
@@ -193,11 +204,25 @@ func Test_JoinRequestCode_binds_request_and_gateway_certificate(t *testing.T) {
 				changed.JoinHash = Hash(strings.Repeat("fe", 32))
 			case "certificate":
 				otherLeaf = sha256.Sum256([]byte("another leaf DER"))
+			case "commit":
+				changed.Commit = Hash(strings.Repeat("01", 32))
+			case "host nonce":
+				hostNonce = Hash(strings.Repeat("01", 32))
+			case "gateway nonce":
+				gatewayNonce = Hash(strings.Repeat("01", 32))
 			}
-			if JoinRequestCode(changed, otherLeaf) == code {
+			if JoinRequestCode(changed, otherLeaf, hostNonce, gatewayNonce) == code {
 				t.Fatal("changed binding did not change authentication string")
 			}
 		})
+	}
+}
+
+func TestJoinCommitMatchesIndependentVector(t *testing.T) {
+	// Given an all-zero fixture nonce, when committed, then it matches a digest
+	// independently calculated from the domain and the 32 raw nonce bytes.
+	if JoinCommit([32]byte{}) != "e2f430cf4cc6300975470a4a913c27cf6f450714dea85f8b92872857583c7581" {
+		t.Fatal("incorrect commit encoding")
 	}
 }
 
@@ -212,7 +237,7 @@ func Test_JoinTTL_matches_documented_ten_minutes(t *testing.T) {
 
 func TestJoinApprovedEmptyProfilesRoundTrip(t *testing.T) {
 	// Given an approval-only gateway with an explicit empty selection.
-	response := JoinResponse{Version: 1, State: JoinApproved, HostID: ID("host_" + strings.Repeat("ab", 32)), ExpiresAt: 1790000000, URL: "https://gateway.example", VerificationKey: strings.Repeat("A", 43) + "=", AllowedProfiles: []string{}, DefaultProfiles: []string{}}
+	response := JoinResponse{Version: JoinVersion, GatewayNonce: Hash(strings.Repeat("22", 32)), State: JoinApproved, HostID: ID("host_" + strings.Repeat("ab", 32)), ExpiresAt: 1790000000, URL: "https://gateway.example", VerificationKey: strings.Repeat("A", 43) + "=", AllowedProfiles: []string{}, DefaultProfiles: []string{}}
 	// When the approved response goes through the actual server encoding seam.
 	wire, err := MarshalJoinResponse(response)
 	if err != nil {

@@ -207,6 +207,9 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
+				if fleetJoinRevealFixture(t, w, r, requested, &bytes.Buffer{}, nil) {
+					return
+				}
 				if r.Method == http.MethodPost {
 					postCount.Add(1)
 					data, _ := io.ReadAll(r.Body)
@@ -215,7 +218,7 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 					if err != nil || r.Header.Get("Authorization") != "" {
 						t.Error("POST must carry only hashes, not either secret", err)
 					}
-					wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinPending, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+					wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, GatewayNonce: fixtureGatewayNonce, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
 					_, _ = w.Write(wire)
 					return
 				}
@@ -227,7 +230,7 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 					_, _ = w.Write([]byte(`{"code":"gateway_transport"}`))
 					return
 				}
-				value := fleetproto.JoinResponse{Version: 1, State: tc.state, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()}
+				value := fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: tc.state, GatewayNonce: fixtureGatewayNonce, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()}
 				if tc.state == fleetproto.JoinApproved {
 					value.URL, value.VerificationKey = server.URL, base64.StdEncoding.EncodeToString(make([]byte, 32))
 					value.AllowedProfiles, value.DefaultProfiles = tc.profiles, tc.profiles

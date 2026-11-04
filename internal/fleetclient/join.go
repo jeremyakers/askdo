@@ -60,6 +60,7 @@ type JoinClient struct {
 	roots        *x509.CertPool
 	allowUnknown bool
 	leaf, anchor *x509.Certificate
+	gatewayNonce fleetproto.Hash
 }
 
 // A nil caPEM means no --ca-file was supplied. A non-nil, empty CA file keeps
@@ -120,6 +121,26 @@ func (c *JoinClient) RequestJoin(ctx context.Context, req fleetproto.JoinRequest
 // Status polls the join state with the host-owned join secret.
 func (c *JoinClient) Status(ctx context.Context) (fleetproto.JoinResponse, error) {
 	wire, err := c.exchange(ctx, http.MethodGet, "/v1/join/"+string(c.host), "Bearer "+c.secret, nil)
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	return c.decode(wire)
+}
+
+// Reveal must follow a received challenge. A lost response can be reconciled by
+// Status; replaying the reveal itself is rejected by the gateway.
+func (c *JoinClient) Reveal(ctx context.Context, nonce fleetproto.Hash) (fleetproto.JoinResponse, error) {
+	c.trustMu.Lock()
+	hasChallenge := c.gatewayNonce != ""
+	c.trustMu.Unlock()
+	if !hasChallenge {
+		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	data, err := fleetproto.MarshalJoinReveal(fleetproto.JoinReveal{Version: fleetproto.JoinVersion, HostNonce: nonce})
+	if err != nil {
+		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	wire, err := c.exchange(ctx, http.MethodPost, "/v1/join/"+string(c.host)+"/reveal", "Bearer "+c.secret, data)
 	if err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
@@ -203,6 +224,14 @@ func (c *JoinClient) decode(wire []byte) (fleetproto.JoinResponse, error) {
 	}
 	if value.HostID != c.host {
 		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	c.trustMu.Lock()
+	defer c.trustMu.Unlock()
+	if c.gatewayNonce != "" && value.GatewayNonce != c.gatewayNonce {
+		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	if value.GatewayNonce != "" {
+		c.gatewayNonce = value.GatewayNonce
 	}
 	return value, nil
 }

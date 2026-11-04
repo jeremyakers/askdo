@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,6 +30,15 @@ import (
 )
 
 func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
+	for _, lostRevealReply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lost reveal reply=%t", lostRevealReply), func(t *testing.T) {
+			testFleetJoinGatewayExchange(t, lostRevealReply)
+		})
+	}
+}
+
+func testFleetJoinGatewayExchange(t *testing.T, lostRevealReply bool) {
+	t.Helper()
 	// Given a real gateway/database/TLS identity and host CLI. Only filesystem
 	// ownership/publication, Telegram, and group/service actions are faked.
 	// The fixture-tag gateway opener permits a private current-UID database;
@@ -52,7 +62,18 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 	}
 	defer store.Close()
 	var serving atomic.Pointer[gateway.Server]
-	wire := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { serving.Load().Handler().ServeHTTP(w, r) }))
+	var lost atomic.Bool
+	wire := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if lostRevealReply && strings.HasSuffix(r.URL.Path, "/reveal") && !lost.Swap(true) {
+			response := httptest.NewRecorder()
+			serving.Load().Handler().ServeHTTP(response, r)
+			w.Header().Set("Content-Length", fmt.Sprint(response.Body.Len()+1))
+			w.WriteHeader(response.Code)
+			_, _ = w.Write(response.Body.Bytes())
+			return
+		}
+		serving.Load().Handler().ServeHTTP(w, r)
+	}))
 	identity, _ := fleetJoinTLSIdentity(t, false, "")
 	wire.TLS = &tls.Config{Certificates: []tls.Certificate{identity}}
 	wire.StartTLS()
@@ -167,5 +188,8 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 	data, _ := json.Marshal(host)
 	if strings.Contains(string(data), "enrollment_bundle_files") {
 		t.Fatal("join invented a bundle")
+	}
+	if lostRevealReply && !lost.Load() {
+		t.Fatal("reveal loss was not exercised")
 	}
 }

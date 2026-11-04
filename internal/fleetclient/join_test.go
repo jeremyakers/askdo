@@ -37,7 +37,7 @@ func make32() []byte {
 
 func pendingResponse(t *testing.T, host string) []byte {
 	t.Helper()
-	data, err := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinPending, HostID: fleetproto.ID(host), ExpiresAt: 1790000000})
+	data, err := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinPending, HostID: fleetproto.ID(host), ExpiresAt: 1790000000, GatewayNonce: fleetproto.Hash(strings.Repeat("22", 32))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func pendingResponse(t *testing.T, host string) []byte {
 
 func approvedResponse(t *testing.T, host string) []byte {
 	t.Helper()
-	data, err := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinApproved, HostID: fleetproto.ID(host), ExpiresAt: 1790000000, URL: "https://gateway.example", VerificationKey: strings.Repeat("A", 43) + "=", AllowedProfiles: []string{"codex"}, DefaultProfiles: []string{"codex"}})
+	data, err := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinApproved, HostID: fleetproto.ID(host), ExpiresAt: 1790000000, GatewayNonce: fleetproto.Hash(strings.Repeat("22", 32)), URL: "https://gateway.example", VerificationKey: strings.Repeat("A", 43) + "=", AllowedProfiles: []string{"codex"}, DefaultProfiles: []string{"codex"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func Test_JoinClient_request_join_sends_hashes_when_fresh_host_registers(t *test
 	defer client.Close()
 
 	// When the host registers with only secret hashes and then polls.
-	req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32)), Hostname: "lauren-laptop"}
+	req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32)), Hostname: "lauren-laptop", Commit: fleetproto.JoinCommit([32]byte{})}
 	pending, err := client.RequestJoin(context.Background(), req)
 	if err != nil || pending.State != fleetproto.JoinPending {
 		t.Fatalf("request join: %v %v", pending, err)
@@ -143,7 +143,7 @@ func Test_JoinClient_classifies_status_errors_when_gateway_answers(t *testing.T)
 				t.Fatal(err)
 			}
 			defer client.Close()
-			req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32))}
+			req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32)), Commit: fleetproto.JoinCommit([32]byte{})}
 
 			// When both endpoints observe it.
 			_, postErr := client.RequestJoin(context.Background(), req)
@@ -185,7 +185,7 @@ func Test_JoinClient_pins_peer_with_system_or_provisional_trust(t *testing.T) {
 				client.roots = x509.NewCertPool()
 				client.roots.AddCert(server.Certificate())
 			}
-			req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32))}
+			req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32)), Commit: fleetproto.JoinCommit([32]byte{})}
 
 			// When the host posts without a CA file.
 			_, err = client.RequestJoin(context.Background(), req)
@@ -193,6 +193,52 @@ func Test_JoinClient_pins_peer_with_system_or_provisional_trust(t *testing.T) {
 			// Then the first certificate is provisionally trusted and retained exactly.
 			if err != nil || string(client.GatewayCAPEM()) != string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})) || client.GatewayLeafHash() != sha256.Sum256(server.Certificate().Raw) {
 				t.Fatalf("want pinned first certificate, got %v", err)
+			}
+		})
+	}
+}
+
+func TestJoinClientRequiresAndFreezesGatewayNonce(t *testing.T) {
+	for _, method := range []string{"reveal", "status"} {
+		t.Run(method, func(t *testing.T) {
+			// Given one TLS gateway changing its challenge after initial admission.
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				value := fleetproto.JoinResponse{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), ExpiresAt: time.Now().Add(time.Minute).Unix(), State: fleetproto.JoinCommitted, GatewayNonce: fleetproto.Hash(strings.Repeat("22", 32))}
+				if calls.Add(1) > 1 {
+					value.State = fleetproto.JoinPending
+					value.GatewayNonce = fleetproto.Hash(strings.Repeat("33", 32))
+				}
+				wire, err := fleetproto.MarshalJoinResponse(value)
+				if err != nil {
+					t.Error(err)
+				}
+				_, _ = w.Write(wire)
+			}))
+			defer server.Close()
+			client, err := NewJoinClient(server.URL, joinHostID(), joinSecretText(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			nonce := fleetproto.Hash(strings.Repeat("00", 32))
+			// When asked to reveal before receiving a challenge, then send nothing.
+			if _, err = client.Reveal(t.Context(), nonce); err == nil || calls.Load() != 0 {
+				t.Fatal("revealed before challenge", err, calls.Load())
+			}
+			request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(joinHostID()), BearerHash: fleetproto.Hash(strings.Repeat("cd", 32)), JoinHash: fleetproto.Hash(strings.Repeat("ef", 32)), Commit: fleetproto.JoinCommit([32]byte{})}
+			if _, err = client.RequestJoin(t.Context(), request); err != nil {
+				t.Fatal(err)
+			}
+			// Then neither a reveal reply nor a later status may swap the nonce.
+			if method == "reveal" {
+				_, err = client.Reveal(t.Context(), nonce)
+			} else {
+				_, err = client.Status(t.Context())
+			}
+			var failure *Error
+			if !errors.As(err, &failure) || failure.Code != fleetproto.ErrCodeProtocol || calls.Load() != 2 {
+				t.Fatal("accepted a changed challenge", err, calls.Load())
 			}
 		})
 	}

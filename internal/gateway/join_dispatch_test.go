@@ -113,9 +113,9 @@ func hostJoinIdentity(n int) (host, bearerText, joinText string, bearerHash, joi
 	return "host_" + hex.EncodeToString(bearer), base64.RawURLEncoding.EncodeToString(bearer), base64.RawURLEncoding.EncodeToString(join), sha256.Sum256(bearer), sha256.Sum256(join)
 }
 
-func (f *joinWireFixture) postJoin(t *testing.T, host string, bearerHash, joinHash [32]byte, hostname string) (int, []byte) {
+func (f *joinWireFixture) postJoin(t *testing.T, host string, bearerHash, joinHash [32]byte, hostname, secret string) (int, []byte) {
 	t.Helper()
-	req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Hostname: hostname}
+	req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Hostname: hostname, Commit: fleetproto.JoinCommit([32]byte{})}
 	data, err := fleetproto.MarshalJoinRequest(req)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +126,18 @@ func (f *joinWireFixture) postJoin(t *testing.T, host string, bearerHash, joinHa
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		reveal, _ := fleetproto.MarshalJoinReveal(fleetproto.JoinReveal{Version: fleetproto.JoinVersion, HostNonce: fleetproto.Hash(strings.Repeat("00", 32))})
+		r, _ := http.NewRequest(http.MethodPost, f.tls.URL+"/v1/join/"+host+"/reveal", bytes.NewReader(reveal))
+		r.Header.Set("Authorization", "Bearer "+secret)
+		revealed, err := f.tls.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer revealed.Body.Close()
+		body, _ = io.ReadAll(revealed.Body)
+		return revealed.StatusCode, body
+	}
 	return resp.StatusCode, body
 }
 
@@ -179,7 +191,7 @@ func Test_JoinWire_happy_path_enrolls_and_authenticates_when_operator_approves(t
 	host, bearerText, joinText, bearerHash, joinHash := hostJoinIdentity(1)
 
 	// When the fresh host registers and the operator approves the card.
-	status, body := f.postJoin(t, host, bearerHash, joinHash, "lauren-laptop")
+	status, body := f.postJoin(t, host, bearerHash, joinHash, "lauren-laptop", joinText)
 	if status != http.StatusOK {
 		t.Fatalf("post: %d %s", status, body)
 	}
@@ -191,8 +203,8 @@ func Test_JoinWire_happy_path_enrolls_and_authenticates_when_operator_approves(t
 		t.Fatalf("server did not set expiry: %d", pending.ExpiresAt)
 	}
 	card, cardID := f.joinCard(t)
-	request := fleetproto.JoinRequest{HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:]))}
-	if !strings.Contains(card.Text, "lauren-laptop") || !strings.Contains(card.Text, fleetproto.JoinRequestCode(request, sha256.Sum256(f.tls.Certificate().Raw))) || !strings.Contains(card.Text, "codex") || !strings.Contains(card.Text, "default") {
+	request := fleetproto.JoinRequest{HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Commit: fleetproto.JoinCommit([32]byte{})}
+	if !strings.Contains(card.Text, "lauren-laptop") || !strings.Contains(card.Text, fleetproto.JoinRequestCode(request, sha256.Sum256(f.tls.Certificate().Raw), fleetproto.Hash(strings.Repeat("00", 32)), pending.GatewayNonce)) || !strings.Contains(card.Text, "codex") || !strings.Contains(card.Text, "default") {
 		t.Fatalf("card content: %s", card.Text)
 	}
 	if len(card.Buttons) != 2 || !strings.HasPrefix(card.Buttons[0].CallbackData, "a:") || !strings.HasPrefix(card.Buttons[1].CallbackData, "d:") {
@@ -267,7 +279,7 @@ func TestJoinWireCertificateBoundCodeDetectsTLSRelay(t *testing.T) {
 				target = proxy.URL
 			}
 			host, _, secret, bearerHash, joinHash := hostJoinIdentity(7)
-			request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), Hostname: "relay-test", BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:]))}
+			request := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), Hostname: "relay-test", BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Commit: fleetproto.JoinCommit([32]byte{})}
 			client, err := fleetclient.NewJoinClient(target, host, secret, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -278,8 +290,13 @@ func TestJoinWireCertificateBoundCodeDetectsTLSRelay(t *testing.T) {
 			if _, err = client.RequestJoin(t.Context(), request); err != nil {
 				t.Fatal(err)
 			}
-			hostCode := fleetproto.JoinRequestCode(request, client.GatewayLeafHash())
-			gatewayCode := fleetproto.JoinRequestCode(request, sha256.Sum256(f.tls.Certificate().Raw))
+			nonce := fleetproto.Hash(strings.Repeat("00", 32))
+			revealed, err := client.Reveal(t.Context(), nonce)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hostCode := fleetproto.JoinRequestCode(request, client.GatewayLeafHash(), nonce, revealed.GatewayNonce)
+			gatewayCode := fleetproto.JoinRequestCode(request, sha256.Sum256(f.tls.Certificate().Raw), nonce, revealed.GatewayNonce)
 			card, _ := f.joinCard(t)
 
 			// Then direct codes match; a MITM cannot make the genuine gateway's
@@ -298,7 +315,7 @@ func Test_JoinWire_deny_reports_denial_without_enrollment(t *testing.T) {
 	// Given a serving gateway and one pending join with a delivered card.
 	f := joinWire(t, 0)
 	host, _, joinText, bearerHash, joinHash := hostJoinIdentity(2)
-	if status, body := f.postJoin(t, host, bearerHash, joinHash, "host-two"); status != http.StatusOK {
+	if status, body := f.postJoin(t, host, bearerHash, joinHash, "host-two", joinText); status != http.StatusOK {
 		t.Fatalf("post: %d %s", status, body)
 	}
 	_, cardID := f.joinCard(t)
@@ -353,7 +370,7 @@ func Test_JoinWire_interleaved_ticket_and_join_callbacks_share_offset(t *testing
 	if err != nil || ticketCard <= 0 {
 		t.Fatalf("ticket card: %d %v", ticketCard, err)
 	}
-	if status, body := f.postJoin(t, host, bearerHash, joinHash, "host-three"); status != http.StatusOK {
+	if status, body := f.postJoin(t, host, bearerHash, joinHash, "host-three", joinText); status != http.StatusOK {
 		t.Fatalf("post join: %d %s", status, body)
 	}
 	_, joinCardID := f.joinCard(t)
@@ -394,8 +411,8 @@ func Test_JoinWire_invalid_callbacks_and_replay_never_grant(t *testing.T) {
 	// Given a serving gateway with one pending join and its delivered card.
 	f := joinWire(t, 0)
 	ctx := context.Background()
-	host, _, _, bearerHash, joinHash := hostJoinIdentity(4)
-	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-four"); status != http.StatusOK {
+	host, _, joinText, bearerHash, joinHash := hostJoinIdentity(4)
+	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-four", joinText); status != http.StatusOK {
 		t.Fatalf("post: %d", status)
 	}
 	_, cardID := f.joinCard(t)
@@ -450,7 +467,7 @@ func Test_JoinWire_restart_expires_pending_and_stale_cards_never_approve(t *test
 	// Given a gateway with a delivered but undecided join card.
 	f := joinWire(t, 0)
 	host, _, joinText, bearerHash, joinHash := hostJoinIdentity(5)
-	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-five"); status != http.StatusOK {
+	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-five", joinText); status != http.StatusOK {
 		t.Fatalf("post: %d", status)
 	}
 	_, cardID := f.joinCard(t)
@@ -496,19 +513,19 @@ func Test_JoinWire_rejects_duplicate_cooldown_secret_and_malformed_requests(t *t
 	// Given a serving gateway with one pending join and delivered card.
 	f := joinWire(t, 0)
 	host, _, joinText, bearerHash, joinHash := hostJoinIdentity(6)
-	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-six"); status != http.StatusOK {
+	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-six", joinText); status != http.StatusOK {
 		t.Fatalf("post: %d", status)
 	}
 	f.joinCard(t)
 
 	// When the same host re-posts, another host floods from the same IP, a
 	// wrong secret polls and malformed bodies arrive.
-	status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-six")
+	status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-six", joinText)
 	if status != http.StatusConflict {
 		t.Fatalf("duplicate post: %d", status)
 	}
 	otherHost, _, otherText, otherBearer, otherJoin := hostJoinIdentity(7)
-	status, _ = f.postJoin(t, otherHost, otherBearer, otherJoin, "host-seven")
+	status, _ = f.postJoin(t, otherHost, otherBearer, otherJoin, "host-seven", otherText)
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("cooldown: %d", status)
 	}
@@ -552,7 +569,7 @@ func Test_JoinWire_cap_full_refuses_without_card_while_status_polls(t *testing.T
 	ctx := context.Background()
 	for i := 0; i < MaxPendingJoins; i++ {
 		host, _, _, bearerHash, joinHash := hostJoinIdentity(100 + i)
-		req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Hostname: "filler"}
+		req := fleetproto.JoinRequest{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(host), BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])), JoinHash: fleetproto.Hash(hex.EncodeToString(joinHash[:])), Hostname: "filler", Commit: fleetproto.JoinCommit([32]byte{})}
 		enrollment, err := f.service.joinEnrollment(fleetproto.ID(host))
 		if err != nil {
 			t.Fatal(err)
@@ -564,7 +581,7 @@ func Test_JoinWire_cap_full_refuses_without_card_while_status_polls(t *testing.T
 
 	// When another join arrives while an existing host polls.
 	host, _, _, bearerHash, joinHash := hostJoinIdentity(199)
-	status, capacity := f.postJoin(t, host, bearerHash, joinHash, "host-capped")
+	status, capacity := f.postJoin(t, host, bearerHash, joinHash, "host-capped", "")
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("cap: %d", status)
 	}
@@ -588,7 +605,7 @@ func Test_JoinWire_card_delivery_retries_transient_failure(t *testing.T) {
 	// Given a gateway whose first card send fails transiently.
 	f := joinWire(t, 1)
 	host, _, joinText, bearerHash, joinHash := hostJoinIdentity(9)
-	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-nine"); status != http.StatusOK {
+	if status, _ := f.postJoin(t, host, bearerHash, joinHash, "host-nine", joinText); status != http.StatusOK {
 		t.Fatalf("post: %d", status)
 	}
 
@@ -620,7 +637,7 @@ func TestJoinWireMissingDefaultChannelCreatesNothing(t *testing.T) {
 	f := joinWire(t, 0, func(c *Config) { c.Channels[0].Name = "admin" })
 	host, _, _, bearerHash, joinHash := hostJoinIdentity(10)
 	// When a valid host tries to join.
-	status, _ := f.postJoin(t, host, bearerHash, joinHash, "no-default")
+	status, _ := f.postJoin(t, host, bearerHash, joinHash, "no-default", "")
 	// Then no pending request or card is created; another channel is not guessed.
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d", status)
@@ -650,8 +667,8 @@ func TestJoinWireEarlyCallbackWaitsForEveryCard(t *testing.T) {
 		return nil
 	}
 	f.bot.mu.Unlock()
-	host, _, _, bearerHash, joinHash := hostJoinIdentity(11)
-	if status, body := f.postJoin(t, host, bearerHash, joinHash, "early-click"); status != 200 {
+	host, _, joinText, bearerHash, joinHash := hostJoinIdentity(11)
+	if status, body := f.postJoin(t, host, bearerHash, joinHash, "early-click", joinText); status != 200 {
 		t.Fatalf("POST: %d %s", status, body)
 	}
 	// When the valid operator taps before the gateway has all card identities.
@@ -674,7 +691,7 @@ func TestJoinWireNoProfilesApprovesWithExplicitEmptySelection(t *testing.T) {
 	// Given an approval-only gateway, still using the channel named default.
 	f := joinWire(t, 0, func(c *Config) { c.Profiles = []config.ModelConfig{} })
 	host, _, secret, bearerHash, joinHash := hostJoinIdentity(12)
-	if status, body := f.postJoin(t, host, bearerHash, joinHash, "human-only"); status != 200 {
+	if status, body := f.postJoin(t, host, bearerHash, joinHash, "human-only", secret); status != 200 {
 		t.Fatalf("POST: %d %s", status, body)
 	}
 	card, id := f.joinCard(t)

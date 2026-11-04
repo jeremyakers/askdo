@@ -184,7 +184,7 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 	// Check the header before opening SQLite: even a PRAGMA can trigger hot
 	// journal recovery, which must never mutate an unrelated local job store.
 	// The header's user-version word is the same one the open path validates;
-	// both v1 and v2 databases are opened further below.
+	// v1, v2 and v3 databases are opened further below.
 	if !fresh {
 		fd, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
@@ -194,7 +194,7 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 		_, readErr := io.ReadFull(fd, header[:])
 		closeErr := fd.Close()
 		headerVersion := binary.BigEndian.Uint32(header[60:64])
-		if readErr != nil || closeErr != nil || string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != gatewayApplicationID || headerVersion != 1 && headerVersion != 2 {
+		if readErr != nil || closeErr != nil || string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != gatewayApplicationID || headerVersion < 1 || headerVersion > 3 {
 			return nil, errors.New("not a supported gateway enrollment database")
 		}
 	}
@@ -225,7 +225,7 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 			return fail(err)
 		}
 		_, err = tx.Exec(`PRAGMA application_id = 1095976791;
-   PRAGMA user_version = 2;
+   PRAGMA user_version = 3;
    CREATE TABLE gateway_enrollments (
     host_id TEXT PRIMARY KEY,
     bearer_hash BLOB NOT NULL CHECK(length(bearer_hash)=32),
@@ -239,18 +239,17 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 		if err = tx.Commit(); err != nil {
 			return fail(err)
 		}
-	} else if appID != gatewayApplicationID || version != 1 && version != 2 {
+	} else if appID != gatewayApplicationID || version < 1 || version > 3 {
 		return fail(errors.New("not a supported gateway enrollment database"))
 	} else if version == 1 {
-		// v1 -> v2 adds the join tables in one transaction. Existing
-		// enrollments, tickets and cursors are preserved byte for byte; old
-		// binaries keep refusing v2.
+		// v1 -> v3 adds current join tables in one transaction. Existing
+		// enrollments, tickets and cursors are preserved byte for byte.
 		tx, err := db.Begin()
 		if err != nil {
 			return fail(err)
 		}
 		_, err = tx.Exec(joinSchemaSQL + `
-   PRAGMA user_version = 2;`)
+   PRAGMA user_version = 3;`)
 		if err != nil {
 			tx.Rollback()
 			return fail(err)
@@ -259,13 +258,17 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 			return fail(err)
 		}
 	} else {
-		// Existing v2 databases predate lifecycle indexes. This additive,
-		// idempotent upgrade does not change their schema generation or data.
+		// Lifecycle indexes are idempotent. v2 additionally gains the atomic
+		// commitment migration; already-v3 databases retain all protocol state.
 		tx, err := db.Begin()
 		if err != nil {
 			return fail(err)
 		}
-		if _, err = tx.Exec(joinLifecycleIndexes); err != nil {
+		migration := joinLifecycleIndexes
+		if version == 2 {
+			migration += joinCommitMigrationSQL
+		}
+		if _, err = tx.Exec(migration); err != nil {
 			tx.Rollback()
 			return fail(err)
 		}

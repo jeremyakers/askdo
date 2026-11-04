@@ -111,14 +111,27 @@ saved as the existing `<host_id>.ca.pem` credential for later fleet connections.
 An explicit `--ca-file` retains normal system-plus-supplied-CA verification and
 is saved unchanged; it never falls back to provisional trust.
 
-The request code binds the host ID, bearer hash, join-secret hash and SHA-256 of
-the gateway's **leaf certificate**. The host uses the leaf it actually received;
+The version-2 join first commits to a fresh host nonce without disclosing it.
+The gateway durably fixes its own random nonce and the request's hashes before
+returning that challenge. Only then does the host reveal its nonce, authenticated
+with its join secret. The gateway verifies the commitment before making the
+Telegram card available; the host prints its code only after reveal acceptance.
+Replayed POSTs cannot replace the fixed hashes, commitment or gateway nonce, and
+a second reveal is rejected (a lost response is recovered through status).
+
+The request code binds the host ID, bearer hash, join-secret hash, commitment,
+both nonces and SHA-256 of the gateway's **leaf certificate**. This commit/reveal
+exchange prevents a TLS relay from adaptively grinding substitute join hashes
+after learning the host nonce. The host uses the leaf it actually received;
 the gateway uses its own serving leaf, including when system trust or
-`--ca-file` is used. A TLS relay with a different certificate therefore produces
-a different code on the host and the genuine gateway's Telegram card.
+`--ca-file` is used. A TLS relay with a different certificate normally produces
+different codes on the host and the genuine gateway's Telegram card. The
+six-hex-digit comparison provides 24-bit authentication per fixed exchange,
+not an absolute collision guarantee.
 **Approving a card whose code differs from the terminal is unsafe: do not approve
 it.** The code is not a credential or automatic approval. It is printed only
-after the gateway accepts the request, with the remaining enrollment wait time.
+after the gateway accepts the reveal, with the remaining enrollment wait time.
+Older join-wire versions are rejected; upgrade the host and gateway together.
 
 Join preflights local policy before sending a card, installs the root-private
 v5 config and credentials, validates them offline, adds the invoking non-root

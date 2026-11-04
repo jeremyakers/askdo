@@ -25,17 +25,22 @@ const MaxPendingJoins = 64
 const joinRetirementGrace = time.Minute
 
 var (
-	ErrJoinExists = errors.New("gateway join already exists for this host")
-	ErrJoinCap    = errors.New("gateway join queue is full")
+	ErrJoinExists   = errors.New("gateway join already exists for this host")
+	ErrJoinCap      = errors.New("gateway join queue is full")
+	ErrJoinReveal   = errors.New("gateway join reveal does not match a pending commitment")
+	ErrJoinRevealed = errors.New("gateway join nonce already revealed")
 )
 
-// joinSchemaSQL is created for fresh databases and added by the v1->v2
-// migration. Rows store only hashes of host-owned secrets, never secrets.
+// joinSchemaSQL is created for fresh databases and the v1->current migration.
+// Bearer and join secrets are stored only as hashes; reveal nonces are public.
 const joinSchemaSQL = `
    CREATE TABLE gateway_pending_joins (
     host_id TEXT PRIMARY KEY,
     bearer_hash BLOB NOT NULL CHECK(length(bearer_hash)=32),
-    join_hash BLOB NOT NULL CHECK(length(join_hash)=32),
+     join_hash BLOB NOT NULL CHECK(length(join_hash)=32),
+     host_commit BLOB CHECK(length(host_commit)=32),
+     gateway_nonce BLOB CHECK(length(gateway_nonce)=32),
+     host_nonce BLOB CHECK(length(host_nonce)=32),
     hostname TEXT NOT NULL,
     nonce TEXT NOT NULL,
     token_hash TEXT NOT NULL,
@@ -65,6 +70,16 @@ const joinLifecycleIndexes = `
    CREATE INDEX IF NOT EXISTS gateway_join_state_expiry ON gateway_pending_joins(state,expires_at);
    CREATE INDEX IF NOT EXISTS gateway_join_cleanup_expiry ON gateway_pending_joins(cleanup,expires_at);`
 
+// Existing enrollments/tickets survive. Legacy pending requests have no
+// commitment and must expire, never become revealable v2 requests.
+const joinCommitMigrationSQL = `
+ALTER TABLE gateway_pending_joins ADD COLUMN host_commit BLOB CHECK(length(host_commit)=32);
+ALTER TABLE gateway_pending_joins ADD COLUMN gateway_nonce BLOB CHECK(length(gateway_nonce)=32);
+ALTER TABLE gateway_pending_joins ADD COLUMN host_nonce BLOB CHECK(length(host_nonce)=32);
+UPDATE gateway_pending_joins SET state='expired' WHERE state='pending';
+DELETE FROM gateway_join_inbox;
+PRAGMA user_version = 3;`
+
 // JoinEnrollment is everything an operator's approval enacts, frozen at
 // request time. Later gateway configuration edits cannot change what an
 // already-delivered card means.
@@ -91,7 +106,7 @@ func NewJoinStore(e *EnrollmentStore) (*JoinStore, error) {
 	if e == nil {
 		return nil, errors.New("invalid join store dependencies")
 	}
-	rows, err := e.db.Query("SELECT host_id,expires_at FROM gateway_pending_joins LIMIT 0")
+	rows, err := e.db.Query("SELECT host_id,expires_at,host_commit,gateway_nonce,host_nonce FROM gateway_pending_joins LIMIT 0")
 	if err != nil {
 		return nil, errors.New("gateway join schema unavailable")
 	}
@@ -131,7 +146,7 @@ type JoinDecision struct {
 
 // Create records one validated join request. The row freezes the enrollment
 // the operator will enact, and stores only the hashes of the host-owned
-// bearer and join secrets. It wakes the dispatcher to deliver the card.
+// bearer and join secrets. Cards remain unavailable until a valid reveal.
 func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enrollment JoinEnrollment) (fleetproto.JoinResponse, error) {
 	if _, err := fleetproto.MarshalJoinRequest(req); err != nil {
 		return fleetproto.JoinResponse{}, err
@@ -155,6 +170,11 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 	now := s.now().Unix()
 	expiresAt := now + fleetproto.JoinTTLSeconds
 	enrollment.Approved.ExpiresAt = expiresAt
+	var gatewayNonce [32]byte
+	if _, err := rand.Read(gatewayNonce[:]); err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	enrollment.Approved.GatewayNonce = fleetproto.Hash(hex.EncodeToString(gatewayNonce[:]))
 	response, err := fleetproto.MarshalJoinResponse(enrollment.Approved)
 	if err != nil {
 		return fleetproto.JoinResponse{}, err
@@ -168,6 +188,7 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 		return fleetproto.JoinResponse{}, err
 	}
 	bearer, err := hex.DecodeString(string(req.BearerHash))
+	commit, _ := hex.DecodeString(string(req.Commit))
 	join, joinErr := hex.DecodeString(string(req.JoinHash))
 	if joinErr != nil || err != nil || len(bearer) != 32 || len(join) != 32 {
 		return fleetproto.JoinResponse{}, fleetproto.ErrProtocol
@@ -196,15 +217,15 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 	if pending >= MaxPendingJoins {
 		return fleetproto.JoinResponse{}, ErrJoinCap
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO gateway_pending_joins(host_id,bearer_hash,join_hash,hostname,nonce,token_hash,targets_json,policy_json,response_json,state,card_state,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		string(req.HostID), bearer, join, req.Hostname, nonce, enrollment.TokenHash, string(targets), string(policy), string(response), "pending", "new", now, expiresAt); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO gateway_pending_joins(host_id,bearer_hash,join_hash,host_commit,gateway_nonce,hostname,nonce,token_hash,targets_json,policy_json,response_json,state,card_state,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(req.HostID), bearer, join, commit, gatewayNonce[:], req.Hostname, nonce, enrollment.TokenHash, string(targets), string(policy), string(response), "pending", "new", now, expiresAt); err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
-	pendingResponse := fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinPending, HostID: req.HostID, ExpiresAt: expiresAt}
-	s.enrollment.changes.notify()
+	pendingResponse := fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, HostID: req.HostID, ExpiresAt: expiresAt, GatewayNonce: enrollment.Approved.GatewayNonce}
+	s.enrollment.changes.notify() // expiry maintenance wakes; cards remain gated.
 	return pendingResponse, nil
 }
 
@@ -217,10 +238,10 @@ func (s *JoinStore) Status(ctx context.Context, hostID, joinSecret string) (flee
 		return fleetproto.JoinResponse{}, ErrUnauthorized
 	}
 	candidate := sha256.Sum256(raw)
-	var joinHash, response []byte
+	var joinHash, response, gatewayNonce, hostNonce []byte
 	var state string
 	var expiresAt int64
-	err = s.enrollment.db.QueryRowContext(ctx, "SELECT join_hash,response_json,state,expires_at FROM gateway_pending_joins WHERE host_id=?", hostID).Scan(&joinHash, &response, &state, &expiresAt)
+	err = s.enrollment.db.QueryRowContext(ctx, "SELECT join_hash,response_json,state,expires_at,gateway_nonce,host_nonce FROM gateway_pending_joins WHERE host_id=?", hostID).Scan(&joinHash, &response, &state, &expiresAt, &gatewayNonce, &hostNonce)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && subtle.ConstantTimeCompare(candidate[:], joinHash) != 1 {
 		return fleetproto.JoinResponse{}, ErrUnauthorized
 	}
@@ -228,9 +249,10 @@ func (s *JoinStore) Status(ctx context.Context, hostID, joinSecret string) (flee
 		return fleetproto.JoinResponse{}, err
 	}
 	past := s.now().Unix() >= expiresAt
+	value := fleetproto.JoinResponse{Version: fleetproto.JoinVersion, HostID: fleetproto.ID(hostID), ExpiresAt: expiresAt, GatewayNonce: fleetproto.Hash(hex.EncodeToString(gatewayNonce))}
 	switch {
 	case past && state == "pending", past && state == "approved":
-		return fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinExpired, HostID: fleetproto.ID(hostID), ExpiresAt: expiresAt}, nil
+		value.State = fleetproto.JoinExpired
 	case state == "approved":
 		approved, err := fleetproto.ParseJoinResponse(response)
 		if err != nil || approved.HostID != fleetproto.ID(hostID) {
@@ -238,12 +260,63 @@ func (s *JoinStore) Status(ctx context.Context, hostID, joinSecret string) (flee
 		}
 		return approved, nil
 	case state == "denied":
-		return fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinDenied, HostID: fleetproto.ID(hostID), ExpiresAt: expiresAt}, nil
+		value.State = fleetproto.JoinDenied
 	case state == "pending":
-		return fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinPending, HostID: fleetproto.ID(hostID), ExpiresAt: expiresAt}, nil
+		value.State = fleetproto.JoinCommitted
+		if hostNonce != nil {
+			value.State = fleetproto.JoinPending
+		}
 	default:
-		return fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinExpired, HostID: fleetproto.ID(hostID), ExpiresAt: expiresAt}, nil
+		value.State = fleetproto.JoinExpired
 	}
+	return value, nil
+}
+
+// Reveal authenticates the join owner and atomically opens card delivery only
+// after the durable challenge exists and the nonce matches the initial commit.
+func (s *JoinStore) Reveal(ctx context.Context, host, secret string, reveal fleetproto.JoinReveal) (fleetproto.JoinResponse, error) {
+	if _, err := fleetproto.MarshalJoinReveal(reveal); err != nil {
+		return fleetproto.JoinResponse{}, ErrJoinReveal
+	}
+	raw, err := decodeJoinSecret(secret)
+	if err != nil {
+		return fleetproto.JoinResponse{}, ErrUnauthorized
+	}
+	candidate := sha256.Sum256(raw)
+	tx, err := s.enrollment.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	defer tx.Rollback()
+	var joinHash, commit, gatewayNonce, previous []byte
+	var state string
+	var expires int64
+	err = tx.QueryRowContext(ctx, "SELECT join_hash,host_commit,gateway_nonce,host_nonce,state,expires_at FROM gateway_pending_joins WHERE host_id=?", host).Scan(&joinHash, &commit, &gatewayNonce, &previous, &state, &expires)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && subtle.ConstantTimeCompare(candidate[:], joinHash) != 1 {
+		return fleetproto.JoinResponse{}, ErrUnauthorized
+	}
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	if previous != nil {
+		return fleetproto.JoinResponse{}, ErrJoinRevealed
+	}
+	if state != "pending" || expires <= s.now().Unix() || len(commit) != 32 || len(gatewayNonce) != 32 {
+		return fleetproto.JoinResponse{}, ErrJoinReveal
+	}
+	nonce, _ := hex.DecodeString(string(reveal.HostNonce))
+	sum := sha256.Sum256(append([]byte("askdo-join-commit\x00"), nonce...))
+	if subtle.ConstantTimeCompare(sum[:], commit) != 1 {
+		return fleetproto.JoinResponse{}, ErrJoinReveal
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE gateway_pending_joins SET host_nonce=? WHERE host_id=?", nonce, host); err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	s.enrollment.changes.notify()
+	return s.Status(ctx, host, secret)
 }
 
 func decodeJoinSecret(secret string) ([]byte, error) {
@@ -417,22 +490,25 @@ type queryContext interface {
 
 // JoinCard is one pending join whose enrollment card still needs delivery.
 type JoinCard struct {
-	HostID     string
-	BearerHash fleetproto.Hash
-	JoinHash   fleetproto.Hash
-	Hostname   string
-	Nonce      string
-	Token      string
-	ExpiresAt  int64
-	Targets    []fleetproto.Recipient
-	Profiles   []string
-	Channel    string
+	HostID       string
+	BearerHash   fleetproto.Hash
+	JoinHash     fleetproto.Hash
+	Commit       fleetproto.Hash
+	HostNonce    fleetproto.Hash
+	GatewayNonce fleetproto.Hash
+	Hostname     string
+	Nonce        string
+	Token        string
+	ExpiresAt    int64
+	Targets      []fleetproto.Recipient
+	Profiles     []string
+	Channel      string
 }
 
 // CardsDue lists pending joins whose cards have not been delivered, excluding
 // expired requests.
 func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
-	rows, err := s.enrollment.db.QueryContext(ctx, "SELECT host_id,bearer_hash,join_hash,hostname,nonce,token_hash,targets_json,expires_at,policy_json FROM gateway_pending_joins WHERE state='pending' AND card_state='new' AND expires_at>? ORDER BY created_at", s.now().Unix())
+	rows, err := s.enrollment.db.QueryContext(ctx, "SELECT host_id,bearer_hash,join_hash,host_commit,host_nonce,gateway_nonce,hostname,nonce,token_hash,targets_json,expires_at,policy_json FROM gateway_pending_joins WHERE state='pending' AND host_nonce IS NOT NULL AND card_state='new' AND expires_at>? ORDER BY created_at", s.now().Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -440,11 +516,12 @@ func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
 	var cards []JoinCard
 	for rows.Next() {
 		var card JoinCard
-		var targets, policy, bearerHash, joinHash []byte
-		if err = rows.Scan(&card.HostID, &bearerHash, &joinHash, &card.Hostname, &card.Nonce, &card.Token, &targets, &card.ExpiresAt, &policy); err != nil {
+		var targets, policy, bearerHash, joinHash, commit, hostNonce, gatewayNonce []byte
+		if err = rows.Scan(&card.HostID, &bearerHash, &joinHash, &commit, &hostNonce, &gatewayNonce, &card.Hostname, &card.Nonce, &card.Token, &targets, &card.ExpiresAt, &policy); err != nil {
 			return nil, err
 		}
 		card.BearerHash, card.JoinHash = fleetproto.Hash(hex.EncodeToString(bearerHash)), fleetproto.Hash(hex.EncodeToString(joinHash))
+		card.Commit, card.HostNonce, card.GatewayNonce = fleetproto.Hash(hex.EncodeToString(commit)), fleetproto.Hash(hex.EncodeToString(hostNonce)), fleetproto.Hash(hex.EncodeToString(gatewayNonce))
 		if err = json.Unmarshal(targets, &card.Targets); err != nil {
 			return nil, err
 		}
@@ -461,7 +538,7 @@ func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
 // ClaimCard grants exactly one in-process deliverer the right to send this
 // join's cards.
 func (s *JoinStore) ClaimCard(ctx context.Context, host string) (bool, error) {
-	result, err := s.enrollment.db.ExecContext(ctx, "UPDATE gateway_pending_joins SET card_state='sending' WHERE host_id=? AND state='pending' AND card_state='new' AND expires_at>?", host, s.now().Unix())
+	result, err := s.enrollment.db.ExecContext(ctx, "UPDATE gateway_pending_joins SET card_state='sending' WHERE host_id=? AND state='pending' AND host_nonce IS NOT NULL AND card_state='new' AND expires_at>?", host, s.now().Unix())
 	if err != nil {
 		return false, err
 	}

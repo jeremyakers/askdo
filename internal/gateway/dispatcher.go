@@ -322,7 +322,7 @@ func (d *dispatcher) deliverJoinCards() {
 func (d *dispatcher) deliverJoinCard(bot *dispatchBot, card JoinCard) error {
 	text, keyboard, err := telegram.RenderJoinCard(telegram.JoinCardInput{
 		Hostname: card.Hostname,
-		Code:     fleetproto.JoinRequestCode(fleetproto.JoinRequest{HostID: fleetproto.ID(card.HostID), BearerHash: card.BearerHash, JoinHash: card.JoinHash}, d.gatewayLeafHash),
+		Code:     fleetproto.JoinRequestCode(fleetproto.JoinRequest{HostID: fleetproto.ID(card.HostID), BearerHash: card.BearerHash, JoinHash: card.JoinHash, Commit: card.Commit}, d.gatewayLeafHash, card.HostNonce, card.GatewayNonce),
 		Profiles: card.Profiles,
 		Channel:  card.Channel,
 		Expiry:   time.Unix(card.ExpiresAt, 0),

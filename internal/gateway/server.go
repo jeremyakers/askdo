@@ -127,6 +127,7 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	s.mux.HandleFunc("GET /v1/tickets/{job}/events", s.handleEvents)
 	s.mux.HandleFunc("POST /v1/join", s.handleJoinPost)
 	s.mux.HandleFunc("GET /v1/join/{host}", s.handleJoinGet)
+	s.mux.HandleFunc("POST /v1/join/{host}/reveal", s.handleJoinGet)
 	s.dispatcher.start()
 	go s.reap()
 	return s, nil

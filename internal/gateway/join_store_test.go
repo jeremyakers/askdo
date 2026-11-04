@@ -51,6 +51,7 @@ func joinFixtureRequest(host string) (fleetproto.JoinRequest, string) {
 		HostID:     fleetproto.ID(host),
 		BearerHash: fleetproto.Hash(hex.EncodeToString(bearerHash[:])),
 		JoinHash:   fleetproto.Hash(hex.EncodeToString(joinHash[:])),
+		Commit:     fleetproto.JoinCommit([32]byte{}),
 		Hostname:   "lauren-laptop",
 	}, secret
 }
@@ -86,6 +87,9 @@ func createJoin(t *testing.T, joins *JoinStore, host string) (secret string) {
 	if _, err := joins.Create(context.Background(), req, joinFixtureEnrollment(host)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := joins.Reveal(t.Context(), host, secret, fleetproto.JoinReveal{Version: fleetproto.JoinVersion, HostNonce: fleetproto.Hash(strings.Repeat("00", 32))}); err != nil {
+		t.Fatal(err)
+	}
 	return secret
 }
 
@@ -93,6 +97,14 @@ func createJoin(t *testing.T, joins *JoinStore, host string) (secret string) {
 // states exactly as the dispatcher does.
 func deliverJoinCards(ctx context.Context, t *testing.T, joins *JoinStore, host string, targets []fleetproto.Recipient) {
 	t.Helper()
+	secret, _ := joinSecretFixture()
+	if status, err := joins.Status(ctx, host, secret); err != nil {
+		t.Fatal(err)
+	} else if status.State == fleetproto.JoinCommitted {
+		if _, err := joins.Reveal(ctx, host, secret, fleetproto.JoinReveal{Version: fleetproto.JoinVersion, HostNonce: fleetproto.Hash(strings.Repeat("00", 32))}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	won, err := joins.ClaimCard(ctx, host)
 	if err != nil || !won {
 		t.Fatalf("claim: won=%t err=%v", won, err)
@@ -116,7 +128,7 @@ func queueJoinCallback(joins *JoinStore, token string, update int64, host string
 	return err
 }
 
-func Test_EnrollmentStore_fresh_database_starts_at_schema_v2(t *testing.T) {
+func Test_EnrollmentStore_fresh_database_starts_at_schema_v3(t *testing.T) {
 	// Given a brand-new gateway database.
 	stubDBOwner(t)
 	store, err := OpenEnrollmentStore(filepath.Join(t.TempDir(), "gateway.db"))
@@ -130,9 +142,9 @@ func Test_EnrollmentStore_fresh_database_starts_at_schema_v2(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Then the schema is v2 with all join tables present.
+	// Then the schema is v3 with all join tables present.
 	var version int
-	if err = store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err = store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("user_version=%d err=%v", version, err)
 	}
 	for _, table := range []string{"gateway_pending_joins", "gateway_join_inbox", "gateway_join_sends"} {
@@ -189,9 +201,9 @@ func Test_EnrollmentStore_migrates_v1_database_preserving_records(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	// Then the schema is v2 and every prior record survives untouched.
+	// Then the schema is v3 and every prior record survives untouched.
 	var version int
-	if err = store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err = store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("user_version=%d err=%v", version, err)
 	}
 	enrollment, err := store.Get(context.Background(), "host_old")
@@ -216,7 +228,7 @@ func Test_EnrollmentStore_refuses_unknown_schema_version(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = future.Exec("PRAGMA application_id = 1095976791; PRAGMA user_version = 3; CREATE TABLE gateway_enrollments (host_id TEXT PRIMARY KEY, bearer_hash BLOB NOT NULL CHECK(length(bearer_hash)=32), enabled INTEGER NOT NULL, policy_json TEXT NOT NULL)"); err != nil {
+	if _, err = future.Exec("PRAGMA application_id = 1095976791; PRAGMA user_version = 4; CREATE TABLE gateway_enrollments (host_id TEXT PRIMARY KEY, bearer_hash BLOB NOT NULL CHECK(length(bearer_hash)=32), enabled INTEGER NOT NULL, policy_json TEXT NOT NULL)"); err != nil {
 		t.Fatal(err)
 	}
 	if err = future.Close(); err != nil {
@@ -247,14 +259,14 @@ func Test_JoinStore_create_and_status_when_fresh_host_joins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.State != fleetproto.JoinPending || response.HostID != fleetproto.ID(host) {
+	if response.State != fleetproto.JoinCommitted || response.HostID != fleetproto.ID(host) {
 		t.Fatal(response)
 	}
 	if response.ExpiresAt <= time.Now().Unix() || response.ExpiresAt > time.Now().Add(fleetproto.JoinTTLSeconds*time.Second).Unix() {
 		t.Fatalf("expiry not server-set ten minutes: %d", response.ExpiresAt)
 	}
 	status, err := joins.Status(ctx, host, secret)
-	if err != nil || status.State != fleetproto.JoinPending {
+	if err != nil || status.State != fleetproto.JoinCommitted || status.GatewayNonce != response.GatewayNonce {
 		t.Fatalf("status: %v %v", status, err)
 	}
 
@@ -310,7 +322,7 @@ func Test_JoinStore_rejects_duplicate_host_and_cap_overflow(t *testing.T) {
 
 	// Then status polling of the existing join still works.
 	_, secret := joinFixtureRequest(fmt.Sprintf("host_%064x", 0))
-	if status, err := joins.Status(ctx, fmt.Sprintf("host_%064x", 0), secret); err != nil || status.State != fleetproto.JoinPending {
+	if status, err := joins.Status(ctx, fmt.Sprintf("host_%064x", 0), secret); err != nil || status.State != fleetproto.JoinCommitted {
 		t.Fatalf("status under flood: %v %v", status, err)
 	}
 }
