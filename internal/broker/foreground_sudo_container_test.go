@@ -475,8 +475,9 @@ func TestForegroundTargetUserSudoContainer(t *testing.T) {
 	}
 	identity := "uid=" + target.Uid + "(askdo-target) gid=" + target.Gid + "(askdo-target) groups="
 	// Foreground on the real PTY: the helper drops to the account by name and
-	// by #UID, with its groups, HOME, USER and LOGNAME; the unknown account is
-	// refused with a clear reason and no approval.
+	// by #UID, with its groups, HOME, USER and LOGNAME. All three commands
+	// resolve to the same target UID and share one approval window; the unknown
+	// account is refused with a clear reason and no approval.
 	foreground := "/usr/local/bin/askdo --verbose -u askdo-target --reason container-target -- /usr/bin/id -u; code=$?; " +
 		"/usr/local/bin/askdo --user \"#" + target.Uid + "\" --reason container-target-identity -- /usr/bin/id; idcode=$?; " +
 		"/usr/local/bin/askdo -u askdo-target --reason container-target-env -- /usr/bin/env; envcode=$?; " +
@@ -493,7 +494,7 @@ func TestForegroundTargetUserSudoContainer(t *testing.T) {
 		t.Fatalf("foreground target path ran as root: status=%d output=%q", status, output)
 	}
 	if approvals.Load() != 1 {
-		t.Fatalf("three foreground target commands required %d approvals, want 1 (timestamp reuse)", approvals.Load())
+		t.Fatalf("three foreground commands for the same resolved target UID required %d approvals, want 1 (per-target timestamp reuse)", approvals.Load())
 	}
 	if n := len(executor.snapshot()); n != 0 {
 		t.Fatalf("foreground used the broker executor %d times", n)

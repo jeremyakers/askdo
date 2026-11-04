@@ -59,7 +59,7 @@ func timestampWorker(approvals *atomic.Int32, action string, beforeExit func(str
 }
 
 func timestampAuthority(cfg *config.Config, uid uint32) string {
-	return approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles)
+	return approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, 0)
 }
 
 func timestampConfig(t *testing.T) (*config.Config, uint32) {
@@ -212,6 +212,69 @@ func TestApprovalTimestampFirstApprovalThenSlidingHandoffs(t *testing.T) {
 			t.Fatalf("foreground grant source=%q, want timestamp", grantSource)
 		}
 		previous = stamp
+	}
+}
+
+func TestApprovalTimestampReuseRequiresSameResolvedTarget(t *testing.T) {
+	account, err := user.Lookup("nobody")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Uid == "0" {
+		t.Fatal("target fixture must be non-root")
+	}
+	var approvals atomic.Int32
+	cfg, uid := timestampConfig(t)
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	key := setTimestampPeer(h, uid)
+	var previous store.ApprovalTimestamp
+	for _, step := range []struct {
+		name      string
+		target    string
+		approvals int32
+		reuse     bool
+	}{
+		{"approve non-root", account.Username, 1, false},
+		{"reuse non-root", account.Username, 1, true},
+		{"reuse numeric alias", "#" + account.Uid, 1, true},
+		{"non-root to root needs a fresh card", "", 2, false},
+		{"root to root still reuses", "", 2, true},
+		{"root replaced the non-root window", account.Username, 3, false},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+			req.TargetUser = step.target
+			if step.reuse {
+				timestampSubmitWithoutHumanPrompt(t, h, req)
+			} else {
+				timestampSubmit(t, h, req)
+			}
+			if got := approvals.Load(); got != step.approvals {
+				t.Fatalf("handoff after %d human approval cards, want %d", got, step.approvals)
+			}
+			row, err := h.daemon.store.GetJob(context.Background(), uid, req.RequestID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var audit struct {
+				Kind string `json:"kind"`
+				Card int64  `json:"card_id"`
+			}
+			if err := json.Unmarshal(row.ApprovalJSON, &audit); err != nil {
+				t.Fatal(err)
+			}
+			if step.reuse {
+				if audit.Kind != "timestamp" || audit.Card != 0 {
+					t.Fatalf("same-target handoff did not reuse timestamp: %s", row.ApprovalJSON)
+				}
+			} else if audit.Kind != "human" || audit.Card != 1 {
+				t.Fatalf("handoff without a fresh human card: %s", row.ApprovalJSON)
+			}
+			previous = awaitTimestamp(t, h, key, previous.ApprovedAt)
+		})
+		if t.Failed() {
+			break
+		}
 	}
 }
 

@@ -113,7 +113,7 @@ func reviewTimestamp(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "%s approval timestamp policy for %q\n", verb, name)
 	if verb == "set" {
-		fmt.Fprintln(stderr, "WARNING: after the first approval, foreground unreviewed commands from this UID and terminal skip Telegram approval until the sliding timestamp expires. Agents need a distinct OS account.")
+		fmt.Fprintln(stderr, "WARNING: after the first approval, foreground unreviewed commands from this UID and terminal for the same resolved target UID skip Telegram approval until the sliding timestamp expires. Changing target requires fresh approval. Agents need a distinct OS account.")
 	}
 	return 0
 }

@@ -35,6 +35,9 @@ resolves it before the request is recorded, the approval card shows
 "submitter → USER (uid N)", and the command gets that account's uid, groups,
 HOME, USER and LOGNAME. Omit -u to run as root. --bundle and --script run as
 root only; to run a script as USER, pipe it: askdo -u USER -- bash < script.
+If foreground approval timestamps are enabled, reuse is per resolved target UID:
+a name and #UID for the same account share a window. Changing target (including
+omitting -u for root) requires fresh approval and replaces the window on handoff.
 
   askdo -u tyme -- npm start                  run as the tyme account
   askdo -u '#1001' -- id -u                   by numeric uid; quote #UID so
