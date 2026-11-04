@@ -63,6 +63,12 @@ func reviewMode(args []string, stdout, stderr io.Writer) int {
 	}
 	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
+		// The installed config is root:root 0600: a real permission denial on
+		// the read-only form routes through approval like `config check`, not
+		// a user-facing failure. Missing/invalid configs stay ordinary errors.
+		if !mutating && requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintln(stderr, "review mode:", err)
 		return 1
 	}
@@ -116,6 +122,12 @@ func reviewExempt(args []string, stdout, stderr io.Writer) int {
 	}
 	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
+		// `review exempt list` is read-only: a permission denial on the
+		// root-private installed config routes through approval (add/remove
+		// already stopped at requireRoot).
+		if verb == "list" && requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintf(stderr, "review exempt %s: %v\n", verb, err)
 		return 1
 	}

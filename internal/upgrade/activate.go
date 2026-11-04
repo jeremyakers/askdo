@@ -538,6 +538,13 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	if err != nil {
 		return err
 	}
+	// Activation stops the services before installing binaries and repairing
+	// the multicall link, and a failed activation performs no automatic
+	// restart. A conflicting link target must fail this preflight, before any
+	// drain, stop, or install effect, never at the install step.
+	if err := h.preflightConfigLink(layout.CLI); err != nil {
+		return err
+	}
 	units := []string{"askdo.service"}
 	if layout.GatewayConfig != "" {
 		units = []string{"askdo-gateway.service", "askdo.service"}
@@ -966,19 +973,46 @@ func copyFrom(src io.Reader, dst string, max int64) error {
 
 // The multicall name is not a release asset. Only replace symlinks, and never
 // open or chown their targets, in the already trusted binary directory.
-func ensureConfigLink(cli string) error {
-	path := filepath.Join(filepath.Dir(cli), "askdo-config")
+func configLinkPath(cli string) string {
+	return filepath.Join(filepath.Dir(cli), "askdo-config")
+}
+
+// configLinkConflict reports a path that ensureConfigLink can never replace.
+// The link is repaired at the install step, after services are stopped, and a
+// failed activation performs no automatic restart, so a conflicting regular
+// file or directory must be refused earlier, while activation still has no
+// live effects. A symlink of any target is repairable and is not a conflict.
+func configLinkConflict(path string) error {
 	info, err := os.Lstat(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
-	if err == nil {
-		if info.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("refusing to replace non-symlink %s", path)
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	kind := "file"
+	if info.IsDir() {
+		kind = "directory"
+	}
+	return fmt.Errorf("refusing to replace non-symlink askdo-config %s: it is a regular %s; remove or rename it, then retry (no services stopped, no binaries installed)", path, kind)
+}
+
+func (h Helper) preflightConfigLink(cli string) error {
+	return configLinkConflict(configLinkPath(cli))
+}
+
+func ensureConfigLink(cli string) error {
+	path := configLinkPath(cli)
+	if err := configLinkConflict(path); err != nil {
+		return err
+	}
+	// The conflict check above proved this is a symlink or nothing: unlinking
+	// removes the link itself, never its target.
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if err := os.Symlink(filepath.Base(cli), path); err != nil {
 		return err

@@ -73,7 +73,13 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 	if len(args) == 0 {
 		return runClient(context.Background(), args, client.Options{})
 	}
-	if isOperatorCommand(args[0]) && args[0] != "daemon" && !(args[0] == "gateway" && len(args) > 1 && args[1] == "serve") {
+	// The broker launches the internal worker as bare `askdo reviewer`; that
+	// invocation is not an operator command, so it gets no moved notice (it
+	// would land in every reviewer-stderr.log). Operator `reviewer <verb>`
+	// forms keep the notice.
+	if isOperatorCommand(args[0]) && args[0] != "daemon" &&
+		!(args[0] == "gateway" && len(args) > 1 && args[1] == "serve") &&
+		!(args[0] == "reviewer" && len(args) == 1) {
 		fmt.Fprintf(os.Stderr, "askdo: '%s' moved to askdo-config; this form will be removed in a future release\n", args[0])
 	}
 	switch args[0] {

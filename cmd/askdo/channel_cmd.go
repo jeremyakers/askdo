@@ -579,6 +579,11 @@ func channelList(args []string, stdout, stderr io.Writer) int {
 	}
 	store, err := operator.LoadForMutation(*configPath)
 	if err != nil {
+		// `channel list` is read-only: a permission denial on the root-private
+		// installed config routes through approval like `config check`.
+		if requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintln(stderr, "channel list:", err)
 		return 1
 	}
