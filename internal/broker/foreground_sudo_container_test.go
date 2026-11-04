@@ -233,7 +233,11 @@ func TestForegroundSudoContainer(t *testing.T) {
 			command := "/usr/local/bin/askdo-config review " + verb + " list --config " + path + "; echo CONFIG_EXIT=$?"
 			out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
 			t.Logf("config %s approval/output: %q status=%d", verb, out, code)
-			if code != 0 || !strings.Contains(out, "CONFIG_EXIT=0") || !strings.Contains(out, `"askdo-human": 10 minutes`) || strings.Contains(out, "'review' moved") || approvals.Load() != before+1 {
+			wantValue := `"askdo-human": 10 minutes`
+			if verb == "timestamp" {
+				wantValue = `"askdo-human": 600 seconds`
+			}
+			if code != 0 || !strings.Contains(out, "CONFIG_EXIT=0") || !strings.Contains(out, wantValue) || strings.Contains(out, "'review' moved") || approvals.Load() != before+1 {
 				t.Fatalf("config approval failed: %q approvals=%d (before %d)", out, approvals.Load(), before)
 			}
 			if verb == "timestamp" && strings.Count(out, "'review timestamp' moved") != 1 {

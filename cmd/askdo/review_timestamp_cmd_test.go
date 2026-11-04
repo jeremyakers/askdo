@@ -41,7 +41,7 @@ func TestReviewTimestampPolicyCommands(t *testing.T) {
 			getEUID = func() int { return 0 }
 			withPolicy := fileContent(t, path)
 			code, out, errOut := reviewCLI("timestamp", "list", "--config", path)
-			if code != 0 || !strings.Contains(out, current.Username) || !strings.Contains(out, "3600") || strings.Contains(out+errOut, "/private/") || fileContent(t, path) != withPolicy {
+			if code != 0 || !strings.HasPrefix(out, "approval timestamps") || !strings.Contains(out, current.Username) || !strings.Contains(out, "3600 seconds") || strings.Contains(out, "minutes") || strings.Contains(out+errOut, "/private/") || fileContent(t, path) != withPolicy {
 				t.Fatalf("list: %d %q %q", code, out, errOut)
 			}
 			getEUID = func() int { return 0 }

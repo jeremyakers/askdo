@@ -52,6 +52,9 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 	}
 	verb := args[0]
 	command := "review timestamp_timeout " + verb
+	if legacySeconds {
+		command = "review timestamp " + verb
+	}
 	path, positional, err := reviewFlags(command, args[1:], stderr)
 	if err != nil {
 		return 125
@@ -66,7 +69,7 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 	}
 	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "review timestamp_timeout %s: %v\n", verb, err)
+		fmt.Fprintf(stderr, "%s: %v\n", command, err)
 		return 1
 	}
 	review := &store.Config().Review
@@ -77,13 +80,25 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 		}
 		sort.Strings(names)
 		if len(names) == 0 {
-			fmt.Fprintln(stdout, "timestamp_timeout: none (disabled)")
+			if legacySeconds {
+				fmt.Fprintln(stdout, "approval timestamps: none (disabled)")
+			} else {
+				fmt.Fprintln(stdout, "timestamp_timeout: none (disabled)")
+			}
 			return 0
 		}
-		fmt.Fprintln(stdout, "timestamp_timeout (minutes; same terminal, per target user; foreground unreviewed commands only):")
+		if legacySeconds {
+			fmt.Fprintln(stdout, "approval timestamps (foreground unreviewed commands only):")
+		} else {
+			fmt.Fprintln(stdout, "timestamp_timeout (minutes; same terminal, per target user; foreground unreviewed commands only):")
+		}
 		for _, name := range names {
 			seconds := review.ApprovalTimestampUsers[name]
-			fmt.Fprintf(stdout, "  %q: %g minutes (%s; %d seconds)\n", name, float64(seconds)/60, time.Duration(seconds)*time.Second, seconds)
+			if legacySeconds {
+				fmt.Fprintf(stdout, "  %q: %d seconds\n", name, seconds)
+			} else {
+				fmt.Fprintf(stdout, "  %q: %g minutes (%s; %d seconds)\n", name, float64(seconds)/60, time.Duration(seconds)*time.Second, seconds)
+			}
 		}
 		return 0
 	}
@@ -97,7 +112,11 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 			seconds, err = config.ParseTimestampTimeout(positional[1])
 		}
 		if err != nil || seconds < 30 || seconds > 3600 {
-			fmt.Fprintln(stderr, "review timestamp_timeout set: value must be 0.5 through 60 minutes or a duration (30s..1h); legacy timestamp accepts integer seconds only")
+			if legacySeconds {
+				fmt.Fprintln(stderr, "review timestamp set: duration must be 30 through 3600 integer seconds")
+			} else {
+				fmt.Fprintln(stderr, "review timestamp_timeout set: value must be 0.5 through 60 minutes or a duration (30s..1h)")
+			}
 			return 125
 		}
 		if review.ApprovalTimestampUsers == nil {
@@ -106,26 +125,30 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 		review.ApprovalTimestampUsers[name] = seconds
 	} else {
 		if _, exists := review.ApprovalTimestampUsers[name]; !exists {
-			fmt.Fprintf(stderr, "review timestamp_timeout clear: login %q has no timestamp policy\n", name)
+			fmt.Fprintf(stderr, "%s: login %q has no timestamp policy\n", command, name)
 			return 1
 		}
 		delete(review.ApprovalTimestampUsers, name)
 	}
 	if err := review.ResolveApprovalTimestampUsers(); err != nil {
-		fmt.Fprintf(stderr, "review timestamp_timeout %s: config not written: %v\n", verb, err)
+		fmt.Fprintf(stderr, "%s: config not written: %v\n", command, err)
 		return 1
 	}
 	if err := store.Save(operator.SectionReview); err != nil {
-		fmt.Fprintf(stderr, "review timestamp_timeout %s: config not written: %v\n", verb, err)
+		fmt.Fprintf(stderr, "%s: config not written: %v\n", command, err)
 		return 1
 	}
 	if verb == "clear" {
 		if err := clearStoredApprovalTimestamps(path, name); err != nil {
-			fmt.Fprintf(stderr, "review timestamp_timeout clear: policy saved, but stored timestamps could not be revoked: %v\n", err)
+			fmt.Fprintf(stderr, "%s: policy saved, but stored timestamps could not be revoked: %v\n", command, err)
 			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "%s timestamp_timeout policy for %q\n", verb, name)
+	if legacySeconds {
+		fmt.Fprintf(stdout, "%s approval timestamp policy for %q\n", verb, name)
+	} else {
+		fmt.Fprintf(stdout, "%s timestamp_timeout policy for %q\n", verb, name)
+	}
 	if verb == "set" {
 		fmt.Fprintln(stderr, "WARNING: after the first approval, foreground unreviewed commands from this UID and terminal for the same resolved target UID skip Telegram approval until the sliding timestamp expires. Changing target requires fresh approval. Agents need a distinct OS account.")
 	}
