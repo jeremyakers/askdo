@@ -139,10 +139,11 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 		return err
 	}
 	defer client.Close()
-	fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the matching fleet enrollment card in Telegram. Waiting up to 10 minutes...\n", fleetproto.JoinRequestCode(host))
 	ctx, cancel := context.WithTimeout(parent, fleetproto.JoinTTLSeconds*time.Second)
 	defer cancel()
-	approved, err := waitFleetJoin(ctx, client, request)
+	approved, err := waitFleetJoin(ctx, client, request, func() {
+		fmt.Fprintf(out, "Fleet enrollment request code: %s\nApprove the matching fleet enrollment card in Telegram. Waiting up to 10 minutes...\n", fleetproto.JoinRequestCode(host))
+	})
 	if err != nil {
 		return err
 	}
@@ -166,8 +167,21 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	return nil
 }
 
-func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request fleetproto.JoinRequest) (fleetproto.JoinResponse, error) {
+// errJoinUntrustedGateway replaces the bare "fleet: signature" a TLS
+// verification failure produces: no request reached the gateway.
+var errJoinUntrustedGateway = errors.New("fleet join: this host does not trust the gateway's TLS certificate, so no enrollment request was sent; rerun with --ca-file PATH, where PATH is a copy of the gateway's CA certificate (for example /etc/askdo-gateway/ca.pem on the gateway host)")
+
+// waitFleetJoin calls accepted exactly once, when the gateway first confirms
+// the request exists, so the approval prompt never precedes a real card.
+func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request fleetproto.JoinRequest, accepted func()) (fleetproto.JoinResponse, error) {
 	registered := false
+	announced := false
+	announce := func() {
+		if registered && !announced {
+			announced = true
+			accepted()
+		}
+	}
 	for {
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		var response fleetproto.JoinResponse
@@ -178,6 +192,7 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 			response, err = client.RequestJoin(callCtx, request)
 			if errors.Is(err, fleetclient.ErrJoinDuplicate) {
 				registered, err = true, nil
+				announce()
 			}
 			// A POST response may be lost after creation. Reconcile with the
 			// same identity/secret before retrying the identical POST.
@@ -190,6 +205,10 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 			}
 		}
 		cancel()
+		var fleetErr *fleetclient.Error
+		if errors.As(err, &fleetErr) && fleetErr.Code == fleetproto.ErrCodeSignature {
+			return fleetproto.JoinResponse{}, errJoinUntrustedGateway
+		}
 		if ctx.Err() != nil {
 			return fleetproto.JoinResponse{}, errors.New("fleet join stopped or expired; rerun fleet join to request a fresh card")
 		}
@@ -205,6 +224,7 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 		}
 		if err == nil && response.State != "" {
 			registered = true
+			announce()
 			if time.Now().Unix() >= response.ExpiresAt {
 				return fleetproto.JoinResponse{}, errors.New("fleet enrollment request expired; rerun fleet join")
 			}
