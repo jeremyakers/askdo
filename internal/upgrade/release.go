@@ -266,17 +266,21 @@ func (m Manifest) VerifyAsset(name, path string) error {
 // binaryName to be exactly "<binary sha256>  <binary name>\n" as its manifest
 // entry dictates, with no extra bytes.
 func (m Manifest) VerifyChecksumRecord(binaryName, recordPath string) error {
-	binary, ok := m.Assets[binaryName]
-	if !ok {
-		return fmt.Errorf("asset %q is not in the release manifest", binaryName)
-	}
-	want := binary.SHA256 + "  " + binaryName + "\n"
 	f, err := os.Open(recordPath)
 	if err != nil {
 		return fmt.Errorf("open checksum record for %s: %w", binaryName, err)
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, int64(len(want)+1)))
+	return m.verifyChecksumRecord(binaryName, f)
+}
+
+func (m Manifest) verifyChecksumRecord(binaryName string, r io.Reader) error {
+	binary, ok := m.Assets[binaryName]
+	if !ok {
+		return fmt.Errorf("asset %q is not in the release manifest", binaryName)
+	}
+	want := binary.SHA256 + "  " + binaryName + "\n"
+	data, err := io.ReadAll(io.LimitReader(r, int64(len(want)+1)))
 	if err != nil {
 		return fmt.Errorf("read checksum record for %s: %w", binaryName, err)
 	}
@@ -299,6 +303,15 @@ var elfHeaderPrefix = []byte{0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01}
 // whose CPU machine field matches the name's amd64 or arm64 suffix, exactly
 // like install.sh's header check. Nothing is ever executed.
 func (m Manifest) VerifyELF(name, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", name, err)
+	}
+	defer f.Close()
+	return verifyELF(name, f)
+}
+
+func verifyELF(name string, r io.Reader) error {
 	var expected uint16
 	switch {
 	case strings.HasSuffix(name, "-amd64"):
@@ -308,13 +321,8 @@ func (m Manifest) VerifyELF(name, path string) error {
 	default:
 		return fmt.Errorf("asset %q does not name an amd64 or arm64 ELF", name)
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", name, err)
-	}
-	defer f.Close()
 	header := make([]byte, elfHeaderMinSize)
-	if _, err := io.ReadFull(f, header); err != nil {
+	if _, err := io.ReadFull(r, header); err != nil {
 		return fmt.Errorf("asset %s is not a full ELF header: %w", name, err)
 	}
 	if !bytes.Equal(header[0:7], elfHeaderPrefix) {

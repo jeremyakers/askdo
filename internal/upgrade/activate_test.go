@@ -365,17 +365,25 @@ func TestHelperActivateWaitsForSchedulingJobTerminal(t *testing.T) {
 }
 
 func TestHelperActivateRefusesTamperedStageBeforeEffects(t *testing.T) {
-	// Given
-	f := newActivationFixture(t, false)
-	f.schedule(t)
-	if err := os.WriteFile(filepath.Join(f.stage, f.plan.CLIAsset), []byte("tampered"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// When
-	err := f.helper.Activate(t.Context(), f.stage)
-	// Then
-	if err == nil || activationReceipt(t, f).State != "failed" || len(f.host.events) != 0 {
-		t.Fatalf("tamper: %v receipt=%+v effects=%v", err, activationReceipt(t, f), f.host.events)
+	cli, helper := "askdo-linux-"+runtime.GOARCH, "askdo-launch-linux-"+runtime.GOARCH
+	for _, name := range []string{cli, cli + ".sha256", helper, helper + ".sha256", "install-manifest.v1"} {
+		t.Run(name, func(t *testing.T) {
+			f := newActivationFixture(t, false)
+			f.schedule(t)
+			path := filepath.Join(f.stage, name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data[len(data)-1] ^= 1
+			if err := os.WriteFile(path+".replacement", data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".replacement", path); err != nil {
+				t.Fatal(err)
+			}
+			assertActivationRefusedBeforeEffects(t, f)
+		})
 	}
 }
 
@@ -500,7 +508,12 @@ func TestHelperActivatePartialReplacementRetainsPairBackupWithoutStarting(t *tes
 	f := newActivationFixture(t, false)
 	f.schedule(t)
 	f.host.afterBackup = func(_, _ string) {
-		if err := os.Remove(filepath.Join(f.stage, f.plan.HelperAsset)); err != nil {
+		// Block the live destination, not a staged source: stage paths are no
+		// longer consulted after verification. This also fails for root runners.
+		if err := os.Rename(f.host.layout.Launch, f.host.layout.Launch+".previous"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(f.host.layout.Launch, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -508,7 +521,7 @@ func TestHelperActivatePartialReplacementRetainsPairBackupWithoutStarting(t *tes
 	err := f.helper.Activate(t.Context(), f.stage)
 	// Then: do not roll back the first rename or lose its compatible preimage.
 	cli, cliErr := sha256HexFile(f.host.layout.CLI)
-	helper, helperErr := os.ReadFile(f.host.layout.Launch)
+	helper, helperErr := os.ReadFile(f.host.layout.Launch + ".previous")
 	backup, backupErr := os.ReadFile(filepath.Join(f.stage, "backup", "askdo-launch"))
 	if err == nil || cliErr != nil || helperErr != nil || backupErr != nil || cli != f.plan.CLIDigest || string(helper) != "old helper" || string(backup) != "old helper" || activationReceipt(t, f).State != "failed" {
 		t.Fatalf("partial replacement: %v cli=%s helper=%q backup=%q receipt=%+v", err, cli, helper, backup, activationReceipt(t, f))
@@ -653,9 +666,9 @@ func TestPlanConstructorAndWriterRoundTripThroughVerifiedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _, _, err := verifiedSource(f.source, f.plan.Operation)
-	if err != nil || got != f.plan {
-		t.Fatalf("plan roundtrip: %+v %v", got, err)
+	got, err := verifiedSource(f.source, f.plan.Operation)
+	if err != nil || got.plan != f.plan {
+		t.Fatalf("plan roundtrip: %+v %v", got.plan, err)
 	}
 }
 
@@ -698,9 +711,9 @@ func TestPlanWriterAtomicallyReplacesExistingPlan(t *testing.T) {
 	if err := json.NewDecoder(old).Decode(&previous); err != nil || previous != f.plan {
 		t.Fatalf("original inode changed: %+v %v", previous, err)
 	}
-	got, _, _, err := verifiedSource(f.source, replacement.Operation)
-	if err != nil || got != replacement {
-		t.Fatalf("replacement: %+v %v", got, err)
+	got, err := verifiedSource(f.source, replacement.Operation)
+	if err != nil || got.plan != replacement {
+		t.Fatalf("replacement: %+v %v", got.plan, err)
 	}
 	info, err := os.Stat(filepath.Join(f.source, PlanFileName))
 	if err != nil || info.Mode().Perm() != 0o600 {
