@@ -279,9 +279,10 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 // Activate could own receipt updates. It never replays activation or changes
 // an operation that already left the scheduled state.
 func (h Helper) FailScheduled(ctx context.Context, stage, detail string) error {
+	h.BackupRoot = filepath.Dir(stage)
 	id := filepath.Base(stage)
 	if validateOperationID(id) != nil || !filepath.IsAbs(stage) || stage != filepath.Join(h.BackupRoot, id) {
-		return errors.New("activation stage is not an operation under the backup root")
+		return errors.New("activation stage must be a clean absolute operation path")
 	}
 	lock, err := activationLock(ctx, h.ReceiptRoot)
 	if err != nil {
@@ -380,9 +381,10 @@ func verifiedSourceWithPlan(dir, id string, data []byte) (Plan, Manifest, []byte
 // Activate issues effects at most once. An interrupted intent is evidence for
 // an unknown result, never permission to replay stop/install/start or rollback.
 func (h Helper) Activate(parent context.Context, stage string) (err error) {
+	h.BackupRoot = filepath.Dir(stage)
 	id := filepath.Base(stage)
 	if validateOperationID(id) != nil || !filepath.IsAbs(stage) || stage != filepath.Join(h.BackupRoot, id) {
-		return errors.New("activation stage is not an operation under the backup root")
+		return errors.New("activation stage must be a clean absolute operation path")
 	}
 	if err := h.trust(stage, false); err != nil {
 		return err

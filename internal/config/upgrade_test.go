@@ -53,3 +53,31 @@ func TestLoadUpgradeBackupDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestUpgradeBackupDirectoryExcludesReceiptAndBootstrapNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		bad  bool
+	}{
+		{"/var/lib/askdo-upgrade", true},
+		{"/var/lib/askdo-upgrade/backups", true},
+		{"/var/lib/askdo-upgrade/bootstrap-up_12121212121212121212121212121212/backups", true},
+		{"/var/lib/askdo-backups", false},
+		{"/var/lib/askdo-upgrade-backups", false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			// Given: the receipt and bootstrap parent is reserved for operation metadata.
+			cfg := Config{UpgradeBackupDir: tc.path}
+			// When
+			err := cfg.ValidateUpgradeBackupDir()
+			// Then: equality and descendants are rejected, not valid siblings.
+			if tc.bad {
+				if err == nil || !strings.Contains(err.Error(), "receipt/bootstrap namespace /var/lib/askdo-upgrade") {
+					t.Fatalf("reserved backup directory %q: %v", tc.path, err)
+				}
+			} else if err != nil {
+				t.Fatalf("valid sibling %q refused: %v", tc.path, err)
+			}
+		})
+	}
+}

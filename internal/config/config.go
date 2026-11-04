@@ -29,6 +29,8 @@ const (
 	MaxHashFileBytes        = int64(32 << 20)
 	MaxHashedBytesPerReview = int64(64 << 20)
 	defaultUpgradeBackupDir = "/var/backups/askdo"
+	// UpgradeReceiptRoot is reserved for upgrade receipts and pinned bootstraps.
+	UpgradeReceiptRoot = "/var/lib/askdo-upgrade"
 )
 
 // Duration is a JSON Go-duration string.
@@ -1293,6 +1295,9 @@ func (c *Config) ValidateUpgradeBackupDir() error {
 	}
 	if !filepath.IsAbs(c.UpgradeBackupDir) || filepath.Clean(c.UpgradeBackupDir) != c.UpgradeBackupDir {
 		return errors.New("upgrade_backup_dir must be an absolute clean path")
+	}
+	if c.UpgradeBackupDir == UpgradeReceiptRoot || strings.HasPrefix(c.UpgradeBackupDir, UpgradeReceiptRoot+string(filepath.Separator)) {
+		return fmt.Errorf("upgrade_backup_dir must be outside the receipt/bootstrap namespace %s", UpgradeReceiptRoot)
 	}
 	return nil
 }

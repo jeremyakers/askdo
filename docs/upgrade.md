@@ -55,7 +55,7 @@ commit, state, stage and timestamps. They contain no credentials.
 
 ## Backup location and retention
 
-The root helper reads the optional top-level `upgrade_backup_dir` from
+When scheduling, the root helper reads the optional top-level `upgrade_backup_dir` from
 `/etc/askdo/config.json` (direct v4 or fleet v5). It defaults to
 `/var/backups/askdo`. Each operation stages its release at
 `<upgrade_backup_dir>/up_<32 hex digits>` and, before installation, preserves
@@ -63,6 +63,11 @@ the old binaries, configuration and stopped database snapshots in that stage's
 `backup/` subdirectory. The directory and its ancestors must be trusted,
 root-owned, nonsymlink paths without group/other write access; a missing backup
 directory is created `0700` by root.
+
+The backup root must be outside `/var/lib/askdo-upgrade` and all its descendants,
+which are reserved for receipts and bootstraps. Activation and failure
+reconciliation use the recorded stage's parent directory, not a later config
+value, so a config edit cannot strand an already-scheduled operation.
 
 On Synology DSM, use a data volume rather than the small system partition:
 set `"upgrade_backup_dir": "/volume1/@askdo/upgrade-backups"` in the root config.

@@ -168,7 +168,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				}
 				// Model broker-frozen delivery through the real helper entry point.
 				// Manager acceptance is fake; no candidate or system tool runs.
-				factory := func() (upgrade.Helper, error) {
+				factory := func(string) (upgrade.Helper, error) {
 					return upgrade.Helper{BackupRoot: filepath.Join(temps, "root-stages"), ReceiptRoot: root, TrustDirectory: func(path string, create bool) error {
 						if create {
 							return os.MkdirAll(path, 0o755)

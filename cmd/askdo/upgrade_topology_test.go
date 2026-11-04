@@ -48,7 +48,7 @@ func TestUpgradeTopologyRejectsStandaloneGatewayBeforeSchedulingEffects(t *testi
 			}}
 			var stderr bytes.Buffer
 			// When
-			code := runUpgradeHelperWith(t.Context(), []string{"--operation", cliUpgradeID, "--source", source}, 0, func() (upgrade.Helper, error) { return helper, nil }, bytes.NewReader(captured), io.Discard, &stderr)
+			code := runUpgradeHelperWith(t.Context(), []string{"--operation", cliUpgradeID, "--source", source}, 0, func(string) (upgrade.Helper, error) { return helper, nil }, bytes.NewReader(captured), io.Discard, &stderr)
 			// Then: unsupported topology creates no stage, receipt, manager, stop or install effects.
 			if !enrolled {
 				if code != 1 || managerCalls != 0 || !strings.Contains(stderr.String(), "local fleet enrollment") {

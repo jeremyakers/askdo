@@ -32,7 +32,7 @@ import (
 const (
 	upgradeSystemdRun = "/usr/bin/systemd-run"
 	// Public operation metadata only; the private broker state stays private.
-	defaultUpgradeReceiptRoot = "/var/lib/askdo-upgrade"
+	defaultUpgradeReceiptRoot = config.UpgradeReceiptRoot
 )
 
 // Hidden root entry point. Main command routing is deliberately separate from
@@ -42,12 +42,21 @@ var upgradeReadConfig = operator.ReadRootPrivate
 func runUpgradeHelper(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	return runUpgradeHelperWith(ctx, args, getEUID(), func() (upgrade.Helper, error) {
-		return newUpgradeHelper(defaultConfigPath, upgradeReadConfig)
+	return runUpgradeHelperWith(ctx, args, getEUID(), func(stage string) (upgrade.Helper, error) {
+		return newUpgradeHelper(defaultConfigPath, stage, upgradeReadConfig)
 	}, stdin, stdout, stderr)
 }
 
-func newUpgradeHelper(configPath string, readConfig func(string, int64) ([]byte, error)) (upgrade.Helper, error) {
+func newUpgradeHelper(configPath, stage string, readConfig func(string, int64) ([]byte, error)) (upgrade.Helper, error) {
+	tools := upgradeSystemTools{}
+	helper := upgrade.Helper{ReceiptRoot: defaultUpgradeReceiptRoot, Manager: newUpgradeActivationManager(tools), Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
+		return preflightUpgradeTopology(configPath, defaultGatewayConfig)
+	}}
+	if stage != "" {
+		// Activation and reconciliation recover their backup root from the
+		// receipt-bound stage, never from configuration edited after scheduling.
+		return helper, nil
+	}
 	data, err := readConfig(configPath, 1<<20)
 	if err != nil {
 		return upgrade.Helper{}, fmt.Errorf("read root upgrade config: %w", err)
@@ -59,13 +68,11 @@ func newUpgradeHelper(configPath string, readConfig func(string, int64) ([]byte,
 	if err := cfg.ValidateUpgradeBackupDir(); err != nil {
 		return upgrade.Helper{}, err
 	}
-	tools := upgradeSystemTools{}
-	return upgrade.Helper{BackupRoot: cfg.UpgradeBackupDir, ReceiptRoot: defaultUpgradeReceiptRoot, Manager: newUpgradeActivationManager(tools), Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
-		return preflightUpgradeTopology(configPath, defaultGatewayConfig)
-	}}, nil
+	helper.BackupRoot = cfg.UpgradeBackupDir
+	return helper, nil
 }
 
-func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func() (upgrade.Helper, error), stdin io.Reader, stdout, stderr io.Writer) int {
+func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func(string) (upgrade.Helper, error), stdin io.Reader, stdout, stderr io.Writer) int {
 	if euid != 0 {
 		fmt.Fprintln(stderr, "upgrade-helper requires root")
 		return 125
@@ -79,7 +86,7 @@ func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory 
 		fmt.Fprintln(stderr, "invalid upgrade-helper arguments")
 		return 125
 	}
-	helper, err := factory()
+	helper, err := factory(*activate)
 	if err != nil {
 		fmt.Fprintln(stderr, "upgrade-helper:", err)
 		return 1

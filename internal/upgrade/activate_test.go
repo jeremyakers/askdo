@@ -364,6 +364,35 @@ func TestHelperActivateWaitsForSchedulingJobTerminal(t *testing.T) {
 	}
 }
 
+func TestHelperActivateUsesScheduledStageRoot(t *testing.T) {
+	// Given: an accepted operation, followed by a config edit selecting another
+	// backup root. Activation must use the receipt's original stage instead.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+	newRoot := filepath.Join(t.TempDir(), "different-backups")
+	data, err := json.Marshal(map[string]string{"upgrade_backup_dir": newRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.host.layout.Config, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.helper.BackupRoot = newRoot
+	// When
+	err = f.helper.Activate(t.Context(), f.stage)
+	// Then: installation and verification succeed on the scheduled stage.
+	r := activationReceipt(t, f)
+	if err != nil || r.State != "succeeded" || r.Stage != f.stage {
+		t.Fatalf("config edit stranded activation: err=%v receipt=%+v", err, r)
+	}
+	if _, err := os.Stat(filepath.Join(f.stage, "backup", "askdo")); err != nil {
+		t.Fatalf("original recovery backup missing: %v", err)
+	}
+	if _, err := os.Stat(newRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("activation used changed config root: %v", err)
+	}
+}
+
 func TestHelperActivateRefusesTamperedStageBeforeEffects(t *testing.T) {
 	// Given
 	f := newActivationFixture(t, false)

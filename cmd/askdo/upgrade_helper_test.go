@@ -53,7 +53,7 @@ func TestUpgradeHelperRequiresRootBeforeConstructingDependencies(t *testing.T) {
 	// Given
 	var stderr bytes.Buffer
 	called := false
-	factory := func() (upgrade.Helper, error) {
+	factory := func(string) (upgrade.Helper, error) {
 		called = true
 		return upgrade.Helper{}, nil
 	}
@@ -70,7 +70,7 @@ func TestUpgradeHelperRejectsAmbiguousArgumentsWithoutEffects(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			// Given
 			called := false
-			factory := func() (upgrade.Helper, error) { called = true; return upgrade.Helper{}, nil }
+			factory := func(string) (upgrade.Helper, error) { called = true; return upgrade.Helper{}, nil }
 			// When
 			code := runUpgradeHelperWith(t.Context(), args, 0, factory, nil, io.Discard, io.Discard)
 			// Then
@@ -109,7 +109,7 @@ func TestUpgradeHelperUsesRootConfiguredBackupDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := false
-	helper, err := newUpgradeHelper(configPath, func(path string, max int64) ([]byte, error) {
+	helper, err := newUpgradeHelper(configPath, "", func(path string, max int64) ([]byte, error) {
 		read = path == configPath && max == 1<<20
 		return os.ReadFile(path)
 	})
@@ -158,7 +158,7 @@ func TestUpgradeHelperUsesRootConfiguredBackupDirectory(t *testing.T) {
 		t.Fatalf("configured staging: err=%v accepted=%v root=%v stat=%v", err, accepted, info, statErr)
 	}
 	// A failed trusted read cannot silently fall back to the system partition.
-	_, err = newUpgradeHelper(configPath, func(string, int64) ([]byte, error) { return nil, os.ErrPermission })
+	_, err = newUpgradeHelper(configPath, "", func(string, int64) ([]byte, error) { return nil, os.ErrPermission })
 	if !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("config read failure ignored: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 				input = nil
 			}
 			called := false
-			factory := func() (upgrade.Helper, error) {
+			factory := func(string) (upgrade.Helper, error) {
 				return upgrade.Helper{Manager: upgradeScheduleManagerFunc(func(context.Context, string, string) error { called = true; return nil })}, nil
 			}
 			var stdout, stderr bytes.Buffer
@@ -194,10 +194,73 @@ func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 	}
 }
 
+func TestUpgradeHelperActivationReconcilesWithoutReadingMutableConfig(t *testing.T) {
+	for _, scenario := range []string{"changed root", "unreadable", "malformed"} {
+		t.Run(scenario, func(t *testing.T) {
+			// Given: scheduling selected a root and published its durable receipt.
+			root := t.TempDir()
+			configPath := filepath.Join(root, "config.json")
+			body := func(backup string) []byte {
+				return []byte(strings.TrimSuffix(hostDoc(), "}") + `,"upgrade_backup_dir":` + strconv.Quote(backup) + `}`)
+			}
+			if err := os.WriteFile(configPath, body(filepath.Join(root, "original-backups")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			read := func(path string, _ int64) ([]byte, error) { return os.ReadFile(path) }
+			scheduled, err := newUpgradeHelper(configPath, "", read)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipts := filepath.Join(root, "receipts")
+			stage := filepath.Join(scheduled.BackupRoot, cliUpgradeID)
+			if err := os.MkdirAll(stage, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unlock, err := upgrade.NewOperation(receipts, cliUpgradeID, "v3.2.1", strings.Repeat("ab", 20), stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unlock()
+			if scenario == "changed root" {
+				err = os.WriteFile(configPath, body(filepath.Join(root, "different-backups")), 0o600)
+			} else if scenario == "malformed" {
+				err = os.WriteFile(configPath, []byte("{malformed"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			reads := 0
+			factory := func(activationStage string) (upgrade.Helper, error) {
+				h, err := newUpgradeHelper(configPath, activationStage, func(path string, max int64) ([]byte, error) {
+					reads++
+					if scenario == "unreadable" {
+						return nil, os.ErrPermission
+					}
+					return read(path, max)
+				})
+				h.ReceiptRoot = receipts
+				h.TrustDirectory = func(path string, _ bool) error { _, err := os.Stat(path); return err }
+				return h, err
+			}
+			var stderr bytes.Buffer
+			// When: a missing activation record fails before Activate owns updates.
+			code := runUpgradeHelperWith(t.Context(), []string{"--activate", stage}, 0, factory, nil, io.Discard, &stderr)
+			// Then: config cannot strand the receipt scheduled or block later work.
+			r, err := upgrade.ReadReceipt(receipts, cliUpgradeID)
+			if code != 1 || err != nil || r.State != "failed" || reads != 0 || !strings.Contains(r.Detail, "stage removed") {
+				t.Fatalf("activation code=%d reads=%d receipt=%+v err=%v stderr=%s", code, reads, r, err, &stderr)
+			}
+			if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unused stage retained: %v", err)
+			}
+		})
+	}
+}
+
 func TestUpgradeHelperActivateDoesNotConsumeStdin(t *testing.T) {
 	// Given: activation reads the trusted stage, not a new approval stream.
 	input := &trackingUpgradeInput{Reader: strings.NewReader("must not be consumed")}
-	factory := func() (upgrade.Helper, error) { return upgrade.Helper{}, nil }
+	factory := func(string) (upgrade.Helper, error) { return upgrade.Helper{}, nil }
 	// When: even a rejected activation must not inspect scheduling stdin.
 	code := runUpgradeHelperWith(t.Context(), []string{"--activate", "/not-a-stage"}, 0, factory, input, io.Discard, io.Discard)
 	// Then
