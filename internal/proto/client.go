@@ -124,11 +124,9 @@ type SubmitRequest struct {
 // MaxTargetUserBytes bounds a sudo-style target user specification.
 const MaxTargetUserBytes = 256
 
-// TargetUserBundleRefusal is the one explanation, shared by the client's
-// local check and the broker's admission check, of why bundle mode cannot
-// run as a non-root target: the staged bundle is root-private, so the
-// approved launch could only fail. target is the account as the caller
-// named it (client) or as resolved (broker).
+// TargetUserBundleRefusal is the broker's admission explanation of why bundle
+// mode cannot run as a non-root target: the staged bundle is root-private, so
+// the approved launch could only fail. target is the resolved account name.
 func TargetUserBundleRefusal(target string) string {
 	return "target user: bundles and --script run as root only (the staged bundle is root-private); pipe the script to `askdo -u " + target + " -- bash` instead"
 }

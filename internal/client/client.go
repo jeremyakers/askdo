@@ -184,11 +184,8 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
 		return 125
 	}
-	// The broker refuses bundle mode for a non-root target; say so here, with
-	// its wording, before any bundle or script is read or a job is reserved.
-	if targetUser != "" && targetUser != "root" && targetUser != "#0" && (bundle != "" || script != "") {
-		return usageError(options, proto.TargetUserBundleRefusal(targetUser))
-	}
+	// Bundle mode with a non-root target is refused by the broker, which alone
+	// resolves the account: every UID-0 spelling (root, #0, #00, aliases) is root.
 	rest := flags.Args()
 	// The caller's own working directory is part of the request: both argv
 	// and bundle executions run there. Capture it before any submission so
