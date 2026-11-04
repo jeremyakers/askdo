@@ -174,10 +174,12 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	if err := validateOperationID(id); err != nil {
 		return "", err
 	}
-	plan, manifest, manifestBytes, err := verifiedSourceWithPlan(source, id, capturedPlan)
+	candidate, err := verifiedSourceWithPlan(source, id, capturedPlan)
 	if err != nil {
 		return "", err
 	}
+	plan := candidate.plan
+	planSum := sha256.Sum256(capturedPlan)
 	if h.Preflight != nil {
 		if err := h.Preflight(ctx); err != nil {
 			return "", err
@@ -215,18 +217,18 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	if err := writePrivate(stage, PlanFileName, capturedPlan); err != nil {
 		return "", err
 	}
-	if err := writePrivate(stage, "install-manifest.v1", manifestBytes); err != nil {
+	if err := writePrivate(stage, "install-manifest.v1", candidate.manifestBytes); err != nil {
 		return "", err
 	}
 	for _, name := range plan.assets() {
-		if err := copyPrivate(filepath.Join(source, name), filepath.Join(stage, name), manifest.Assets[name].Size); err != nil {
+		if err := writePrivate(stage, name, candidate.assets[name]); err != nil {
 			return "", err
 		}
 	}
-	if _, _, _, err := verifiedSource(stage, id); err != nil {
+	if _, err := verifiedSourceWithPlan(stage, id, capturedPlan); err != nil {
 		return "", fmt.Errorf("staged release: %w", err)
 	}
-	// copyPrivate intentionally writes 0600. Only the verified candidate CLI is
+	// writePrivate intentionally writes 0600. Only the verified candidate CLI is
 	// made executable, inside the root-owned 0700 stage, before activation starts.
 	if err := os.Chmod(filepath.Join(stage, plan.CLIAsset), 0o700); err != nil {
 		return "", fmt.Errorf("make staged candidate executable: %w", err)
@@ -244,7 +246,7 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	if err := syncDirectory(h.BackupRoot); err != nil {
 		return "", err
 	}
-	unlock, err := NewOperation(h.ReceiptRoot, id, plan.Release, plan.SourceCommit, stage)
+	unlock, err := newOperation(h.ReceiptRoot, id, plan.Release, plan.SourceCommit, stage, hex.EncodeToString(planSum[:]))
 	if err != nil {
 		return "", err
 	}
@@ -253,7 +255,7 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	if err := ctx.Err(); err != nil {
 		return stage, errors.Join(err, h.scheduleFailure(id, "manager not called", stateFailed))
 	}
-	// Keep NewOperation's lock through acceptance. The activation process waits
+	// Keep the operation lock through acceptance. The activation process waits
 	// on this SAME lock before inspecting or updating the receipt.
 	if err := h.Manager.Start(ctx, id, stage, plan.CLIDigest); err != nil {
 		state := stateFailed
@@ -308,62 +310,73 @@ func (p Plan) assets() []string {
 	return []string{p.CLIAsset, p.CLIAsset + ".sha256", p.HelperAsset, p.HelperAsset + ".sha256"}
 }
 
-func verifiedSource(dir, id string) (Plan, Manifest, []byte, error) {
+// A verified release is an in-memory snapshot. Never reopen its source paths
+// to stage, install, or verify it: even a pinned inode can be modified in place.
+type verifiedRelease struct {
+	plan          Plan
+	manifestBytes []byte
+	assets        map[string][]byte
+}
+
+func verifiedSource(dir, id string) (verifiedRelease, error) {
 	data, err := readRegular(filepath.Join(dir, PlanFileName), PlanMaxBytes)
 	if err != nil {
-		return Plan{}, Manifest{}, nil, err
+		return verifiedRelease{}, err
 	}
 	return verifiedSourceWithPlan(dir, id, data)
 }
 
-func verifiedSourceWithPlan(dir, id string, data []byte) (Plan, Manifest, []byte, error) {
+func verifiedSourceWithPlan(dir, id string, data []byte) (verifiedRelease, error) {
 	if len(data) == 0 || len(data) > PlanMaxBytes {
-		return Plan{}, Manifest{}, nil, errors.New("upgrade plan is empty or exceeds size bound")
+		return verifiedRelease{}, errors.New("upgrade plan is empty or exceeds size bound")
 	}
 	var p Plan
 	if err := proto.StrictUnmarshal(data, &p); err != nil {
-		return Plan{}, Manifest{}, nil, fmt.Errorf("invalid upgrade plan: %w", err)
+		return verifiedRelease{}, fmt.Errorf("invalid upgrade plan: %w", err)
 	}
 	if p.Version != 1 || p.Operation != id || validateOperationID(p.Operation) != nil || p.CLIAsset != "askdo-linux-"+runtime.GOARCH || p.HelperAsset != "askdo-launch-linux-"+runtime.GOARCH || !digestFormatRE.MatchString(p.ManifestDigest) || !digestFormatRE.MatchString(p.CLIDigest) || !digestFormatRE.MatchString(p.HelperDigest) {
-		return Plan{}, Manifest{}, nil, errors.New("upgrade plan identity, version, architecture or digests invalid")
+		return verifiedRelease{}, errors.New("upgrade plan identity, version, architecture or digests invalid")
 	}
 	manifestBytes, err := readRegular(filepath.Join(dir, "install-manifest.v1"), manifestMaxBytes)
 	if err != nil {
-		return Plan{}, Manifest{}, nil, err
+		return verifiedRelease{}, err
 	}
 	sum := sha256.Sum256(manifestBytes)
 	if hex.EncodeToString(sum[:]) != p.ManifestDigest {
-		return Plan{}, Manifest{}, nil, errors.New("upgrade manifest digest mismatch")
+		return verifiedRelease{}, errors.New("upgrade manifest digest mismatch")
 	}
 	m, err := ParseManifest(bytes.NewReader(manifestBytes), p.Release)
 	if err != nil {
-		return Plan{}, Manifest{}, nil, err
+		return verifiedRelease{}, err
 	}
 	if p.Release != m.Tag || p.SourceCommit != m.SourceCommit || p.CLIDigest != m.Assets[p.CLIAsset].SHA256 || p.HelperDigest != m.Assets[p.HelperAsset].SHA256 {
-		return Plan{}, Manifest{}, nil, errors.New("upgrade plan differs from release manifest")
+		return verifiedRelease{}, errors.New("upgrade plan differs from release manifest")
 	}
+	assets := make(map[string][]byte)
 	for _, name := range p.assets() {
-		file, err := openRegular(filepath.Join(dir, name))
+		asset := m.Assets[name]
+		data, err := readRegular(filepath.Join(dir, name), asset.Size)
 		if err != nil {
-			return Plan{}, Manifest{}, nil, err
+			return verifiedRelease{}, err
 		}
-		// Manifest's path APIs reopen files. Pin the nonsymlink inode across
-		// those opens so a source-directory rename cannot substitute a FIFO,
-		// device or unrelated file between stat, hash and header checks.
-		pinned := "/proc/self/fd/" + strconv.FormatUint(uint64(file.Fd()), 10)
-		verifyErr := m.VerifyAsset(name, pinned)
-		if verifyErr == nil {
-			if binary, ok := strings.CutSuffix(name, ".sha256"); ok {
-				verifyErr = m.VerifyChecksumRecord(binary, pinned)
-			} else {
-				verifyErr = m.VerifyELF(name, pinned)
-			}
+		if int64(len(data)) != asset.Size {
+			return verifiedRelease{}, fmt.Errorf("asset %s is %d bytes, manifest requires %d", name, len(data), asset.Size)
 		}
-		if err := errors.Join(verifyErr, file.Close()); err != nil {
-			return Plan{}, Manifest{}, nil, err
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != asset.SHA256 {
+			return verifiedRelease{}, fmt.Errorf("asset %s digest mismatch: manifest requires %s", name, asset.SHA256)
 		}
+		if binary, ok := strings.CutSuffix(name, ".sha256"); ok {
+			err = m.verifyChecksumRecord(binary, bytes.NewReader(data))
+		} else {
+			err = verifyELF(name, bytes.NewReader(data))
+		}
+		if err != nil {
+			return verifiedRelease{}, err
+		}
+		assets[name] = data
 	}
-	return p, m, manifestBytes, nil
+	return verifiedRelease{plan: p, manifestBytes: manifestBytes, assets: assets}, nil
 }
 
 // Activate issues effects at most once. An interrupted intent is evidence for
@@ -431,10 +444,22 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	p, _, _, err := verifiedSource(stage, id)
+	if r.PlanDigest == "" {
+		return errors.New("receipt has no approved plan digest; cannot activate legacy operation")
+	}
+	planBytes, err := readRegular(filepath.Join(stage, PlanFileName), PlanMaxBytes)
 	if err != nil {
 		return err
 	}
+	planSum := sha256.Sum256(planBytes)
+	if hex.EncodeToString(planSum[:]) != r.PlanDigest {
+		return errors.New("staged plan digest differs from approved plan")
+	}
+	candidate, err := verifiedSourceWithPlan(stage, id, planBytes)
+	if err != nil {
+		return err
+	}
+	p := candidate.plan
 	if p.Release != r.Release || p.SourceCommit != r.SourceCommit {
 		return errors.New("receipt release differs from staged plan")
 	}
@@ -607,7 +632,7 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	// Separate same-filesystem renames, not a multi-file transaction. Never
 	// disguise a partial replacement as success or roll it back automatically.
 	for _, file := range [][3]string{{p.CLIAsset, layout.CLI, p.CLIDigest}, {p.HelperAsset, layout.Launch, p.HelperDigest}} {
-		if err := installCandidate(filepath.Join(stage, file[0]), file[1], file[2]); err != nil {
+		if err := installCandidate(candidate.assets[file[0]], file[1], file[2]); err != nil {
 			return err
 		}
 	}
@@ -856,14 +881,15 @@ func copyFrom(src io.Reader, dst string, max int64) error {
 	return f.Sync()
 }
 
-func installCandidate(src, dst, digest string) error {
+// Installation consumes only the verified snapshot, never a staged pathname.
+func installCandidate(data []byte, dst, digest string) error {
 	staging, err := os.MkdirTemp(filepath.Dir(dst), ".askdo-upgrade-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(staging)
 	temp := filepath.Join(staging, "binary")
-	if err := copyPrivate(src, temp, assetMaxBytes); err != nil {
+	if err := copyFrom(bytes.NewReader(data), temp, assetMaxBytes); err != nil {
 		return err
 	}
 	got, err := sha256HexFile(temp)
