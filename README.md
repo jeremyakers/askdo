@@ -229,8 +229,11 @@ sudo askdo review timestamp list
 sudo askdo review timestamp clear "$USER"  # disable reuse again
 ```
 
-The first command still needs approval. Each successful handoff resets the
-window; detached jobs and AI-required commands never use it. It is off by default.
+The first command still needs approval. Reuse is per resolved target UID: a name
+and `#UID` for the same account share the window, but changing target (including
+back to root by omitting `-u`) needs fresh approval and replaces the window on
+successful handoff. Each successful handoff resets the window; detached jobs and
+AI-required commands never use it. It is off by default.
 See [approval timestamps](docs/configuration.md#sliding-foreground-approval-timestamps).
 
 Headless agents get streamed output and a job ID they can return to later. If

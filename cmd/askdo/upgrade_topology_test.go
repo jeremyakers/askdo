@@ -39,7 +39,7 @@ func TestUpgradeTopologyRejectsStandaloneGatewayBeforeSchedulingEffects(t *testi
 			managerCalls := 0
 			helper := upgrade.Helper{BackupRoot: filepath.Join(root, "backups"), ReceiptRoot: filepath.Join(root, "receipts"), Preflight: func(context.Context) error {
 				return preflightUpgradeTopology(layout.Config, layout.GatewayConfig)
-			}, Manager: upgradeScheduleManagerFunc(func(context.Context, string, string) error { managerCalls++; return nil }), TrustDirectory: func(path string, create bool) error {
+			}, Manager: upgradeScheduleManagerFunc(func(context.Context, string, string, string) error { managerCalls++; return nil }), TrustDirectory: func(path string, create bool) error {
 				if create {
 					return os.MkdirAll(path, 0o755)
 				}

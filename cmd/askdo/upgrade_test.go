@@ -175,7 +175,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 						}
 						_, err := os.Stat(path)
 						return err
-					}, Manager: upgradeScheduleManagerFunc(func(_ context.Context, id, stage string) error {
+					}, Manager: upgradeScheduleManagerFunc(func(_ context.Context, id, stage string, _ string) error {
 						staged, err := os.ReadFile(filepath.Join(stage, upgrade.PlanFileName))
 						if err != nil || !bytes.Equal(staged, capturedPlan) {
 							return fmt.Errorf("root stage differs from captured plan: %v", err)

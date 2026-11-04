@@ -16,7 +16,7 @@ func TestHelperCancelledSchedulingRemovesUnusedStage(t *testing.T) {
 	f := newActivationFixture(t, false)
 	ctx, cancel := context.WithCancel(t.Context())
 	f.helper.Preflight = func(context.Context) error { cancel(); return nil }
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error {
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error {
 		t.Fatal("cancelled scheduling called manager")
 		return nil
 	})
