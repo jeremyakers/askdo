@@ -127,8 +127,10 @@ type Helper struct {
 	Preflight func(context.Context) error
 	// Tests substitute trust rooted in their private temporary directory.
 	TrustDirectory func(string, bool) error
-	Now            func() time.Time
-	Wait           func(context.Context) error
+	// Tests substitute the DSM ACL query without invoking vendor tools.
+	CheckDirectoryACL func(string) error
+	Now               func() time.Time
+	Wait              func(context.Context) error
 }
 
 type activationRecord struct {
@@ -137,10 +139,28 @@ type activationRecord struct {
 }
 
 func (h Helper) trust(path string, create bool) error {
+	trust := operator.TrustedDirectory
 	if h.TrustDirectory != nil {
-		return h.TrustDirectory(path, create)
+		trust = h.TrustDirectory
 	}
-	return operator.TrustedDirectory(path, create)
+	if err := trust(path, create); err != nil {
+		return err
+	}
+	checkACL := h.CheckDirectoryACL
+	if checkACL == nil {
+		if !hasDSMFootprint(os.Lstat) {
+			return nil
+		}
+		checkACL = checkDSMDirectoryACL
+	}
+	for p := path; ; p = filepath.Dir(p) {
+		if err := checkACL(p); err != nil {
+			return fmt.Errorf("DSM upgrade directory ACL check %s: %w", p, err)
+		}
+		if p == "/" {
+			return nil
+		}
+	}
 }
 
 func (h Helper) now() time.Time {
@@ -224,6 +244,9 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 			os.RemoveAll(stage)
 		}
 	}()
+	if err := h.trust(stage, false); err != nil {
+		return "", err
+	}
 	if err := writePrivate(stage, PlanFileName, capturedPlan); err != nil {
 		return "", err
 	}
@@ -238,10 +261,31 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 	if _, err := verifiedSourceWithPlan(stage, id, capturedPlan); err != nil {
 		return "", fmt.Errorf("staged release: %w", err)
 	}
-	// writePrivate intentionally writes 0600. Only the verified candidate CLI is
-	// made executable, inside the root-owned 0700 stage, before activation starts.
-	if err := os.Chmod(filepath.Join(stage, plan.CLIAsset), 0o700); err != nil {
-		return "", fmt.Errorf("make staged candidate executable: %w", err)
+	// The backup root may be a noexec data volume. Copy the already verified
+	// in-memory CLI snapshot to the fixed root-filesystem launch namespace.
+	launch := filepath.Join(h.ReceiptRoot, "activate-"+id)
+	if err := os.Mkdir(launch, 0o700); err != nil {
+		return "", fmt.Errorf("create activation launch directory: %w", err)
+	}
+	defer func() {
+		if !staged {
+			os.RemoveAll(launch) // Exclusively created by this call, never adopted.
+		}
+	}()
+	if err := h.trust(launch, false); err != nil {
+		return "", err
+	}
+	if err := writePrivate(launch, "askdo", candidate.assets[plan.CLIAsset]); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(filepath.Join(launch, "askdo"), 0o700); err != nil {
+		return "", fmt.Errorf("make activation candidate executable: %w", err)
+	}
+	if err := syncDirectory(launch); err != nil {
+		return "", err
+	}
+	if err := syncDirectory(h.ReceiptRoot); err != nil {
+		return "", err
 	}
 	record, err := json.Marshal(activationRecord{Version: 1, DeadlineUnixMS: h.now().Add(OperationTimeout).UnixMilli()})
 	if err != nil {
@@ -432,6 +476,11 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	if r.Stage != stage {
 		return errors.New("receipt stage differs from activation stage")
 	}
+	defer func() {
+		if r, readErr := ReadReceipt(h.ReceiptRoot, id); readErr == nil && !isActiveReceiptState(r.State) {
+			err = errors.Join(err, h.removeLaunchDirectory(id))
+		}
+	}()
 	update := func(state, detail string) error {
 		r.State, r.Detail, r.UpdatedAtUnixMS = state, detail, h.now().UnixMilli()
 		return writeReceipt(h.ReceiptRoot, r)
@@ -545,6 +594,9 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		return err
 	}
 	if err := os.Mkdir(backup, 0o700); err != nil {
+		return err
+	}
+	if err := h.trust(backup, false); err != nil {
 		return err
 	}
 	running := make(map[string]string, len(units))
