@@ -43,7 +43,7 @@ func (h Helper) removeStage(stage string) error {
 // pruneSuccessfulStages runs under the activation lock after durable success.
 // A name alone is not provenance: require a matching successful receipt and a
 // trusted private directory. Failed/unknown stages and foreign entries stay put.
-func (h Helper) pruneSuccessfulStages() error {
+func (h Helper) pruneSuccessfulStages(current string) error {
 	entries, err := os.ReadDir(h.BackupRoot)
 	if err != nil {
 		return err
@@ -55,7 +55,7 @@ func (h Helper) pruneSuccessfulStages() error {
 		}
 		stage := filepath.Join(h.BackupRoot, entry.Name())
 		r, err := ReadReceipt(h.ReceiptRoot, entry.Name())
-		if err != nil || r.State != stateSucceeded || r.Stage != stage {
+		if err != nil || r.State != stateSucceeded || r.Stage != stage || stage == current {
 			continue
 		}
 		info, err := entry.Info()
@@ -71,7 +71,9 @@ func (h Helper) pruneSuccessfulStages() error {
 		return successes[i].UpdatedAtUnixMS > successes[j].UpdatedAtUnixMS
 	})
 	var cleanupErr error
-	for i := 2; i < len(successes); i++ {
+	// The just-activated stage is always kept (it is excluded above), whatever
+	// the clock says; timestamps only choose the one other success to retain.
+	for i := 1; i < len(successes); i++ {
 		if err := h.removeStage(successes[i].Stage); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove old successful stage %s: %w", successes[i].Stage, err))
 		}
