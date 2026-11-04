@@ -30,6 +30,43 @@ type ExecutionTarget struct {
 
 func (t ExecutionTarget) root() bool { return t.UID == 0 }
 
+// gid omits the unchanged root credential but preserves GID 0 for non-root.
+func (t ExecutionTarget) gid() *uint32 {
+	if t.root() {
+		return nil
+	}
+	return &t.GID
+}
+
+// groups is the canonical set installed by both launchers and authenticated by
+// approval manifests and timestamp authority hashes.
+func (t ExecutionTarget) groups() []uint32 {
+	if t.root() {
+		return nil
+	}
+	groups := slices.Clone(t.Groups)
+	slices.Sort(groups)
+	return slices.Compact(groups)
+}
+
+// groupNames adds best-effort display labels; numeric IDs remain authoritative
+// even when the host cannot resolve a group to a displayable name.
+func (t ExecutionTarget) groupNames() map[uint32]string {
+	if t.root() {
+		return nil
+	}
+	names := make(map[uint32]string)
+	for _, id := range append(t.groups(), t.GID) {
+		if _, found := names[id]; found {
+			continue
+		}
+		if group, err := user.LookupGroupId(strconv.FormatUint(uint64(id), 10)); err == nil && displayableAccountName(group.Name) {
+			names[id] = group.Name
+		}
+	}
+	return names
+}
+
 // home is the HOME value installed for the launched process.
 func (t ExecutionTarget) home() string {
 	if t.root() {
@@ -105,6 +142,9 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	if !displayableAccountName(account.Username) {
 		return ExecutionTarget{}, fmt.Errorf("account name of %q is not displayable", spec)
 	}
+	if !utf8.ValidString(account.HomeDir) || len(account.HomeDir) > proto.MaxExecutionHomeBytes {
+		return ExecutionTarget{}, fmt.Errorf("home directory of %q must be valid UTF-8 and at most %d bytes", spec, proto.MaxExecutionHomeBytes)
+	}
 	ids, err := account.GroupIds()
 	if err != nil {
 		return ExecutionTarget{}, fmt.Errorf("look up groups of %q: %w", spec, err)
@@ -124,6 +164,7 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	if !slices.Contains(groups, uint32(gid)) {
 		groups = append(groups, uint32(gid))
 	}
+	slices.Sort(groups)
 	return ExecutionTarget{UID: uint32(uid), GID: uint32(gid), Groups: groups, Name: account.Username, Home: account.HomeDir}, nil
 }
 
