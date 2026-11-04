@@ -557,21 +557,22 @@ func TestUpdateReceiptRejectsInvalidInput(t *testing.T) {
 func TestReadReceiptRejectsMalformedAndTampered(t *testing.T) {
 	good := receiptText(testOpID, testRelease, testSourceCommit, stateScheduled)
 	variants := map[string]string{
-		"not json":       `not json`,
-		"empty":          ``,
-		"bad version":    strings.Replace(good, `"version":1`, `"version":2`, 1),
-		"id mismatch":    strings.Replace(good, testOpID, testOpID2, 1),
-		"bad state":      strings.Replace(good, `"state":"scheduled"`, `"state":"running"`, 1),
-		"forbidden tag":  strings.Replace(good, `"release":"`+testRelease+`"`, `"release":"latest"`, 1),
-		"short source":   strings.Replace(good, testSourceCommit, strings.Repeat("a", 39), 1),
-		"upper source":   strings.Replace(good, testSourceCommit, strings.Repeat("A", 40), 1),
-		"zero timestamp": strings.Replace(good, fmt.Sprint(validTimestamp), `0`, 1),
-		"unknown field":  good[:len(good)-2] + `,"extra":1}` + "\n",
-		"trailing data":  good + `{}` + "\n",
-		"truncated":      good[:len(good)/2],
-		"oversized":      strings.Repeat("x", receiptJSONMax+1),
-		"long stage":     strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"`+strings.Repeat("s", manifestLineMax+1)+`"`, 1),
-		"control stage":  strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"st\tage"`, 1),
+		"not json":        `not json`,
+		"empty":           ``,
+		"bad version":     strings.Replace(good, `"version":1`, `"version":2`, 1),
+		"id mismatch":     strings.Replace(good, testOpID, testOpID2, 1),
+		"bad state":       strings.Replace(good, `"state":"scheduled"`, `"state":"running"`, 1),
+		"forbidden tag":   strings.Replace(good, `"release":"`+testRelease+`"`, `"release":"latest"`, 1),
+		"short source":    strings.Replace(good, testSourceCommit, strings.Repeat("a", 39), 1),
+		"upper source":    strings.Replace(good, testSourceCommit, strings.Repeat("A", 40), 1),
+		"zero timestamp":  strings.Replace(good, fmt.Sprint(validTimestamp), `0`, 1),
+		"unknown field":   good[:len(good)-2] + `,"extra":1}` + "\n",
+		"bad plan digest": good[:len(good)-2] + `,"plan_digest":"not-a-sha256"}` + "\n",
+		"trailing data":   good + `{}` + "\n",
+		"truncated":       good[:len(good)/2],
+		"oversized":       strings.Repeat("x", receiptJSONMax+1),
+		"long stage":      strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"`+strings.Repeat("s", manifestLineMax+1)+`"`, 1),
+		"control stage":   strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"st\tage"`, 1),
 	}
 
 	root := t.TempDir()
