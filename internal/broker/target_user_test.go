@@ -405,6 +405,10 @@ func TestTargetUserFleetTicketBindsTarget(t *testing.T) {
 	// Given the ticket the broker freezes for the target and for root.
 	ticket, manifest := freeze(t, target)
 	rootTicket, rootManifest := freeze(t, ExecutionTarget{})
+	loginTicket, _ := freeze(t, ExecutionTarget{Name: "root", Home: "/root"})
+	if loginTicket.Display.Identity.TargetUID != 0 || loginTicket.Display.Identity.TargetUser != "" {
+		t.Fatalf("root login ticket must keep the canonical root identity: %+v", loginTicket.Display.Identity)
+	}
 	// Then the fleet approver's identity names the target and the root ticket
 	// carries no target at all.
 	identity := ticket.Display.Identity

@@ -420,7 +420,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	// Explicit policy exemptions never construct a provider. Codex preparation
 	// failures are typed availability outcomes, not raw provider diagnostics.
-	approvalOnly := !j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)
+	approvalOnly := j.req.ValidateTimestamp || !j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)
 	models := []proto.ProjectedModel{}
 	preflight := []proto.AvailabilityFailure{}
 	if j.configuration().Fleet != nil {
@@ -531,7 +531,9 @@ func (j *jobRuntime) run(ctx context.Context) {
 		}
 		reason := "AI review skipped by configured approval-only policy"
 		history := []proto.AvailabilityFailure{}
-		if j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
+		if j.req.ValidateTimestamp {
+			reason = "Validate approval timestamp only; no command will run"
+		} else if j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
 			reason = "AI review unavailable for all configured models"
 			history = j.orderedAvailabilityHistory(unavailable)
 		} else if len(preflight) != 0 {
@@ -593,6 +595,12 @@ func (j *jobRuntime) run(ctx context.Context) {
 		slog.Warn("approval timestamp unavailable", "request_id", j.req.RequestID, "error", timestampErr)
 	}
 	_, brokerApproval := j.daemon.worker.(interface{ brokerApproval() })
+	// This gate precedes *any* worker/fleet/broker notification. The worker
+	// cannot create an approval card until it receives the frozen manifest.
+	if j.req.NonInteractive && timestampApproval == nil && autoPlan == nil {
+		j.fail("askdo: a Telegram approval is required")
+		return
+	}
 	brokerApproval = brokerApproval && j.fleet == nil && autoPlan == nil
 	if brokerApproval || timestampApproval != nil {
 		switch value := frozen.(type) {
@@ -992,6 +1000,10 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 	evidence, err := j.daemon.ttyEvidence(peer.pid)
 	if err != nil || evidence != peer.tty {
 		j.fail("submitter terminal identity changed")
+		return
+	}
+	if j.req.ValidateTimestamp {
+		j.completeValidation(ctx, pending, decision)
 		return
 	}
 	var token [32]byte
@@ -1585,7 +1597,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		}
 	}
 	return proto.Bootstrap{
-		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: j.target.UID, TargetName: j.target.Name, RequestID: j.req.RequestID,
+		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: j.target.UID, TargetName: j.target.Name, LoginShell: j.req.LoginShell, RequestID: j.req.RequestID,
 		TargetGID: j.target.gid(), TargetGroups: j.target.groups(), TargetGroupNames: j.target.groupNames(),
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
@@ -1622,7 +1634,7 @@ func (j *jobRuntime) operation() Operation {
 	argv := append([]string(nil), j.req.Argv...)
 	cwd := j.req.CWD
 	env := []string{"PATH=/usr/bin:/bin", "HOME=" + j.target.home(), "LANG=C.UTF-8", "PWD=" + cwd}
-	if !j.target.root() {
+	if !j.target.root() || j.req.LoginShell {
 		env = append(env, "USER="+j.target.Name, "LOGNAME="+j.target.Name)
 	}
 	if j.req.Lifecycle == proto.LifecycleForeground {

@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net"
+	"os/user"
+	"strconv"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
 )
 
@@ -37,27 +41,121 @@ func (j *jobRuntime) approvalTimestampKey() store.ApprovalTimestampKey {
 }
 
 func (j *jobRuntime) approvalTimestampBinding(ctx context.Context, digest string) (*approvalBinding, error) {
-	if j.foreground == nil || !j.approvalOnly || j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) || j.configuration().Review.TimestampTimeout(j.uid) == 0 {
+	if j.req.ResetTimestamp || j.foreground == nil || !j.approvalOnly || (!j.req.ValidateTimestamp && j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)) || j.configuration().Review.TimestampTimeout(j.uid) == 0 {
 		return nil, nil
 	}
 	stamp, err := j.daemon.store.GetApprovalTimestamp(ctx, j.approvalTimestampKey())
 	if err != nil {
 		return nil, err
 	}
-	// A backward wall-clock step must not resurrect a future approval window.
-	if time.Now().Before(stamp.ApprovedAt) {
-		return nil, nil
-	}
-	// Enforce the currently loaded timeout against approval age, without
-	// resurrecting a window that already expired under the earlier policy.
-	expiry := stamp.ExpiresAt
-	if current := stamp.ApprovedAt.Add(j.configuration().Review.TimestampTimeout(j.uid)); current.Before(expiry) {
-		expiry = current
-	}
-	if !expiry.After(time.Now()) || stamp.AuthorityHash != j.approvalAuthorityHash() {
+	expiry := timestampExpiry(stamp, j.configuration().Review.TimestampTimeout(j.uid), j.approvalAuthorityHash())
+	if !expiry.After(time.Now()) {
 		return nil, nil
 	}
 	return &approvalBinding{digest: digest, expiry: expiry, consumed: true}, nil
+}
+
+func timestampExpiry(stamp store.ApprovalTimestamp, timeout time.Duration, authority string) time.Time {
+	if timeout == 0 || time.Now().Before(stamp.ApprovedAt) || stamp.AuthorityHash != authority {
+		return time.Time{}
+	}
+	expiry := stamp.ExpiresAt
+	if current := stamp.ApprovedAt.Add(timeout); current.Before(expiry) {
+		expiry = current
+	}
+	return expiry
+}
+
+func (d *daemon) terminalTimestampKey(uid uint32, tty ttyIdentity) store.ApprovalTimestampKey {
+	return store.ApprovalTimestampKey{UID: uid, TTYSession: tty.session, TTYRdev: tty.rdev, TTYInode: tty.inode, BootID: d.bootID}
+}
+
+func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.TimestampRequest) {
+	ctx := context.Background()
+	fail := func(message string) {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: message})
+	}
+	var key store.ApprovalTimestampKey
+	pid, err := d.peerPID(conn)
+	if err == nil && pid > 0 {
+		if tty, ttyErr := d.ttyEvidence(pid); ttyErr == nil {
+			key = d.terminalTimestampKey(uid, tty)
+		}
+	}
+	if request.Action == "remove" {
+		if uid != 0 {
+			err = d.store.ClearApprovalTimestamps(ctx, uid)
+		} else {
+			err = nil
+		}
+		if err != nil {
+			fail("remove approval timestamps failed")
+			return
+		}
+	} else if request.Action == "reset" {
+		// No controlling terminal means there is no terminal timestamp to reset.
+		if key.TTYSession > 0 && key.TTYRdev > 0 && key.TTYInode > 0 {
+			err = d.store.ClearTerminalApprovalTimestamp(ctx, key)
+		} else {
+			err = nil
+		}
+		if err != nil {
+			fail("reset approval timestamp failed")
+			return
+		}
+	}
+	event := proto.TimestampStatusEvent{Op: "timestamp_status"}
+	if request.Action != "list" {
+		_ = writeClient(conn, event)
+		return
+	}
+	cfg, err := d.currentConfig()
+	if err != nil {
+		fail("current configuration unavailable")
+		return
+	}
+	target, err := resolveExecutionTarget(request.TargetUser)
+	if err != nil {
+		fail("target user: " + err.Error())
+		return
+	}
+	if account, lookupErr := user.LookupId(strconv.FormatUint(uint64(uid), 10)); lookupErr == nil {
+		if group, groupErr := user.LookupGroup("askdo"); groupErr == nil {
+			if ids, idsErr := account.GroupIds(); idsErr == nil {
+				for _, id := range ids {
+					if id == group.Gid {
+						event.AskdoGroup = true
+					}
+				}
+			}
+		}
+	}
+	event.ReviewMode, event.ReviewRequired = cfg.Review.Mode, cfg.Review.RequiresReview(uid, false)
+	if event.ReviewMode == "" {
+		event.ReviewMode = "required"
+	}
+	event.TimestampTimeoutSeconds = int64(cfg.Review.TimestampTimeout(uid) / time.Second)
+	if key.TTYSession > 0 && key.TTYRdev > 0 && key.TTYInode > 0 {
+		stamp, stampErr := d.store.PeekApprovalTimestamp(ctx, key)
+		if stampErr != nil {
+			fail("read approval timestamp failed")
+			return
+		}
+		expiry := timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target))
+		if expiry.After(time.Now()) {
+			event.RemainingSeconds = int64(time.Until(expiry).Seconds())
+		}
+	}
+	event.AutoApprovalMaxRisk = cfg.Review.MaxAutoRisk(uid)
+	event.AutoApprovalThreshold, err = d.store.GetAutoApprovalThreshold(ctx, uid)
+	if err != nil {
+		fail("read auto-approval preference failed")
+		return
+	}
+	if event.AutoApprovalMaxRisk > 0 && event.AutoApprovalThreshold > 0 {
+		event.AutoApprovalEffective = min(event.AutoApprovalMaxRisk+1, event.AutoApprovalThreshold)
+	}
+	_ = writeClient(conn, event)
 }
 
 // runApprovalTimestamp authorizes the actual frozen manifest directly. It never
@@ -92,7 +190,7 @@ func (j *jobRuntime) recordApprovalTimestamp(ctx context.Context, expiry time.Ti
 	human := j.humanApproval && j.approvalOnly
 	state := j.state
 	j.mu.Unlock()
-	if !human || j.foreground == nil || j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
+	if !human || j.req.ResetTimestamp || j.foreground == nil || j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
 		return nil
 	}
 	ttl := j.configuration().Review.TimestampTimeout(j.uid)
@@ -103,4 +201,37 @@ func (j *jobRuntime) recordApprovalTimestamp(ctx context.Context, expiry time.Ti
 	return j.daemon.store.UpsertApprovalTimestamp(ctx, store.ApprovalTimestamp{
 		ApprovalTimestampKey: j.approvalTimestampKey(), ApprovedAt: now, ExpiresAt: now.Add(ttl), AuthorityHash: j.approvalAuthorityHash(),
 	})
+}
+
+func (j *jobRuntime) completeValidation(ctx context.Context, pending *approvalBinding, decision *proto.Decision) {
+	now := time.Now().UTC()
+	if !now.Before(pending.expiry) {
+		j.expireApproval(ctx)
+		return
+	}
+	approval, err := json.Marshal(struct {
+		Kind     string          `json:"kind"`
+		Decision string          `json:"decision"`
+		Digest   string          `json:"digest"`
+		Operator *proto.Decision `json:"operator_decision,omitempty"`
+	}{Kind: "timestamp_validation", Decision: "approved", Digest: pending.digest, Operator: decision})
+	if err != nil {
+		j.fail("encode timestamp validation")
+		return
+	}
+	stamp := store.ApprovalTimestamp{ApprovalTimestampKey: j.approvalTimestampKey(), ApprovedAt: now, ExpiresAt: now.Add(j.configuration().Review.TimestampTimeout(j.uid)), AuthorityHash: j.approvalAuthorityHash()}
+	j.mu.Lock()
+	changed, err := j.daemon.store.CompleteTimestampValidation(ctx, j.req.RequestID, pending.digest, stamp, approval)
+	if changed && err == nil {
+		j.state = store.StateFinished
+	}
+	j.mu.Unlock()
+	if err != nil {
+		j.fail("refresh approval timestamp")
+		return
+	}
+	if changed {
+		zero := 0
+		j.finishTerminal(store.StateFinished, store.Result{Kind: store.ResultExit, ExitCode: &zero})
+	}
 }

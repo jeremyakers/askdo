@@ -217,6 +217,34 @@ func TestForegroundSudoContainer(t *testing.T) {
 		t.Fatalf("three foreground commands required %d approvals, want 1", approvals.Load())
 	}
 	assertNoExecutor()
+	t.Run("sudo-timestamp-flags", func(t *testing.T) {
+		before := approvals.Load()
+		command := "/usr/local/bin/askdo -n /usr/bin/true; echo INITIAL_N=$?; /usr/local/bin/askdo -v; echo VALIDATE=$?; /usr/local/bin/askdo -n /usr/bin/true; echo REUSED_N=$?; /usr/local/bin/askdo -k; echo RESET=$?; /usr/local/bin/askdo -n /usr/bin/true; echo RESET_N=$?; /usr/local/bin/askdo -K; echo REMOVE=$?"
+		out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
+		for _, want := range []string{"INITIAL_N=1", "VALIDATE=0", "REUSED_N=0", "RESET=0", "RESET_N=1", "REMOVE=0", "askdo: a Telegram approval is required"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q: %s", want, out)
+			}
+		}
+		if code != 0 || approvals.Load() != before+1 {
+			t.Fatalf("sudo flag PTY result=%d approvals=%d (before %d): %s", code, approvals.Load(), before, out)
+		}
+		assertNoExecutor()
+	})
+	t.Run("sudo-shell-flags", func(t *testing.T) {
+		before := approvals.Load()
+		command := "/usr/local/bin/askdo -s -u askdo-target -- /usr/bin/id -u; echo SHELL_EXIT=$?; /usr/local/bin/askdo -i -u askdo-target -- /usr/bin/env; echo LOGIN_EXIT=$?; /usr/local/bin/askdo -i -- /usr/bin/env; echo ROOT_LOGIN_EXIT=$?; /usr/local/bin/askdo -l; echo LIST_EXIT=$?"
+		out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
+		for _, want := range []string{"\r\n1003\r\n", "SHELL_EXIT=0", "LOGIN_EXIT=0", "ROOT_LOGIN_EXIT=0", "HOME=/home/askdo-target", "USER=askdo-target", "LOGNAME=askdo-target", "PWD=/home/askdo-target", "HOME=/root", "USER=root", "LOGNAME=root", "PWD=/root", "askdo group membership: true", "LIST_EXIT=0"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q: %s", want, out)
+			}
+		}
+		if code != 0 || approvals.Load() != before+2 {
+			t.Fatalf("shell PTY result=%d approvals=%d (before %d): %s", code, approvals.Load(), before, out)
+		}
+		assertNoExecutor()
+	})
 	t.Run("config-approval", func(t *testing.T) {
 		// Use the installed multicall name, the real member UID/socket and
 		// helper/TTY handoff. Configuration stays private to this fixture.

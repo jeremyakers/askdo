@@ -83,7 +83,8 @@ The immutable job bootstrap; the first and only message of its kind.
 | `type` | `"bootstrap"` |
 | `host` | string ≤ 256 (trusted daemon hostname for the Telegram card) |
 | `target_uid` | uint32 (execution identity of the dispatched process; 0 is root) |
-| `target_name` | optional string ≤ 256: the broker-resolved account name of a non-root target (`askdo -u`); must be absent for root |
+| `target_name` | optional string ≤ 256: the broker-resolved target account name (`askdo -u`); absent for root except in login-shell mode |
+| `login_shell` | optional boolean, omitted when false: login-shell mode installs target HOME/USER/LOGNAME even for root; requires `target_name` |
 | `submitter_uid` | uint32 (kernel-authenticated submitting peer UID) |
 | `submitter_name` | string ≤ 256 (host account name looked up from that UID; display only) |
 | `container` | string ≤ 128 (best-effort container label observed by the daemon; empty when unavailable) |
@@ -140,6 +141,11 @@ target account's home directory and, when `target_name` is present, exactly
 `USER=<target_name>` and `LOGNAME=<target_name>` are added; any other value or
 variable is rejected. The broker derives them from the actual launch
 environment. Private `ASKDO_BUNDLE` staging paths are not projected.
+
+For `login_shell:true`, root also gets the resolved account's home, USER and
+LOGNAME rather than the historical `/root`-only environment. No new environment
+variables are allowed. This optional extension is rejected by old strict workers;
+ordinary bootstraps remain byte-identical when login-shell mode is unused.
 
 The bootstrap carries no raw capture contents. For captured stdin it carries
 only the logical path, byte size, SHA-256 digest and the selected delivery

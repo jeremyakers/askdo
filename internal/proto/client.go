@@ -118,7 +118,11 @@ type SubmitRequest struct {
 	// execution host before anything durable exists and binds the result into
 	// the approval manifest; an older broker's strict decoder rejects the
 	// field instead of silently running the command as root.
-	TargetUser string `json:"target_user,omitempty"`
+	TargetUser        string `json:"target_user,omitempty"`
+	ResetTimestamp    bool   `json:"reset_timestamp,omitempty"`
+	NonInteractive    bool   `json:"non_interactive,omitempty"`
+	ValidateTimestamp bool   `json:"validate_timestamp,omitempty"`
+	LoginShell        bool   `json:"login_shell,omitempty"`
 }
 
 // MaxTargetUserBytes bounds a sudo-style target user specification.
@@ -350,6 +354,12 @@ type ErrorEvent struct {
 
 // Validate validates a submit request before it reaches the broker.
 func (r SubmitRequest) Validate() error {
+	if (r.ResetTimestamp || r.NonInteractive || r.ValidateTimestamp || r.LoginShell) && r.ProtocolVersion < CanonicalProtocolVersion {
+		return errors.New("sudo flags require protocol version 4 or later")
+	}
+	if r.ValidateTimestamp && (r.Mode != "argv" || r.Lifecycle != LifecycleForeground || len(r.Argv) != 1 || r.Argv[0] != "/bin/true" || r.CapturedStdinBase64 != "" || r.LoginShell) {
+		return errors.New("timestamp validation requires foreground /bin/true without input")
+	}
 	if r.Op != "submit" {
 		return errors.New("submit op must be submit")
 	}

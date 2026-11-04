@@ -367,7 +367,11 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 		withholding = append(withholding, fmt.Sprintf("%d credential-like paths withheld", count))
 		withholding = append(withholding, refs...)
 	}
-	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: j.target.Name}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
+	targetName := j.target.Name
+	if j.target.root() {
+		targetName = ""
+	} // Fleet uses an absent name for UID 0, including login shells.
+	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: targetName}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
 	display.CapturedStdinKind = j.capturedKind()
 	profilesHash, err := fleetproto.HashProfiles(f.selection.Profiles)
 	if err != nil {

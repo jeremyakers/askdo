@@ -225,6 +225,33 @@ askdo -u tyme --reason 'Run this script as tyme' bash < maintenance.sh
 `--bundle` and `--script` always run as root (their staged copy is
 root-private); pipe a script through stdin as above to run it as another user.
 
+Sudo-style options (root remains the default target):
+
+| Option | Meaning |
+| --- | --- |
+| `-k`, `--reset-timestamp` | Alone, invalidate this terminal's timestamp for all targets. With a command, ignore the timestamp without changing the saved window. |
+| `-K`, `--remove-timestamp` | Remove your timestamps on all terminals; accepts no command. |
+| `-v`, `--validate` | Refresh your terminal's timestamp, requesting approval if needed, without executing anything. Requires an enabled `timestamp_timeout`. |
+| `-n`, `--non-interactive` | Never wait for a human: reuse a valid timestamp or eligible risk auto-approval, otherwise exit 1 with no pending approval card. |
+| `-s`, `--shell` | Run the target account's passwd shell (or `/bin/sh` if empty), interactively without arguments, otherwise with `-c "arguments joined with spaces"`. |
+| `-i`, `--login` | Run that shell with `-l`, target `HOME`/`USER`/`LOGNAME`, and target home as the working directory. |
+| `-l`, `--list` | Show group membership, review policy, timestamp timeout/remaining time, and auto-approval status without approval. |
+
+Shell invocations are ordinary reviewed/approved submissions: the actual shell
+argv is visible to the reviewer. Neither shell mode preserves the caller's
+environment. Unlike sudo's `-s`, askdo deliberately uses the **target** account's
+shell, not the caller's `$SHELL`. Combined boolean short options such as `-kn`
+work; value-taking combinations such as `-iu tyme` are not supported.
+
+```sh
+askdo -n /usr/bin/id                 # fail immediately if approval is needed
+askdo -k                            # forget this terminal's approval
+askdo -v                            # approve/refresh, without running a command
+askdo -i -u tyme                     # target's login shell
+askdo -s -u tyme -- 'echo "$HOME"'   # shell command string
+askdo -l
+```
+
 Check a job or reconnect to its output:
 
 ```sh

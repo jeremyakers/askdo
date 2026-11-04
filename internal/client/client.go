@@ -130,6 +130,22 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	var sensitive stringList
 	var review forceReviewFlag
 	var detach bool
+	var resetTimestamp, removeTimestamp, validateTimestamp, nonInteractive, shell, login, list bool
+	for _, option := range []struct {
+		short, long, help string
+		value             *bool
+	}{
+		{"k", "reset-timestamp", "invalidate this terminal's timestamp; with COMMAND, ignore it", &resetTimestamp},
+		{"K", "remove-timestamp", "remove all caller timestamps (no command allowed)", &removeTimestamp},
+		{"v", "validate", "refresh the approval timestamp without running a command", &validateTimestamp},
+		{"n", "non-interactive", "never wait for human approval; fail if required", &nonInteractive},
+		{"s", "shell", "run the target user's shell", &shell},
+		{"i", "login", "run the target user's login shell in their home", &login},
+		{"l", "list", "list the caller's askdo privileges without approval", &list},
+	} {
+		flags.BoolVar(option.value, option.short, false, option.help)
+		flags.BoolVar(option.value, option.long, false, "same as -"+option.short)
+	}
 	flags.BoolVar(&options.Verbose, "verbose", options.Verbose, "show job lifecycle diagnostics")
 	flags.DurationVar(&timeout, "timeout", 0, "maximum time to wait")
 	flags.StringVar(&reason, "reason", "privileged command", "reason for privileged operation")
@@ -166,8 +182,29 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	})
 	flags.Var(&sensitive, "bundle-include-sensitive", "include one default-excluded bundle file")
 	flags.Var(&review, "review", "force AI review (yes only)")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(expandShortFlags(args, flags)); err != nil {
 		return 125
+	}
+	rest := flags.Args()
+	if shell && login || (shell || login) && (bundle != "" || script != "" || entry != "") {
+		return usageError(options, "-s/--shell and -i/--login are mutually exclusive and require argv mode")
+	}
+	if removeTimestamp || validateTimestamp || list {
+		if len(rest) != 0 || bundle != "" || script != "" || shell || login || detach || entry != "" || removeTimestamp && (resetTimestamp || validateTimestamp || list) || list && (resetTimestamp || validateTimestamp) {
+			return usageError(options, "-K, -v and -l do not accept commands or execution modes")
+		}
+	}
+	if removeTimestamp {
+		return runTimestamp(ctx, "remove", "", options)
+	}
+	if list {
+		return runTimestamp(ctx, "list", targetUser, options)
+	}
+	if resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "" {
+		return runTimestamp(ctx, "reset", "", options)
+	}
+	if validateTimestamp {
+		rest = []string{"/bin/true"}
 	}
 	if script != "" {
 		var conflictingFlag string
@@ -186,7 +223,6 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	}
 	// Bundle mode with a non-root target is refused by the broker, which alone
 	// resolves the account: every UID-0 spelling (root, #0, #00, aliases) is root.
-	rest := flags.Args()
 	// The caller's own working directory is part of the request: both argv
 	// and bundle executions run there. Capture it before any submission so
 	// the broker can bind the exact directory. A missing/unusable cwd is a
@@ -196,6 +232,16 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
 		return 125
 	}
+	if shell || login {
+		var home string
+		rest, home, err = shellCommand(ctx, targetUser, rest, login)
+		if err != nil {
+			return usageError(options, "askdo: shell: "+err.Error())
+		}
+		if login {
+			invocationDir = home
+		}
+	}
 	// Only an explicit --timeout bounds capture. There is no default capture
 	// timer: a pipe with no writer close waits indefinitely unless the caller
 	// supplies a deadline (via Run's context) or Ctrl-C.
@@ -203,7 +249,11 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	if timeout > 0 {
 		captureDeadline = started.Add(timeout)
 	}
-	captured, interrupted, err := captureStdinGuarded(ctx, options.Stdin, captureDeadline, options.Interrupt)
+	var captured []byte
+	var interrupted bool
+	if !validateTimestamp {
+		captured, interrupted, err = captureStdinGuarded(ctx, options.Stdin, captureDeadline, options.Interrupt)
+	}
 	if interrupted {
 		fmt.Fprintln(options.Stderr, "interrupted; no command submitted")
 		return 130
@@ -220,7 +270,10 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	if len(captured) > 0 && script != "" {
 		return usageError(options, "askdo: captured stdin cannot be combined with --script")
 	}
-	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review), TargetUser: targetUser}
+	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review), TargetUser: targetUser, ResetTimestamp: resetTimestamp, NonInteractive: nonInteractive, ValidateTimestamp: validateTimestamp, LoginShell: login}
+	if validateTimestamp {
+		request.Reason = "validate approval timestamp (no command will run)"
+	}
 	if bundle == "" && script == "" {
 		if entry != "" || len(rest) == 0 {
 			fmt.Fprintln(options.Stderr, "argv mode requires a command (use -- before command flags)")
@@ -267,6 +320,9 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		hasTTY = hasControllingTTY
 	}
 	controllingTTY := hasTTY()
+	if validateTimestamp && !controllingTTY {
+		return usageErrorCode(options, "askdo: timestamp validation requires a controlling terminal", 1)
+	}
 	if detach || !controllingTTY || len(captured) > 0 {
 		request.Lifecycle = proto.LifecycleDetached
 	} else {
@@ -852,6 +908,9 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		if event.Message != "" {
 			fmt.Fprintln(options.Stderr, event.Message)
 		}
+		if event.Message == "askdo: a Telegram approval is required" {
+			return 1, true, event.State
+		}
 		if event.Feedback != nil {
 			printReviewFeedback(options.Stderr, *event.Feedback)
 		}
@@ -862,6 +921,9 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 			return 125, true, ""
 		}
 		fmt.Fprintln(options.Stderr, event.Message)
+		if event.Code == "approval_required" || event.Code == "timestamp_disabled" {
+			return 1, true, ""
+		}
 		return 125, true, ""
 	default:
 		return 125, true, ""

@@ -70,6 +70,9 @@ func (t ExecutionTarget) groupNames() map[uint32]string {
 // home is the HOME value installed for the launched process.
 func (t ExecutionTarget) home() string {
 	if t.root() {
+		if t.Home != "" {
+			return t.Home
+		}
 		return "/root"
 	}
 	return t.Home

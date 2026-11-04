@@ -288,7 +288,26 @@ resolved execution target UID, skip the tap while the timestamp is valid. A logi
 name and `#UID` for the same account share the window. Changing target (including
 omitting `-u` to run as root) requires fresh approval; its successful handoff
 replaces the window with the new target. Each successful handoff resets expiry to
-the dispatch time plus the configured timeout. There is no session-start command.
+the dispatch time plus the configured timeout. `askdo -v` can also create or
+refresh a window without executing a command: a valid window is refreshed
+immediately; otherwise the caller approves a no-op validation in Telegram.
+This requires an enabled `timestamp_timeout` for the caller. Validation itself
+does not run an AI review or a command; AI-required commands remain AI-required.
+
+`askdo -k` alone invalidates this terminal's timestamp, irrespective of target.
+With a command, `-k` ignores the saved timestamp for that request and leaves the
+saved window unchanged, even after fresh approval. `askdo -K` removes all of the
+caller's timestamps on all terminals and accepts no command. Neither removal
+needs approval or changes the configured timeout. `askdo -l` shows the timeout
+and remaining time on this terminal for the selected target (`-u`, root by
+default), alongside group membership, review/exemption and auto-approval policy.
+
+`askdo -n` never waits for a human: valid foreground timestamp reuse or eligible
+detached risk-based auto-approval can proceed. Otherwise it exits 1 with
+`askdo: a Telegram approval is required`; the broker never creates a pending
+Telegram card for that request. Automated AI review may still run to determine
+eligibility for risk-based auto-approval. Combining `-n -v` only refreshes an
+already valid window, and combining `-n -k COMMAND` cannot reuse a timestamp.
 
 The identity includes the kernel TTY session, device and inode, not the command's
 PID or process start time. A different UID or terminal cannot reuse it. Like
@@ -302,8 +321,8 @@ extend it. Reuse still freezes the exact manifest and applies the existing
 pre-launch and one-use foreground grant checks; it does not invent a Telegram
 decision. Timestamp records live in the local jobs database. Config changes apply
 to the next submission without a restart; already admitted jobs keep their policy.
-Clearing a policy disables reuse but does not erase stored records; re-enabling
-can reuse an unexpired record. `telegram.approval_ttl` is a separate deadline for
+`askdo-config review timestamp_timeout clear USER` disables reuse and erases that
+user's stored records. `telegram.approval_ttl` is a separate deadline for
 an individual approval card and never starts a timestamp by itself.
 
 #### Reviewer instruction layers and account notes

@@ -674,6 +674,13 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 		return
 	}
 	switch discriminator.Op {
+	case "timestamp":
+		var request proto.TimestampRequest
+		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid timestamp request"})
+			return
+		}
+		d.handleTimestamp(conn, uid, request)
 	case "reserve":
 		if fenced, _ := admissionFence(d.fencePath, d.fenceOwner); fenced {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "migration_in_progress", Message: "reservations are temporarily unavailable"})
@@ -858,6 +865,21 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
 		return
 	}
+	// Login mode binds the account home, including root's passwd entry, before
+	// the working directory descriptor and approval manifest are constructed.
+	if request.LoginShell {
+		spec := request.TargetUser
+		if spec == "" {
+			spec = "root"
+		}
+		account, lookupErr := lookupTargetAccount(spec)
+		if lookupErr != nil {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target login account unavailable"})
+			return
+		}
+		target.Name, target.Home = account.Username, account.HomeDir
+		request.CWD = account.HomeDir
+	}
 	// Bundles (--bundle, --script) are staged in the root-private spool
 	// (0700 root), which a non-root target cannot traverse: the approved
 	// launch would always fail opening its entry. Refuse before approval
@@ -889,6 +911,31 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	policy, fleet := d.policy, d.fleet
+	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
+		return
+	}
+	if request.NonInteractive {
+		var valid bool
+		if (request.ValidateTimestamp || !cfg.Review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && cfg.Review.TimestampTimeout(uid) > 0 {
+			key := d.terminalTimestampKey(uid, foreground.tty)
+			stamp, stampErr := d.store.GetApprovalTimestamp(context.Background(), key)
+			valid = stampErr == nil && timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target)).After(time.Now())
+		}
+		canAuto := false
+		if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && cfg.Review.MaxAutoRisk(uid) > 0 {
+			threshold, preferenceErr := d.store.GetAutoApprovalThreshold(context.Background(), uid)
+			if preferenceErr != nil {
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
+				return
+			}
+			canAuto = threshold >= 2
+		}
+		if !valid && !canAuto {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
+			return
+		}
+	}
 	var releaseResources func()
 	if d.reloadConfig {
 		policy, err = inspection.NewPolicy(cfg.Inspection, append(cfg.CredentialPaths(), d.configPath)...)
@@ -918,7 +965,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			}
 		}
 	}
-	if cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) {
+	if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "review_unavailable", Message: "AI review required but no review models are configured"})
 		return
 	}

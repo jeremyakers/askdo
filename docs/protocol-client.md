@@ -62,6 +62,45 @@ remains pre-dispatch-only; disconnect is never authority to kill a running job.
 
 ### Client → daemon requests
 
+**`timestamp`** — a single, unreserved exchange, scoped exclusively to the
+kernel peer UID. `{"op":"timestamp","action":"reset"}` deletes that caller's
+current kernel-authenticated TTY session/device/inode/boot window for any target
+(no terminal means nothing to invalidate). `action:"remove"` deletes all of the
+caller's windows across terminals. Both need no approval and return
+`{"op":"timestamp_status",...}`. They accept no target or command.
+
+`{"op":"timestamp","action":"list","target_user":"tyme"}` is read-only;
+`target_user` is optional (root by default). Its `timestamp_status` response has
+`askdo_group` (boolean), `review_mode` (string), `review_required` (boolean),
+`timestamp_timeout_seconds`, `remaining_seconds` (zero if expired, wrong target
+or no terminal), `auto_approval_max_risk`, `auto_approval_threshold`
+and `auto_approval_effective` (integers). Reset/remove return these fields at
+their zero values. No request accepts a UID, PID or TTY identity from the client.
+
+Four optional boolean fields extend v4+ `submit`; false fields are omitted,
+preserving the existing wire when unused. Older strict brokers reject them:
+
+- `reset_timestamp`: ignore timestamp reuse, without deleting or refreshing the
+  saved window on command handoff (`-k COMMAND`).
+- `non_interactive`: allow only timestamp reuse or policy auto-approval. The
+  broker rejects known human-only requests at admission with error code
+  `approval_required`; if automated review is necessary, its final gate rejects
+  before sending a frozen manifest to any notifier. No human card is created.
+  Both paths display `askdo: a Telegram approval is required` and the CLI exits 1.
+- `validate_timestamp`: only foreground argv `[/bin/true]`, without captured
+  input or login mode. The broker requires a configured timeout (otherwise
+  `timestamp_disabled`), freezes a clearly labeled no-op validation, and reuses
+  a timestamp or requests approval. It completes the job and refreshes the
+  timestamp atomically, with exit code 0, **without** a helper grant or execution.
+- `login_shell`: target home is resolved by the broker and becomes the CWD;
+  target HOME/USER/LOGNAME are installed even for root. The CLI resolves the
+  target's passwd shell into ordinary argv (with `-l` and optional `-c` command).
+  `-s` likewise submits the resolved shell argv but needs no extra wire field.
+
+These extensions require no database schema change. Revocation/list operations
+use the existing approval timestamp store; identity and authority matching are
+the same as foreground timestamp reuse.
+
 All request bodies carry an `op` discriminator. New job IDs are canonical
 `YYYY-MM-DD_#N` strings (real calendar day, positive unpadded int64 sequence)
 allocated globally by the daemon. They are the **same** ID in the CLI,

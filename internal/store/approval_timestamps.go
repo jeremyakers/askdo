@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -16,6 +17,34 @@ type ApprovalTimestampKey struct {
 	TTYRdev    uint64
 	TTYInode   uint64
 	BootID     string
+}
+
+// CompleteTimestampValidation commits the no-execution result and refreshed
+// window together. Cancellation/expiry winning the state gate creates no stamp.
+func (store *Store) CompleteTimestampValidation(ctx context.Context, requestID, digest string, stamp ApprovalTimestamp, approvalJSON []byte) (bool, error) {
+	if !stamp.ApprovalTimestampKey.valid() || !validDigest(stamp.AuthorityHash) || !stamp.ExpiresAt.After(stamp.ApprovedAt) || !json.Valid(approvalJSON) {
+		return false, errors.New("invalid timestamp validation")
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	zero := 0
+	result, _ := json.Marshal(Result{Kind: ResultExit, ExitCode: &zero})
+	n, outcomes, err := store.updateReturningOutcomes(ctx, tx, `UPDATE jobs SET state = 'finished', result_json = ?, approval_json = ?, updated_at = ? WHERE uid = ? AND request_id = ? AND state = 'awaiting-human' AND manifest_hash = ? AND (deadline_at IS NULL OR deadline_at <= 0 OR deadline_at > ?)`, result, approvalJSON, stamp.ApprovedAt.UnixNano(), stamp.UID, requestID, digest, stamp.ApprovedAt.UnixNano())
+	if err != nil || n == 0 {
+		return false, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO approval_timestamps (uid,tty_session,tty_rdev,tty_inode,boot_id,approved_at,expires_at,authority_hash) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(uid,tty_session,tty_rdev,tty_inode,boot_id) DO UPDATE SET approved_at=excluded.approved_at, expires_at=excluded.expires_at, authority_hash=excluded.authority_hash WHERE excluded.approved_at > approval_timestamps.approved_at`, stamp.UID, stamp.TTYSession, int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UnixNano(), stamp.ExpiresAt.UnixNano(), stamp.AuthorityHash)
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	store.appendOutcomes(outcomes)
+	return true, nil
 }
 
 func (key ApprovalTimestampKey) valid() bool {
@@ -39,6 +68,14 @@ func (store *Store) GetApprovalTimestamp(ctx context.Context, key ApprovalTimest
 	if _, err := store.db.ExecContext(ctx, `DELETE FROM approval_timestamps WHERE expires_at <= ?`, time.Now().UTC().UnixNano()); err != nil {
 		return ApprovalTimestamp{}, fmt.Errorf("clean expired approval timestamps: %w", err)
 	}
+	return store.PeekApprovalTimestamp(ctx, key)
+}
+
+// PeekApprovalTimestamp is the read-only counterpart used by askdo -l.
+func (store *Store) PeekApprovalTimestamp(ctx context.Context, key ApprovalTimestampKey) (ApprovalTimestamp, error) {
+	if !key.valid() {
+		return ApprovalTimestamp{}, errors.New("invalid approval timestamp identity")
+	}
 	var approved, expires int64
 	var authorityHash string
 	err := store.db.QueryRowContext(ctx, `SELECT approved_at, expires_at, authority_hash FROM approval_timestamps
@@ -51,6 +88,16 @@ func (store *Store) GetApprovalTimestamp(ctx context.Context, key ApprovalTimest
 		return ApprovalTimestamp{}, fmt.Errorf("read approval timestamp: %w", err)
 	}
 	return ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: time.Unix(0, approved).UTC(), ExpiresAt: time.Unix(0, expires).UTC(), AuthorityHash: authorityHash}, nil
+}
+
+// ClearTerminalApprovalTimestamp revokes this user's terminal, independent of
+// the execution target or approval authority bound to the stored window.
+func (store *Store) ClearTerminalApprovalTimestamp(ctx context.Context, key ApprovalTimestampKey) error {
+	if !key.valid() {
+		return errors.New("invalid approval timestamp identity")
+	}
+	_, err := store.db.ExecContext(ctx, `DELETE FROM approval_timestamps WHERE uid = ? AND tty_session = ? AND tty_rdev = ? AND tty_inode = ? AND boot_id = ?`, key.UID, key.TTYSession, int64(key.TTYRdev), int64(key.TTYInode), key.BootID)
+	return err
 }
 
 // GetForegroundAuthorizationSource returns the authorization class recorded for

@@ -1,0 +1,124 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os/exec"
+	"os/user"
+	"strconv"
+	"strings"
+
+	"github.com/jeremyakers/askdo/internal/proto"
+)
+
+// Expand only known boolean short options, before the command. Value-taking
+// options retain their next argument verbatim (including things like -kn).
+func expandShortFlags(args []string, flags *flag.FlagSet) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || !strings.HasPrefix(arg, "-") || arg == "-" {
+			return append(out, args[i:]...)
+		}
+		name := strings.TrimLeft(arg, "-")
+		if f := flags.Lookup(strings.SplitN(name, "=", 2)[0]); f != nil {
+			out = append(out, arg)
+			if _, boolean := f.Value.(interface{ IsBoolFlag() bool }); !boolean && !strings.Contains(name, "=") && i+1 < len(args) {
+				i++
+				out = append(out, args[i])
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--") || len(arg) < 3 || strings.Trim(name, "kKvnsil") != "" {
+			out = append(out, arg)
+			continue
+		}
+		for _, c := range name {
+			out = append(out, "-"+string(c))
+		}
+	}
+	return out
+}
+
+// The target's passwd shell is deliberately not inherited from the submitter.
+// getent uses the host's NSS account database, including non-local accounts.
+func shellCommand(ctx context.Context, target string, args []string, login bool) ([]string, string, error) {
+	if target == "" {
+		target = "root"
+	}
+	var account *user.User
+	var err error
+	if id, numeric := strings.CutPrefix(target, "#"); numeric {
+		uid, parseErr := strconv.ParseUint(id, 10, 32)
+		if parseErr != nil {
+			return nil, "", parseErr
+		}
+		account, err = user.LookupId(strconv.FormatUint(uid, 10))
+	} else {
+		account, err = user.Lookup(target)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	data, err := exec.CommandContext(ctx, "/usr/bin/getent", "passwd", account.Uid).Output()
+	if err != nil {
+		return nil, "", fmt.Errorf("read target passwd entry: %w", err)
+	}
+	fields := strings.Split(strings.TrimSuffix(string(data), "\n"), ":")
+	if len(fields) != 7 {
+		return nil, "", errors.New("invalid target passwd entry")
+	}
+	shell := fields[6]
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	argv := []string{shell}
+	if login {
+		argv = append(argv, "-l")
+	}
+	if len(args) != 0 {
+		argv = append(argv, "-c", strings.Join(args, " "))
+	}
+	return argv, account.HomeDir, nil
+}
+
+func runTimestamp(ctx context.Context, action, target string, options Options) int {
+	conn, err := dial(ctx, options.SocketPath)
+	if err != nil {
+		return usageError(options, "askdo: "+err.Error())
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	if err := send(conn, proto.TimestampRequest{Op: "timestamp", Action: action, TargetUser: target}); err != nil {
+		return usageError(options, "askdo: timestamp request failed")
+	}
+	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
+	if err != nil {
+		return usageError(options, "askdo: timestamp response failed")
+	}
+	var kind struct {
+		Op string `json:"op"`
+	}
+	if json.Unmarshal(body, &kind) != nil {
+		return usageError(options, "askdo: invalid timestamp response")
+	}
+	if kind.Op == "error" {
+		var event proto.ErrorEvent
+		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil {
+			return usageError(options, "askdo: invalid broker error")
+		}
+		return usageErrorCode(options, "askdo: "+event.Message, 1)
+	}
+	var event proto.TimestampStatusEvent
+	if proto.StrictUnmarshal(body, &event) != nil || event.Op != "timestamp_status" {
+		return usageError(options, "askdo: invalid timestamp response")
+	}
+	if action == "list" {
+		fmt.Fprintf(options.Stdout, "askdo group membership: %t\nAI review mode: %s; required: %t; exempt: %t\nTimestamp timeout: %ds; remaining on this terminal: %ds\nAuto-approval: cap %d, preference %d, effective %d (0 = off)\n", event.AskdoGroup, event.ReviewMode, event.ReviewRequired, !event.ReviewRequired, event.TimestampTimeoutSeconds, event.RemainingSeconds, event.AutoApprovalMaxRisk, event.AutoApprovalThreshold, event.AutoApprovalEffective)
+	}
+	return 0
+}
