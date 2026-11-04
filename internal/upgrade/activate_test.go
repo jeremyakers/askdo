@@ -415,10 +415,10 @@ func TestHelperActivateRefusesTamperedStageBeforeEffects(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertActivationRefusedBeforeEffects(t, f)
+			if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+				t.Fatalf("pre-activation stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
+			}
 		})
-	}
-	if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
-		t.Fatalf("pre-activation stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
 	}
 }
 
