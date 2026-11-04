@@ -17,7 +17,12 @@ func isHelpWord(arg string) bool {
 }
 
 func writeTopHelp(w io.Writer) {
-	fmt.Fprint(w, `usage: askdo [-u USER] [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] COMMAND [ARG...]
+	fmt.Fprint(w, `usage: askdo [-u USER] [-k] [-n] [--reason TEXT] [--timeout DURATION] [--detach] [--review=yes] [--verbose] COMMAND [ARG...]
+       askdo [-u USER] [-k] [-n] (-s | -i) [--reason TEXT] [--] [COMMAND [ARG...]]
+       askdo [-u USER] [-k] [-n] -v
+       askdo -k
+       askdo -K
+       askdo [-u USER] -l
        askdo [--reason TEXT] --bundle DIR --entry FILE [--bundle-include-sensitive FILE]... [--] [ARG...]
        askdo [--reason TEXT] --script PATH [--bundle-include-sensitive FILE] [--] [ARG...]
        askdo status|attach JOB_ID
@@ -29,6 +34,17 @@ func writeTopHelp(w io.Writer) {
 Run COMMAND with privilege after approval. Use -- before COMMAND if its name
 collides with an askdo subcommand (including a legacy operator command) or starts
 with -; command flags are passed through unchanged either way.
+
+Sudo-style options:
+  -k, --reset-timestamp   like sudo -k: forget this terminal's approval (with COMMAND: ask again this once)
+  -K, --remove-timestamp  like sudo -K: forget approvals on all your terminals
+  -v, --validate          like sudo -v: refresh the approval window without running anything
+  -n, --non-interactive   like sudo -n: fail instead of waiting for a Telegram card
+  -s, --shell             like sudo -s: run the target's shell (with COMMAND: shell -c)
+  -i, --login             like sudo -i: run the target's login shell in its home
+  -l, --list              like sudo -l: show your askdo permissions and approval window
+
+-v requires timestamp_timeout to be enabled for your account.
 
 -u USER (or --user USER) runs COMMAND as that account instead of root, like
 sudo -u: a login name or #UID that must exist on this host. The broker
@@ -45,6 +61,8 @@ omitting -u for root) requires fresh approval and replaces the window on handoff
                                               the shell does not read # as
                                               a comment
   askdo -u tyme --reason 'Rebuild' make       with runner flags before COMMAND
+  askdo -u tyme -i                           target's login shell in its home
+  askdo -n /usr/bin/id                       fail if human approval is needed
 
 Upgrade requires human approval and needs no sudo. Without --release, it selects
 the newest stable release, or a prerelease if none exists. --operation resumes

@@ -288,22 +288,25 @@ resolved execution target UID, skip the tap while the timestamp is valid. A logi
 name and `#UID` for the same account share the window. Changing target (including
 omitting `-u` to run as root) requires fresh approval; its successful handoff
 replaces the window with the new target. Each successful handoff resets expiry to
-the dispatch time plus the configured timeout. `askdo -v` can also create or
-refresh a window without executing a command: a valid window is refreshed
-immediately; otherwise the caller approves a no-op validation in Telegram.
+the dispatch time plus the configured timeout. `askdo -v` (`--validate`) can also
+create or refresh a window without executing a command: a valid window is
+refreshed immediately; otherwise the caller approves a no-op validation in Telegram.
 This requires an enabled `timestamp_timeout` for the caller. Validation itself
 does not run an AI review or a command; AI-required commands remain AI-required.
 
-`askdo -k` alone invalidates this terminal's timestamp, irrespective of target.
+`askdo -k` (`--reset-timestamp`) alone invalidates this terminal's timestamp,
+irrespective of target.
 With a command, `-k` ignores the saved timestamp for that request and leaves the
-saved window unchanged, even after fresh approval. `askdo -K` removes all of the
-caller's timestamps on all terminals and accepts no command. Neither removal
-needs approval or changes the configured timeout. `askdo -l` shows the timeout
+saved window unchanged, even after fresh approval. `askdo -K`
+(`--remove-timestamp`) removes all of the caller's timestamps on all terminals
+and accepts no command. Neither removal needs approval or changes the configured
+timeout. `askdo -l` shows the timeout
 and remaining time on this terminal for the selected target (`-u`, root by
 default), alongside group membership, review/exemption and auto-approval policy.
 
-`askdo -n` never waits for a human: valid foreground timestamp reuse or eligible
-detached risk-based auto-approval can proceed. Otherwise it exits 1 with
+`askdo -n` (`--non-interactive`) never waits for a human: valid foreground timestamp
+reuse or eligible detached risk-based auto-approval can proceed. Otherwise it
+exits 1 with
 `askdo: a Telegram approval is required`; the broker never creates a pending
 Telegram card for that request. Automated AI review may still run to determine
 eligibility for risk-based auto-approval. Combining `-n -v` only refreshes an

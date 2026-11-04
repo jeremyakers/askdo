@@ -103,6 +103,31 @@ func TestHelpWordsAreNotHijackedFromCommands(t *testing.T) {
 	}
 }
 
+func TestTopLevelHelpListsSudoFlags(t *testing.T) {
+	out := captureStdout(t, func() {
+		code := runWithClient([]string{"--help"}, func(context.Context, []string, client.Options) int {
+			t.Error("help invoked the client")
+			return 99
+		})
+		if code != 0 {
+			t.Errorf("askdo --help exit=%d", code)
+		}
+	})
+	tokens := make(map[string]bool)
+	for _, token := range strings.Fields(strings.NewReplacer(",", " ", "[", " ", "]", " ", "|", " ").Replace(out)) {
+		tokens[token] = true
+	}
+	for _, flag := range []string{
+		"-k", "--reset-timestamp", "-K", "--remove-timestamp",
+		"-v", "--validate", "-n", "--non-interactive",
+		"-s", "--shell", "-i", "--login", "-l", "--list",
+	} {
+		if !tokens[flag] {
+			t.Errorf("askdo --help missing flag token %q", flag)
+		}
+	}
+}
+
 func TestAuthHelpExitsZeroWithoutIO(t *testing.T) {
 	noAuthIO(t)
 	for _, args := range [][]string{

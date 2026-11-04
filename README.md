@@ -281,6 +281,14 @@ and `#UID` for the same account share the window, but changing target (including
 back to root by omitting `-u`) needs fresh approval and replaces the window on
 successful handoff. Each successful handoff resets the window; detached jobs and
 AI-required commands never use it. It is off by default.
+
+Control that window with `-v` / `--validate` to approve or refresh without running
+a command, `-k` / `--reset-timestamp` to forget this terminal's approval, or
+`-K` / `--remove-timestamp` to forget approvals on all your terminals. With a
+command, `-k` asks again for that request without changing the saved window.
+Use `-n` / `--non-interactive` to fail with exit 1 instead of waiting for Telegram
+when neither timestamp reuse nor eligible auto-approval can authorize the command.
+The reset/remove operations need no approval and leave the timeout enabled.
 See [timestamp_timeout and approval reuse](docs/configuration.md#sliding-foreground-approval-timestamps).
 
 Headless agents get streamed output and a job ID they can return to later. If
