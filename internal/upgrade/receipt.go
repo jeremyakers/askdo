@@ -60,10 +60,13 @@ var receiptStates = map[string]bool{
 
 // Receipt is one versioned upgrade operation record.
 type Receipt struct {
-	Version         int    `json:"version"`
-	ID              string `json:"id"`
-	Release         string `json:"release"`
-	SourceCommit    string `json:"source_commit"`
+	Version      int    `json:"version"`
+	ID           string `json:"id"`
+	Release      string `json:"release"`
+	SourceCommit string `json:"source_commit"`
+	// PlanDigest binds the exact approved bytes outside the mutable stage.
+	// Legacy receipts remain readable/reconcilable, but cannot activate.
+	PlanDigest      string `json:"plan_digest,omitempty"`
 	State           string `json:"state"`
 	Stage           string `json:"stage"`
 	Detail          string `json:"detail"`
@@ -245,6 +248,12 @@ func writeReceipt(root string, receipt Receipt) error {
 // Scheduled receipts past their activation deadline are first failed under
 // this same lock, so a helper that never started cannot wedge later upgrades.
 func NewOperation(root, id, release, sourceCommit, stage string) (func(), error) {
+	return newOperation(root, id, release, sourceCommit, stage, "")
+}
+
+// Schedule supplies the approved plan digest before the first durable receipt
+// is published. NewOperation retains compatibility for unbound legacy records.
+func newOperation(root, id, release, sourceCommit, stage, planDigest string) (func(), error) {
 	if err := validateOperationID(id); err != nil {
 		return nil, err
 	}
@@ -322,6 +331,7 @@ func NewOperation(root, id, release, sourceCommit, stage string) (func(), error)
 		ID:              id,
 		Release:         release,
 		SourceCommit:    sourceCommit,
+		PlanDigest:      planDigest,
 		State:           stateScheduled,
 		Stage:           stage,
 		UpdatedAtUnixMS: time.Now().UnixMilli(),
@@ -378,6 +388,9 @@ func ReadReceipt(root, id string) (Receipt, error) {
 	}
 	if err := validateReceiptFields(receipt.Release, receipt.SourceCommit, receipt.Stage, receipt.Detail); err != nil {
 		return Receipt{}, fmt.Errorf("malformed receipt %s: %w", id, err)
+	}
+	if receipt.PlanDigest != "" && !digestFormatRE.MatchString(receipt.PlanDigest) {
+		return Receipt{}, fmt.Errorf("receipt %s has invalid approved plan digest", id)
 	}
 	if receipt.UpdatedAtUnixMS <= 0 {
 		return Receipt{}, fmt.Errorf("receipt %s has non-positive timestamp %d", id, receipt.UpdatedAtUnixMS)
