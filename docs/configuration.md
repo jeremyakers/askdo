@@ -265,9 +265,12 @@ for the distinction between fixture checks and deployment evidence.
 
 The first foreground unreviewed command still needs Telegram approval. Only a
 successful handoff to the original client starts the window. Later unreviewed
-commands from the same authenticated UID and controlling terminal skip the tap
-while the timestamp is valid, and each successful handoff resets expiry to the
-dispatch time plus the configured timeout. There is no session-start command.
+commands from the same authenticated UID and controlling terminal, for the same
+resolved execution target UID, skip the tap while the timestamp is valid. A login
+name and `#UID` for the same account share the window. Changing target (including
+omitting `-u` to run as root) requires fresh approval; its successful handoff
+replaces the window with the new target. Each successful handoff resets expiry to
+the dispatch time plus the configured timeout. There is no session-start command.
 
 The identity includes the kernel TTY session, device and inode, not the command's
 PID or process start time. A different UID or terminal cannot reuse it. Like
