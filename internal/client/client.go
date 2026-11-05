@@ -203,6 +203,9 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		// validated here too instead of only reaching the broker.
 		(resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "")
 	if administrative {
+		if (removeTimestamp || resetTimestamp) && targetUser != "" {
+			return usageError(options, "-k and -K do not accept a target user")
+		}
 		if len(rest) != 0 || bundle != "" || script != "" || shell || login || detach || entry != "" ||
 			removeTimestamp && (resetTimestamp || validateTimestamp || list) || list && (resetTimestamp || validateTimestamp) {
 			return usageError(options, "-k, -K, -v and -l do not accept commands or execution modes")
@@ -240,9 +243,10 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	// The caller's own working directory is part of the request: both argv
 	// and bundle executions run there. Capture it before any submission so
 	// the broker can bind the exact directory. A missing/unusable cwd is a
-	// hard local error — there is no silent substitute directory.
+	// hard local error for ordinary and bundle execution. Login mode replaces
+	// it with the target home, so a deleted caller directory is irrelevant.
 	invocationDir, err := os.Getwd()
-	if err != nil {
+	if err != nil && !login {
 		fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
 		return 125
 	}

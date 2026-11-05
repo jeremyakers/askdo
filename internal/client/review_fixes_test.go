@@ -194,3 +194,49 @@ func TestSudoShellLookupHonorsTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestSudoResetRemoveRejectsTargetUser(t *testing.T) {
+	// Given an administrative revocation combined with a target account.
+	for _, args := range [][]string{{"-k", "-u", "tyme"}, {"-K", "-u", "root"}} {
+		socket, requests := timestampObserver(t)
+		var stdout, stderr bytes.Buffer
+		// When the invocation is parsed.
+		code := Run(context.Background(), args, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+		// Then it is refused before any timestamp can be revoked.
+		if code != 125 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		noRevocation(t, requests)
+	}
+}
+
+func TestLoginDoesNotRequireCallerWorkingDirectory(t *testing.T) {
+	// Given a deleted caller working directory, which login mode never uses.
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	socket, bodies := captureSubmitWire(t)
+	var stdout, stderr bytes.Buffer
+	// When a login shell is requested.
+	code := Run(context.Background(), []string{"-i", "--detach", "echo", "home"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+	// Then it starts in the target home without reading the stale caller CWD.
+	if code != 0 {
+		t.Fatalf("login failed from deleted cwd: exit=%d stderr=%q", code, stderr.String())
+	}
+	var request proto.SubmitRequest
+	if err := proto.StrictUnmarshal(<-bodies, &request); err != nil {
+		t.Fatal(err)
+	}
+	if !request.LoginShell || request.CWD != "/root" {
+		t.Fatalf("login request=%+v", request)
+	}
+}
