@@ -323,3 +323,18 @@ func TestValidateDoesNotRequireCallerWorkingDirectory(t *testing.T) {
 		t.Fatalf("validation request=%+v", request)
 	}
 }
+
+func TestSudoAdministrativeActionsRejectReviewFlag(t *testing.T) {
+	// Given an administrative timestamp action combined with --review=yes.
+	for _, args := range [][]string{{"-K", "--review=yes"}, {"-k", "--review=yes"}, {"-l", "--review=yes"}} {
+		socket, requests := timestampObserver(t)
+		var stdout, stderr bytes.Buffer
+		// When the invocation is parsed.
+		code := Run(context.Background(), args, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+		// Then it is rejected before touching timestamp state.
+		if code != 125 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		noRevocation(t, requests)
+	}
+}

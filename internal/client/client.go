@@ -214,6 +214,9 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		if (removeTimestamp || resetTimestamp) && !validateTimestamp && targetUser != "" {
 			return usageError(options, "-k and -K do not accept a target user")
 		}
+		if (removeTimestamp || resetTimestamp && !validateTimestamp || list) && bool(review) {
+			return usageError(options, "administrative timestamp actions do not accept --review")
+		}
 		// --bundle-include-sensitive is an execution-only bundle option: the
 		// early timestamp dispatch ignores it entirely, so accepting it would
 		// revoke or refresh state while silently dropping part of the request.

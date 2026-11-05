@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os/user"
@@ -130,7 +131,15 @@ func (d *daemon) timestampWindowAuthority(ctx context.Context, cfg *config.Confi
 }
 
 func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.TimestampRequest) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// A timestamp request is one request/response exchange. Once its frame is
+	// read, watch for the peer closing the connection so a disconnected client
+	// cannot leave a Fleet catalogue lookup occupying admission for other jobs.
+	go func() {
+		_, _ = io.Copy(io.Discard, conn)
+		cancel()
+	}()
 	fail := func(message string) {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: message})
 	}
