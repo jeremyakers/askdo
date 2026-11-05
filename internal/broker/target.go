@@ -26,9 +26,32 @@ type ExecutionTarget struct {
 	Groups []uint32
 	Name   string
 	Home   string
+	// loginName and loginHome are the displayable-validated account name and
+	// passwd home recorded for every spec — including UID 0, whose Name/Home
+	// remain the unchanged pre-target zero identity. Login mode (-i) binds
+	// these instead of re-querying NSS, which would bypass the validation.
+	loginName string
+	loginHome string
 }
 
 func (t ExecutionTarget) root() bool { return t.UID == 0 }
+
+// loginIdentity returns the account name and home a login shell (-i) binds
+// into USER/LOGNAME, the manifest, bootstrap and audit. For a non-root target
+// these equal the already-validated launch identity. Root's display identity is
+// deliberately empty for the normal launch, so the login pair recorded by
+// resolveExecutionTarget passes the same displayable-name and home validation
+// here — at the point the name is actually placed in durable records — instead
+// of a second unvalidated NSS copy.
+func (t ExecutionTarget) loginIdentity(spec string) (name, home string, err error) {
+	if !displayableAccountName(t.loginName) {
+		return "", "", fmt.Errorf("account name of %q is not displayable", spec)
+	}
+	if !utf8.ValidString(t.loginHome) || len(t.loginHome) > proto.MaxExecutionHomeBytes {
+		return "", "", fmt.Errorf("home directory of %q must be valid UTF-8 and at most %d bytes", spec, proto.MaxExecutionHomeBytes)
+	}
+	return t.loginName, t.loginHome, nil
+}
 
 // gid omits the unchanged root credential but preserves GID 0 for non-root.
 func (t ExecutionTarget) gid() *uint32 {
@@ -113,7 +136,12 @@ var lookupTargetAccount = func(spec string) (*user.User, error) {
 // (login name or "#UID") against the execution host's account database at
 // admission, before anything durable exists. Only an existing account
 // qualifies; "#UID" without an account is refused like an unknown name. Root
-// by any spelling is the unchanged root launch.
+// by any spelling is the unchanged root launch: no credential change and, for
+// the normal launch, the zero display identity the pre-target job always had.
+// Every resolved account additionally records its validated name and home in
+// loginName/loginHome: login mode (-i) genuinely places the account name in
+// USER/LOGNAME, the manifest, bootstrap and audit — for UID 0 too — so it
+// must reuse this one lookup instead of copying an unvalidated NSS answer.
 func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	if spec == "" {
 		return ExecutionTarget{}, nil
@@ -132,7 +160,11 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 		return ExecutionTarget{}, fmt.Errorf("parse uid of %q: %w", spec, err)
 	}
 	if uid == 0 {
-		return ExecutionTarget{}, nil
+		// The root launch stays the unchanged zero credential, but login mode
+		// uses this account's displayable name and real passwd home, so carry
+		// them from the same validated answer. An undisplayable root alias is
+		// refused where the name is placed, not silently here.
+		return ExecutionTarget{loginName: account.Username, loginHome: account.HomeDir}, nil
 	}
 	gid, err := strconv.ParseUint(account.Gid, 10, 32)
 	if err != nil {
@@ -168,7 +200,7 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 		groups = append(groups, uint32(gid))
 	}
 	slices.Sort(groups)
-	return ExecutionTarget{UID: uint32(uid), GID: uint32(gid), Groups: groups, Name: account.Username, Home: account.HomeDir}, nil
+	return ExecutionTarget{UID: uint32(uid), GID: uint32(gid), Groups: groups, Name: account.Username, Home: account.HomeDir, loginName: account.Username, loginHome: account.HomeDir}, nil
 }
 
 // displayableAccountName reports whether an account name can be bound and

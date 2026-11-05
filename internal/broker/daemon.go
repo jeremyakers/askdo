@@ -865,20 +865,33 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
 		return
 	}
-	// Login mode binds the account home, including root's passwd entry, before
-	// the working directory descriptor and approval manifest are constructed.
+	// Login mode binds the account name and home, including root's passwd
+	// entry, before the working directory descriptor and approval manifest are
+	// constructed. -i really places that name in USER/LOGNAME, the manifest,
+	// bootstrap and audit for UID 0 too, so it must be the one identity
+	// resolveExecutionTarget already validated: re-querying NSS here would
+	// both bypass displayableAccountName for root and let an account change
+	// between the two answers redirect the launch.
 	if request.LoginShell {
 		spec := request.TargetUser
 		if spec == "" {
+			// The bare -i default target skips the account database for the
+			// normal root launch; login mode uses that account's entry, so
+			// resolve it through the same path a named target takes.
 			spec = "root"
+			target, err = resolveExecutionTarget(spec)
+			if err != nil {
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
+				return
+			}
 		}
-		account, lookupErr := lookupTargetAccount(spec)
-		if lookupErr != nil {
-			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target login account unavailable"})
+		name, home, identityErr := target.loginIdentity(spec)
+		if identityErr != nil {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + identityErr.Error()})
 			return
 		}
-		target.Name, target.Home = account.Username, account.HomeDir
-		request.CWD = account.HomeDir
+		target.Name, target.Home = name, home
+		request.CWD = home
 	}
 	// Bundles (--bundle, --script) are staged in the root-private spool
 	// (0700 root), which a non-root target cannot traverse: the approved

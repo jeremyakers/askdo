@@ -49,6 +49,40 @@ func TestSudoValidationOutcomeAuthorizationKind(t *testing.T) {
 	}
 }
 
+func TestSudoValidationRefreshesFutureDatedRecord(t *testing.T) {
+	// Given a stored window whose ApprovedAt is in the future (the clock moved
+	// backward): timestampExpiry rejects it, so the user is prompted.
+	var approvals atomic.Int32
+	cfg, uid := timestampConfig(t)
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	key := setTimestampPeer(h, uid)
+	now := time.Now()
+	if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(time.Hour), ExpiresAt: now.Add(2 * time.Hour), AuthorityHash: timestampAuthority(cfg, uid)}); err != nil {
+		t.Fatal(err)
+	}
+	// When a fresh -v validation is approved.
+	req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+	req.Argv, req.ValidateTimestamp = []string{"/bin/true"}, true
+	body := submitAndReadTerminal(t, h.socket, req)
+	var result proto.ResultEvent
+	if err := json.Unmarshal(body, &result); err != nil || result.State != "finished" {
+		t.Fatalf("validation=%s err=%v", body, err)
+	}
+	if approvals.Load() != 1 {
+		t.Fatalf("future record was reused without a fresh approval: %d", approvals.Load())
+	}
+	// Then the replacement is accepted despite the older stored ApprovedAt:
+	// the unusable future row is gone and the window is refreshed to now.
+	end := time.Now()
+	stamp, err := h.daemon.store.PeekApprovalTimestamp(context.Background(), key)
+	if err != nil || stamp.ApprovedAt.IsZero() || stamp.ApprovedAt.After(end) || stamp.ExpiresAt.Sub(stamp.ApprovedAt) != time.Minute {
+		t.Fatalf("future record survived validation: %+v err=%v", stamp, err)
+	}
+	if stamp.AuthorityHash != timestampAuthority(cfg, uid) {
+		t.Fatalf("refreshed record authority=%s", stamp.AuthorityHash)
+	}
+}
+
 func TestSudoValidationConsumedExpiryTerminatesClient(t *testing.T) {
 	t.Setenv("TERM", "xterm")
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

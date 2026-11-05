@@ -63,7 +63,14 @@ func (store *Store) CompleteTimestampValidation(ctx context.Context, requestID, 
 	if err != nil || n == 0 {
 		return false, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO approval_timestamps (uid,tty_session,tty_rdev,tty_inode,boot_id,approved_at,expires_at,authority_hash) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(uid,tty_session,tty_rdev,tty_inode,boot_id) DO UPDATE SET approved_at=excluded.approved_at, expires_at=excluded.expires_at, authority_hash=excluded.authority_hash WHERE excluded.approved_at > approval_timestamps.approved_at`, stamp.UID, stamp.TTYSession, int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UnixNano(), stamp.ExpiresAt.UnixNano(), stamp.AuthorityHash)
+	// Fresh validation replaces the stored window when it is newer (normal
+	// sliding) and also when the stored ApprovedAt is itself in the future
+	// relative to now: a backward clock step makes that row permanently
+	// unusable (every expiry check rejects approvals dated ahead of the
+	// clock), and refusing the refresh would prompt forever. Rows dated at or
+	// before now are never moved backward, so a delayed write from an older
+	// approval keeps monotonic behavior.
+	_, err = tx.ExecContext(ctx, `INSERT INTO approval_timestamps (uid,tty_session,tty_rdev,tty_inode,boot_id,approved_at,expires_at,authority_hash) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(uid,tty_session,tty_rdev,tty_inode,boot_id) DO UPDATE SET approved_at=excluded.approved_at, expires_at=excluded.expires_at, authority_hash=excluded.authority_hash WHERE excluded.approved_at > approval_timestamps.approved_at OR approval_timestamps.approved_at > ?`, stamp.UID, stamp.TTYSession, int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UnixNano(), stamp.ExpiresAt.UnixNano(), stamp.AuthorityHash, time.Now().UTC().UnixNano())
 	if err != nil {
 		return false, err
 	}
@@ -139,11 +146,10 @@ func (store *Store) GetForegroundAuthorizationSource(requestID string) (string, 
 }
 
 // ClearApprovalTimestamps permanently revokes all stored approval windows for a
-// user, including a later re-enable with the same approval authority.
+// user, including a later re-enable with the same approval authority. UID 0 is
+// a user with a timestamp_timeout and windows like any other, so removing root's
+// windows by UID is valid; the caller identity is kernel-authenticated upstream.
 func (store *Store) ClearApprovalTimestamps(ctx context.Context, uid uint32) error {
-	if uid == 0 {
-		return errors.New("clear approval timestamps requires a user")
-	}
 	_, err := store.db.ExecContext(ctx, `DELETE FROM approval_timestamps WHERE uid = ?`, uid)
 	if err != nil {
 		return fmt.Errorf("clear approval timestamps: %w", err)

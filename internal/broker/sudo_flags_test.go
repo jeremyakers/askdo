@@ -172,6 +172,49 @@ func sudoWire(t *testing.T, req proto.SubmitRequest, field string) map[string]an
 	return wire
 }
 
+func TestSudoRemoveTimestampAsRootClearsRootWindows(t *testing.T) {
+	// Given an askdo -K exchange from a peer the broker authenticates as UID 0
+	// while root has an approval window on this terminal and another user has
+	// one too. Root has a timestamp_timeout and windows like anyone else.
+	cfg, uid := timestampConfig(t)
+	cfg.Review.ApprovalTimestampUsers["root"] = 60
+	if err := cfg.Review.ResolveApprovalTimestampUsers(); err != nil {
+		t.Skipf("root timestamp policy unavailable: %v", err)
+	}
+	h := newBrokerHarnessWithConfig(t, nil, nil, cfg)
+	h.peerUID.Store(0)
+	rootKey := store.ApprovalTimestampKey{UID: 0, TTYSession: 12, TTYRdev: 34817, TTYInode: 789, BootID: "test-boot"}
+	var pid atomic.Int64
+	pid.Store(4321)
+	h.daemon.bootID = "test-boot"
+	h.daemon.peerPID = func(*net.UnixConn) (int64, error) { return pid.Add(1), nil }
+	h.daemon.ttyEvidence = func(pid int64) (ttyIdentity, error) {
+		return ttyIdentity{starttime: pid, session: 12, rdev: 34817, inode: 789}, nil
+	}
+	now := time.Now().Add(-time.Second)
+	foreign := store.ApprovalTimestampKey{UID: uid, TTYSession: 12, TTYRdev: 34817, TTYInode: 789, BootID: "test-boot"}
+	for _, k := range []store.ApprovalTimestampKey{rootKey, foreign} {
+		if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), store.ApprovalTimestamp{ApprovalTimestampKey: k, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: strings.Repeat("a", 64)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// When the root caller asks to remove all of its timestamps.
+	body := sudoExchange(t, h, map[string]any{"op": "timestamp", "action": "remove"})
+	if !strings.Contains(string(body), `"op":"timestamp_status"`) {
+		t.Fatalf("remove: %s", body)
+	}
+	// Then the broker reports success AND the root window is gone, while the
+	// other UID's window is untouched: removal applies to the caller's UID.
+	stamp, err := h.daemon.store.GetApprovalTimestamp(context.Background(), rootKey)
+	if err != nil || !stamp.ApprovedAt.IsZero() {
+		t.Fatalf("remove as root left a window: %+v %v", stamp, err)
+	}
+	stamp, err = h.daemon.store.GetApprovalTimestamp(context.Background(), foreign)
+	if err != nil || stamp.ApprovedAt.IsZero() {
+		t.Fatalf("remove as root revoked another user: %+v %v", stamp, err)
+	}
+}
+
 func TestSudoTimestampResetAndRemove(t *testing.T) {
 	var approvals atomic.Int32
 	cfg, uid := timestampConfig(t)

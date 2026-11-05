@@ -83,11 +83,10 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 		}
 	}
 	if request.Action == "remove" {
-		if uid != 0 {
-			err = d.store.ClearApprovalTimestamps(ctx, uid)
-		} else {
-			err = nil
-		}
+		// Root has a timestamp_timeout and terminal windows like any other
+		// UID, so removal must revoke the UID 0 rows too. The caller identity
+		// is kernel-authenticated via SO_PEERCRED, never client-supplied.
+		err = d.store.ClearApprovalTimestamps(ctx, uid)
 		if err != nil {
 			fail("remove approval timestamps failed")
 			return

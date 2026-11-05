@@ -189,10 +189,28 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	if shell && login || (shell || login) && (bundle != "" || script != "" || entry != "") {
 		return usageError(options, "-s/--shell and -i/--login are mutually exclusive and require argv mode")
 	}
-	if removeTimestamp || validateTimestamp || list {
-		if len(rest) != 0 || bundle != "" || script != "" || shell || login || detach || entry != "" || removeTimestamp && (resetTimestamp || validateTimestamp || list) || list && (resetTimestamp || validateTimestamp) {
-			return usageError(options, "-K, -v and -l do not accept commands or execution modes")
+	// -k alone performs the same administrative terminal reset as -K and -l do
+	// theirs, but it used to bypass this check entirely: `-k --entry foo` and
+	// `-k --detach` silently revoked the terminal and reported success. Every
+	// administrative exchange is now validated before the socket is dialled,
+	// so a rejected invocation changes nothing. Execution modes (a command,
+	// --bundle, --script, --entry, -s, -i, --detach) remain refused, and the
+	// --timeout/--reason checks below moved ahead of the dispatch so an
+	// invalid value cannot skip validation by riding an administrative flag.
+	administrative := removeTimestamp || validateTimestamp || list ||
+		// -k alone is the fourth administrative exchange: same condition the
+		// reset dispatch below already uses, hoisted so its options are
+		// validated here too instead of only reaching the broker.
+		(resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "")
+	if administrative {
+		if len(rest) != 0 || bundle != "" || script != "" || shell || login || detach || entry != "" ||
+			removeTimestamp && (resetTimestamp || validateTimestamp || list) || list && (resetTimestamp || validateTimestamp) {
+			return usageError(options, "-k, -K, -v and -l do not accept commands or execution modes")
 		}
+	}
+	if timeout < 0 || strings.TrimSpace(reason) == "" {
+		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
+		return 125
 	}
 	if removeTimestamp {
 		return runTimestamp(ctx, "remove", "", options)
@@ -217,10 +235,6 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 			return usageError(options, "--script cannot be combined with --"+conflictingFlag)
 		}
 	}
-	if timeout < 0 || strings.TrimSpace(reason) == "" {
-		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
-		return 125
-	}
 	// Bundle mode with a non-root target is refused by the broker, which alone
 	// resolves the account: every UID-0 spelling (root, #0, #00, aliases) is root.
 	// The caller's own working directory is part of the request: both argv
@@ -233,9 +247,21 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		return 125
 	}
 	if shell || login {
+		// The getent/NSS account lookup is part of this invocation, not a
+		// local detail outside its budget: a stalled name service must end at
+		// the same started+timeout deadline that bounds every later exchange
+		// instead of hanging past it.
+		lookupCtx, cancelLookup := ctx, context.CancelFunc(func() {})
+		if timeout > 0 {
+			lookupCtx, cancelLookup = context.WithDeadline(ctx, started.Add(timeout))
+		}
 		var home string
-		rest, home, err = shellCommand(ctx, targetUser, rest, login)
+		rest, home, err = shellCommand(lookupCtx, targetUser, rest, login)
+		cancelLookup()
 		if err != nil {
+			if timeout > 0 && !time.Now().Before(started.Add(timeout)) {
+				return usageErrorCode(options, "askdo: shell: target account lookup timed out", 124)
+			}
 			return usageError(options, "askdo: shell: "+err.Error())
 		}
 		if login {
