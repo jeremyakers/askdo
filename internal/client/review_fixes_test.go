@@ -240,3 +240,86 @@ func TestLoginDoesNotRequireCallerWorkingDirectory(t *testing.T) {
 		t.Fatalf("login request=%+v", request)
 	}
 }
+
+func TestSudoTimestampHonorsTimeout(t *testing.T) {
+	// Given a broker that accepts a timestamp request but withholds its reply.
+	socket := filepath.Join(t.TempDir(), "request.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			defer conn.Close()
+			_, _ = proto.ReadFrame(conn, proto.MaxFrameLength)
+			time.Sleep(3 * time.Second)
+		}
+	}()
+	var stdout, stderr bytes.Buffer
+	started := time.Now()
+	// When a bounded administrative exchange waits for the reply.
+	code := Run(context.Background(), []string{"--timeout", "50ms", "-l"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr})
+	// Then the invocation deadline closes it instead of waiting indefinitely.
+	if code == 0 || time.Since(started) > 2*time.Second {
+		t.Fatalf("timeout ignored: exit=%d elapsed=%s stderr=%q", code, time.Since(started), stderr.String())
+	}
+}
+
+func TestSudoTimestampInfrastructureErrorExit125(t *testing.T) {
+	// Given a broker operational failure rather than a policy refusal.
+	socket := filepath.Join(t.TempDir(), "request.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			defer conn.Close()
+			_, _ = proto.ReadFrame(conn, proto.MaxFrameLength)
+			body, _ := json.Marshal(proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "store unavailable"})
+			_ = proto.WriteFrame(conn, body)
+		}
+	}()
+	var stdout, stderr bytes.Buffer
+	// When the broker reports that failure.
+	code := Run(context.Background(), []string{"-K"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr})
+	// Then it is an infrastructure error, not an approval-required exit.
+	if code != 125 {
+		t.Fatalf("exit=%d stderr=%q, want 125", code, stderr.String())
+	}
+}
+
+func TestValidateDoesNotRequireCallerWorkingDirectory(t *testing.T) {
+	// Given a deleted caller directory and timestamp validation, which runs no command.
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	socket, bodies := captureSubmitWire(t)
+	var stdout, stderr bytes.Buffer
+	// When validation is requested.
+	code := Run(context.Background(), []string{"-v"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal), HasControllingTTY: func() bool { return true }})
+	// Then validation proceeds with a stable broker-valid directory.
+	if code != 0 {
+		t.Fatalf("validation failed from deleted cwd: exit=%d stderr=%q", code, stderr.String())
+	}
+	var request proto.SubmitRequest
+	if err := proto.StrictUnmarshal(<-bodies, &request); err != nil {
+		t.Fatal(err)
+	}
+	if !request.ValidateTimestamp || request.CWD != "/" {
+		t.Fatalf("validation request=%+v", request)
+	}
+}
