@@ -332,3 +332,25 @@ func TestForegroundAuthorizationConstraintMigrationPreservesGrants(t *testing.T)
 		t.Fatalf("grants=%d, want 2", count)
 	}
 }
+
+func TestUpsertApprovalTimestampReplacesFutureDatedRecord(t *testing.T) {
+	// Given a stored approval timestamp dated after the current wall clock.
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	key := ApprovalTimestampKey{UID: testUID, TTYSession: 77, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	future := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(time.Hour), ExpiresAt: now.Add(2 * time.Hour), AuthorityHash: strings.Repeat("a", 64)}
+	if err := s.UpsertApprovalTimestamp(ctx, future); err != nil {
+		t.Fatal(err)
+	}
+	// When a newly approved foreground dispatch writes the current time.
+	current := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: strings.Repeat("b", 64)}
+	if err := s.UpsertApprovalTimestamp(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	// Then the unusable future row is replaced by the fresh approval.
+	got, err := s.PeekApprovalTimestamp(ctx, key)
+	if err != nil || got.ApprovedAt != current.ApprovedAt || got.ExpiresAt != current.ExpiresAt || got.AuthorityHash != current.AuthorityHash {
+		t.Fatalf("future record survived normal refresh: %+v err=%v", got, err)
+	}
+}

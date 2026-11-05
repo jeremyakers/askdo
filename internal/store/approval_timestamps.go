@@ -169,8 +169,8 @@ func (store *Store) UpsertApprovalTimestamp(ctx context.Context, stamp ApprovalT
 		(uid, tty_session, tty_rdev, tty_inode, boot_id, approved_at, expires_at, authority_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(uid, tty_session, tty_rdev, tty_inode, boot_id) DO UPDATE SET
 		approved_at = excluded.approved_at, expires_at = excluded.expires_at, authority_hash = excluded.authority_hash
-		WHERE excluded.approved_at > approval_timestamps.approved_at`, stamp.UID, stamp.TTYSession,
-		int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UTC().UnixNano(), stamp.ExpiresAt.UTC().UnixNano(), stamp.AuthorityHash)
+		WHERE excluded.approved_at > approval_timestamps.approved_at OR approval_timestamps.approved_at > ?`, stamp.UID, stamp.TTYSession,
+		int64(stamp.TTYRdev), int64(stamp.TTYInode), stamp.BootID, stamp.ApprovedAt.UTC().UnixNano(), stamp.ExpiresAt.UTC().UnixNano(), stamp.AuthorityHash, time.Now().UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("write approval timestamp: %w", err)
 	}
