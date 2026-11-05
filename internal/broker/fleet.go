@@ -383,10 +383,21 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 		withholding = append(withholding, refs...)
 	}
 	targetName := j.target.Name
+	targetLogin := false
 	if j.target.root() {
-		targetName = ""
-	} // Fleet uses an absent name for UID 0, including login shells.
-	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: targetName}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
+		// Fleet uses an absent name for UID 0, including login shells, with
+		// one exception: a login shell (-i) whose account database resolved
+		// a real alias (for example toor). That alias — not "root" — is what
+		// USER/LOGNAME, the reviewer bootstrap, the manifest and the audit
+		// carry for the job, so the display preserves it and the marker
+		// makes the aliased ticket a distinct validated contract. The
+		// canonical spelling stays the unchanged plain-root identity.
+		targetLogin = j.req.LoginShell && targetName != "" && targetName != "root"
+		if !targetLogin {
+			targetName = ""
+		}
+	}
+	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: targetName, TargetLogin: targetLogin}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
 	display.CapturedStdinKind = j.capturedKind()
 	profilesHash, err := fleetproto.HashProfiles(f.selection.Profiles)
 	if err != nil {

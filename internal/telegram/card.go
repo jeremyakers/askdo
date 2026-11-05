@@ -108,12 +108,17 @@ type ApprovalOnlyInput struct {
 	WithheldCount                                                             int
 }
 
-// targetLabel names the execution identity: "root", a resolved account as
+// targetLabel names the execution identity: a resolved account name as
 // "name (uid N)" (the name rendered through escape, which already bounds and
-// strips controls), or a bare "uid N" when no name is known.
+// strips controls), "root" for the plain UID 0 launch, or a bare "uid N"
+// when no name is known. A UID-0 login alias (for example toor) reaches here
+// with its resolved name, so the card matches the reviewer bootstrap,
+// manifest and audit. The canonical spelling "root" keeps the unchanged
+// label byte-for-byte, and the Fleet identity contract guarantees a UID-0
+// name only for such an alias.
 func targetLabel(uid uint32, name string, escape func(string) string) string {
 	switch {
-	case uid == 0:
+	case uid == 0 && (name == "" || name == "root"):
 		return "root"
 	case name != "":
 		return fmt.Sprintf("%s (uid %d)", escape(name), uid)

@@ -87,28 +87,28 @@ func shellCommand(ctx context.Context, target string, args []string, login bool)
 func runTimestamp(ctx context.Context, action, target string, options Options) int {
 	conn, err := dial(ctx, options.SocketPath)
 	if err != nil {
-		return usageError(options, "askdo: "+err.Error())
+		return timestampFailure(ctx, options, "askdo: "+err.Error())
 	}
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	if err := send(conn, proto.TimestampRequest{Op: "timestamp", Action: action, TargetUser: target}); err != nil {
-		return usageError(options, "askdo: timestamp request failed")
+		return timestampFailure(ctx, options, "askdo: timestamp request failed")
 	}
 	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
 	if err != nil {
-		return usageError(options, "askdo: timestamp response failed")
+		return timestampFailure(ctx, options, "askdo: timestamp response failed")
 	}
 	var kind struct {
 		Op string `json:"op"`
 	}
 	if json.Unmarshal(body, &kind) != nil {
-		return usageError(options, "askdo: invalid timestamp response")
+		return timestampFailure(ctx, options, "askdo: invalid timestamp response")
 	}
 	if kind.Op == "error" {
 		var event proto.ErrorEvent
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil {
-			return usageError(options, "askdo: invalid broker error")
+			return timestampFailure(ctx, options, "askdo: invalid broker error")
 		}
 		if event.Code == "broker_error" {
 			return usageError(options, "askdo: "+event.Message)
@@ -117,10 +117,24 @@ func runTimestamp(ctx context.Context, action, target string, options Options) i
 	}
 	var event proto.TimestampStatusEvent
 	if proto.StrictUnmarshal(body, &event) != nil || event.Op != "timestamp_status" {
-		return usageError(options, "askdo: invalid timestamp response")
+		return timestampFailure(ctx, options, "askdo: invalid timestamp response")
 	}
 	if action == "list" {
 		fmt.Fprintf(options.Stdout, "askdo group membership: %t\nAI review mode: %s; required: %t; exempt: %t\nTimestamp timeout: %ds; remaining on this terminal: %ds\nAuto-approval: cap %d, preference %d, effective %d (0 = off)\n", event.AskdoGroup, event.ReviewMode, event.ReviewRequired, !event.ReviewRequired, event.TimestampTimeoutSeconds, event.RemainingSeconds, event.AutoApprovalMaxRisk, event.AutoApprovalThreshold, event.AutoApprovalEffective)
 	}
 	return 0
+}
+
+// timestampFailure reports an administrative timestamp exchange that could not
+// complete. When the caller's context deadline is what ended the exchange (the
+// broker withheld -l/-k/-K until --timeout expired, which surfaces as a socket
+// dial/read failure), the exit is the protocol's timeout code 124, matching
+// every other bounded stage of the invocation. A broker that answered with a
+// broker_error event still reaches usageError (125) above: the two codes stay
+// distinguishable, and a refusal that requires approval stays 1.
+func timestampFailure(ctx context.Context, options Options, message string) int {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return usageErrorCode(options, "askdo: timestamp request timed out", 124)
+	}
+	return usageError(options, message)
 }

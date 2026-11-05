@@ -32,9 +32,19 @@ import (
 type fleetAuthorityGateway struct {
 	snapshot   fleetproto.RouteSnapshot
 	catalogues atomic.Int32
+	// delayFrom makes that-numbered (1-based) and every later catalogue
+	// answer arrive only after delay, and drops it when the caller gives up
+	// (request context ends) so httptest Close never blocks on a parked
+	// handler. delay itself is guarded by the context too.
+	delayFrom atomic.Int32
+	delay     time.Duration
 }
 
 func newFleetAuthorityGateway(t *testing.T, cfg *config.Config, uid uint32) *fleetAuthorityGateway {
+	return newFleetAuthorityGatewayDelayed(t, cfg, uid, 0)
+}
+
+func newFleetAuthorityGatewayDelayed(t *testing.T, cfg *config.Config, uid uint32, delay time.Duration) *fleetAuthorityGateway {
 	t.Helper()
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -42,11 +52,18 @@ func newFleetAuthorityGateway(t *testing.T, cfg *config.Config, uid uint32) *fle
 	}
 	snapshot := fleetproto.RouteSnapshot{Version: 1, Kind: fleetproto.KindRoute, ChannelID: "fleet-ops", BotID: 42, TTLSeconds: 60, Recipients: []fleetproto.Recipient{{ChatID: 11, OperatorUserIDs: []int64{101}}}}
 	snapshot.Revision, _ = fleetproto.HashRoute(snapshot)
-	g := &fleetAuthorityGateway{snapshot: snapshot}
+	g := &fleetAuthorityGateway{snapshot: snapshot, delay: delay}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/catalog" {
 			w.WriteHeader(http.StatusNotFound)
 			return
+		}
+		if threshold := int(g.delayFrom.Load()); threshold > 0 && g.catalogues.Load() >= int32(threshold-1) {
+			select {
+			case <-time.After(g.delay):
+			case <-r.Context().Done():
+				return
+			}
 		}
 		g.catalogues.Add(1)
 		catalog := fleetproto.Catalog{Version: 1, Kind: fleetproto.KindCatalog, HostID: "host", SubmitterUID: uid, Profiles: []fleetproto.ProfileMetadata{}, Route: g.snapshot, ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}

@@ -813,6 +813,26 @@ func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.Res
 }
 
 func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func()) {
+	admitted := time.Now()
+	// The client's --timeout is a maximum measured from submission, so every
+	// stage of admission must end inside it. The fleet timestamp check below
+	// makes a synchronous gateway catalogue lookup: on context.Background()
+	// it ignored the caller's budget entirely, hung until its own frame
+	// deadline, and could reuse a window (or report approval_required) long
+	// after the client stopped waiting. Bounding admission by the request's
+	// remaining deadline makes the exchange answer at the deadline, and a
+	// lookup that cannot finish in time resolves to no usable authority —
+	// which yields approval_required, never a post-budget grant.
+	admissionCtx := context.Background()
+	if request.WaitTimeoutMS != nil {
+		budget := time.Duration(*request.WaitTimeoutMS) * time.Millisecond
+		if budget < 0 {
+			budget = 0
+		}
+		var cancelAdmission context.CancelFunc
+		admissionCtx, cancelAdmission = context.WithTimeout(context.Background(), budget)
+		defer cancelAdmission()
+	}
 	draining, finishAdmission := d.drain.Track()
 	defer finishAdmission()
 	d.mu.Lock()
@@ -940,13 +960,15 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	// A stored fleet window hashes the signed catalogue route (the job's
 	// prepareFleet-selected j.route), so the exact check needs that route;
 	// with no window stored the local hash cannot match anything and no
-	// gateway call is made.
+	// gateway call is made. The check runs under admissionCtx: the lookup
+	// must end at the request's own budget, not at the broker's internal
+	// frame deadline.
 	if request.NonInteractive {
 		var valid bool
 		if (request.ValidateTimestamp || !cfg.Review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && cfg.Review.TimestampTimeout(uid) > 0 {
 			key := d.terminalTimestampKey(uid, foreground.tty)
-			stamp, stampErr := d.store.GetApprovalTimestamp(context.Background(), key)
-			authority := d.timestampWindowAuthority(context.Background(), cfg, uid, stampErr == nil && !stamp.ApprovedAt.IsZero(), target)
+			stamp, stampErr := d.store.GetApprovalTimestamp(admissionCtx, key)
+			authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, stampErr == nil && !stamp.ApprovedAt.IsZero(), target)
 			valid = stampErr == nil && timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
 		}
 		canAuto := false
@@ -1026,9 +1048,15 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	operation := durableOperation(request, target)
+	// The wait budget the client sent is the remainder of --timeout measured
+	// when the submit frame left the client. Anchoring the durable deadline
+	// at admission start (not at job creation, which happens after the
+	// synchronous fleet authority lookup) accounts for the admission time
+	// inside the budget: a slow gateway round trip shortens the durable wait
+	// instead of buying the job extra life past the caller's maximum.
 	var deadline *time.Time
 	if request.WaitTimeoutMS != nil {
-		value := time.Now().UTC().Add(time.Duration(*request.WaitTimeoutMS) * time.Millisecond)
+		value := admitted.Add(time.Duration(*request.WaitTimeoutMS) * time.Millisecond)
 		deadline = &value
 	}
 	created, err := d.store.SubmitReservedJob(context.Background(), store.Job{UID: uid, RequestID: request.RequestID, SubmitBody: body, OperationJSON: operation, Reason: request.Reason, Mode: request.Mode, DeadlineAt: deadline, SpoolDir: spool.dir, AttemptsJSON: []byte("[]")})

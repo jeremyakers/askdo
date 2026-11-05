@@ -203,7 +203,15 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		// validated here too instead of only reaching the broker.
 		(resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "")
 	if administrative {
-		if (removeTimestamp || resetTimestamp) && targetUser != "" {
+		// Only the exchanges that genuinely take no target reject one: -K
+		// removes every terminal window of the caller and standalone -k
+		// resets this terminal's window. -k with -v is not that reset: it is
+		// sudo's force-fresh-approval validation submission, which reaches
+		// the broker as an ordinary (validated /bin/true) submit carrying
+		// reset_timestamp — and an ordinary submit may name a target. A
+		// target-less window would make `askdo -k -v -u tyme` a usage error
+		// while plain `askdo -v -u tyme` was accepted.
+		if (removeTimestamp || resetTimestamp) && !validateTimestamp && targetUser != "" {
 			return usageError(options, "-k and -K do not accept a target user")
 		}
 		// --bundle-include-sensitive is an execution-only bundle option: the
