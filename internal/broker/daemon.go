@@ -887,6 +887,15 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		}
 		name, home, identityErr := target.loginIdentity(spec)
 		if identityErr != nil {
+			// loginIdentity enforces the full working-directory contract on
+			// the broker-resolved home (nonempty, NUL-free UTF-8, clean
+			// absolute, size-bounded) before anything is bound or persisted:
+			// the account database can answer differently than the client's
+			// earlier getent lookup (an entry change between the two must not
+			// silently redirect the launch), and replacing an already
+			// validated request CWD requires the replacement to be validated
+			// by the same contract. The single validated (name, home) pair
+			// becomes the CWD, HOME and USER/LOGNAME identity together.
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + identityErr.Error()})
 			return
 		}
@@ -928,12 +937,17 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
 		return
 	}
+	// A stored fleet window hashes the signed catalogue route (the job's
+	// prepareFleet-selected j.route), so the exact check needs that route;
+	// with no window stored the local hash cannot match anything and no
+	// gateway call is made.
 	if request.NonInteractive {
 		var valid bool
 		if (request.ValidateTimestamp || !cfg.Review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && cfg.Review.TimestampTimeout(uid) > 0 {
 			key := d.terminalTimestampKey(uid, foreground.tty)
 			stamp, stampErr := d.store.GetApprovalTimestamp(context.Background(), key)
-			valid = stampErr == nil && timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target)).After(time.Now())
+			authority := d.timestampWindowAuthority(context.Background(), cfg, uid, stampErr == nil && !stamp.ApprovedAt.IsZero(), target)
+			valid = stampErr == nil && timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
 		}
 		canAuto := false
 		if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && cfg.Review.MaxAutoRisk(uid) > 0 {
@@ -1352,6 +1366,14 @@ func unixPeerPID(conn *net.UnixConn) (int64, error) {
 	return int64(credential.Pid), nil
 }
 
+// errNoControllingTerminal is the single terminal-evidence result that is a
+// genuine absence rather than a collection failure. Callers that must decide
+// between "there is no window to reset" and "I could not look" keep the
+// sentinel distinguishable with errors.Is; every other error (unreadable
+// /proc, closed fd scan, identity race) means the evidence was unavailable,
+// never that the terminal was missing.
+var errNoControllingTerminal = errors.New("no controlling terminal")
+
 // foregroundTTYIdentity reads the original process, not the broker's TTY.
 // A live open fd for the controlling device is required; stat is sampled
 // again afterwards to detect PID reuse or a changed session/terminal.
@@ -1372,8 +1394,11 @@ func foregroundTTYIdentity(pid int64) (ttyIdentity, error) {
 		session, e1 := strconv.ParseInt(fields[3], 10, 64)
 		tty, e2 := strconv.ParseInt(fields[4], 10, 32)
 		start, e3 := strconv.ParseInt(fields[19], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || session <= 0 || tty == 0 || start <= 0 {
-			return 0, 0, 0, errors.New("no controlling terminal or invalid process stat")
+		if e1 != nil || e2 != nil || e3 != nil || start <= 0 {
+			return 0, 0, 0, errors.New("invalid process stat")
+		}
+		if session <= 0 || tty == 0 {
+			return 0, 0, 0, errNoControllingTerminal
 		}
 		return start, session, uint32(int32(tty)), nil
 	}

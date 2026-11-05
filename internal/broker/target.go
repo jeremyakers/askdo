@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,8 +48,15 @@ func (t ExecutionTarget) loginIdentity(spec string) (name, home string, err erro
 	if !displayableAccountName(t.loginName) {
 		return "", "", fmt.Errorf("account name of %q is not displayable", spec)
 	}
-	if !utf8.ValidString(t.loginHome) || len(t.loginHome) > proto.MaxExecutionHomeBytes {
-		return "", "", fmt.Errorf("home directory of %q must be valid UTF-8 and at most %d bytes", spec, proto.MaxExecutionHomeBytes)
+	// The home is not only displayed: login mode binds it as the job's working
+	// directory and projects it into PWD/HOME. An empty, relative, non-clean
+	// or NUL-bearing passwd home would survive display checks yet poison the
+	// CWD binding, so it must satisfy the same clean-absolute path contract the
+	// client already applied to the submitted CWD — enforced here, at the
+	// resolved-identity boundary, before anything binds or persists it. One
+	// validated home feeds the binding and USER/LOGNAME alike.
+	if home := t.loginHome; home == "" || len(home) > proto.MaxExecutionHomeBytes || !utf8.ValidString(home) || strings.ContainsRune(home, 0) || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return "", "", fmt.Errorf("home directory of %q is not a nonempty clean absolute UTF-8 working directory path of at most %d bytes", spec, proto.MaxExecutionHomeBytes)
 	}
 	return t.loginName, t.loginHome, nil
 }

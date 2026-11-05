@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os/user"
 	"strconv"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/fleetclient"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
 )
@@ -70,37 +73,115 @@ func (d *daemon) terminalTimestampKey(uid uint32, tty ttyIdentity) store.Approva
 	return store.ApprovalTimestampKey{UID: uid, TTYSession: tty.session, TTYRdev: tty.rdev, TTYInode: tty.inode, BootID: d.bootID}
 }
 
+// timestampAuthorityRoute is the approval-authority route a timestamp check
+// must hash against. A fleet-configured job binds the signed gateway
+// catalogue route — j.route as prepareFleet selects it — into its stored
+// window's authority hash, so the local per-UID Telegram route can never
+// match a fleet-created window: valid fleet windows failed non-interactive
+// reuse (askdo -n always answered approval_required) and -l always reported
+// zero remaining time. The route must therefore come from the same fleet
+// connection a new job would select: the daemon-owned client for a fixed
+// configuration, and a client built from the current configuration for a
+// reload daemon whose fleet section may postdate startup. Callers consult
+// this only when a window is actually stored, so local users never pay a
+// gateway round trip. When the route cannot be resolved or authenticated
+// right now, the exact fleet route is unknowable; falling back to the local
+// comparison (which yields no window, never a false grant) is an explicitly
+// bounded limitation rather than a new availability prerequisite for the
+// exchange.
+func (d *daemon) timestampAuthorityRoute(ctx context.Context, cfg *config.Config, uid uint32) config.TelegramRoute {
+	route := cfg.Telegram.RouteForUID(uid)
+	if cfg.Fleet == nil {
+		return route
+	}
+	connection, closeConnection := d.fleet, func() {}
+	if d.reloadConfig {
+		client, err := fleetclient.New(*cfg.Fleet)
+		if err != nil {
+			slog.Warn("fleet timestamp authority connection unavailable", "uid", uid, "error", err)
+			return route
+		}
+		connection, closeConnection = client, client.Close
+	}
+	defer closeConnection()
+	if connection == nil {
+		return route
+	}
+	ctx, cancel := context.WithTimeout(ctx, frameDeadline)
+	defer cancel()
+	catalog, err := connection.Catalogue(ctx, uid)
+	if err != nil {
+		slog.Warn("fleet timestamp authority route unavailable", "uid", uid, "error", err)
+		return route
+	}
+	return fleetTelegramRoute(cfg.Fleet, catalog.Route)
+}
+
+// timestampWindowAuthority resolves the exact authority hash a stored window
+// must match for this caller: the plain local-route hash without a fleet
+// configuration (or with no window stored to compare against), and the hash
+// built from the selected fleet route otherwise.
+func (d *daemon) timestampWindowAuthority(ctx context.Context, cfg *config.Config, uid uint32, stored bool, target ExecutionTarget) string {
+	route := cfg.Telegram.RouteForUID(uid)
+	if stored {
+		route = d.timestampAuthorityRoute(ctx, cfg, uid)
+	}
+	return approvalAuthorityHash(route, cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target)
+}
+
 func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.TimestampRequest) {
 	ctx := context.Background()
 	fail := func(message string) {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: message})
 	}
 	var key store.ApprovalTimestampKey
-	pid, err := d.peerPID(conn)
-	if err == nil && pid > 0 {
-		if tty, ttyErr := d.ttyEvidence(pid); ttyErr == nil {
+	// evidenceFailed records that terminal evidence could not be collected at
+	// all (a /proc read failure, an unreadable peer credential). That is NOT
+	// the same as genuinely having no controlling terminal: the window may
+	// exist but remain unlocatable. Silently following the zero-key path made
+	// `askdo -k` report success while revoking nothing, and made -l claim
+	// zero remaining time it never measured. reset and list fail closed as
+	// broker errors when collection fails; remove clears every terminal of
+	// the caller's UID and needs no evidence at all, so it is unaffected.
+	var keyErr error
+	pid, pidErr := d.peerPID(conn)
+	if pidErr != nil {
+		keyErr = pidErr
+	} else if pid > 0 {
+		tty, ttyErr := d.ttyEvidence(pid)
+		if ttyErr != nil {
+			if !errors.Is(ttyErr, errNoControllingTerminal) {
+				keyErr = ttyErr
+			}
+		} else if tty.session > 0 && tty.rdev > 0 && tty.inode > 0 {
 			key = d.terminalTimestampKey(uid, tty)
 		}
+	}
+	if (request.Action == "reset" || request.Action == "list") && keyErr != nil {
+		// Evidence collection failed (unreadable peer credential or /proc):
+		// the terminal window may exist but cannot be located. reset must not
+		// claim a revocation it did not perform, and list must not report the
+		// zero remaining time of a directory it never read. Genuinely having
+		// no controlling terminal (errNoControllingTerminal) is not an error:
+		// reset there is a no-op success, like sudo -k without a tty.
+		fail("read controlling terminal evidence failed")
+		return
 	}
 	if request.Action == "remove" {
 		// Root has a timestamp_timeout and terminal windows like any other
 		// UID, so removal must revoke the UID 0 rows too. The caller identity
 		// is kernel-authenticated via SO_PEERCRED, never client-supplied.
-		err = d.store.ClearApprovalTimestamps(ctx, uid)
-		if err != nil {
+		if err := d.store.ClearApprovalTimestamps(ctx, uid); err != nil {
 			fail("remove approval timestamps failed")
 			return
 		}
 	} else if request.Action == "reset" {
 		// No controlling terminal means there is no terminal timestamp to reset.
 		if key.TTYSession > 0 && key.TTYRdev > 0 && key.TTYInode > 0 {
-			err = d.store.ClearTerminalApprovalTimestamp(ctx, key)
-		} else {
-			err = nil
-		}
-		if err != nil {
-			fail("reset approval timestamp failed")
-			return
+			if err := d.store.ClearTerminalApprovalTimestamp(ctx, key); err != nil {
+				fail("reset approval timestamp failed")
+				return
+			}
 		}
 	}
 	event := proto.TimestampStatusEvent{Op: "timestamp_status"}
@@ -140,7 +221,13 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 			fail("read approval timestamp failed")
 			return
 		}
-		expiry := timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), approvalAuthorityHash(cfg.Telegram.RouteForUID(uid), cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target))
+		// Stored authority hashes come from a job's approvalAuthorityHash,
+		// which uses the job's selected route: the signed gateway catalogue's
+		// route when Fleet is configured, the local per-UID route otherwise.
+		// Reporting remaining time from the local route instead would never
+		// match a fleet-created window (finding: -l always showed zero).
+		authority := d.timestampWindowAuthority(ctx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
+		expiry := timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority)
 		if expiry.After(time.Now()) {
 			event.RemainingSeconds = int64(time.Until(expiry).Seconds())
 		}

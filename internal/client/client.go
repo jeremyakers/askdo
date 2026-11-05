@@ -206,7 +206,10 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		if (removeTimestamp || resetTimestamp) && targetUser != "" {
 			return usageError(options, "-k and -K do not accept a target user")
 		}
-		if len(rest) != 0 || bundle != "" || script != "" || shell || login || detach || entry != "" ||
+		// --bundle-include-sensitive is an execution-only bundle option: the
+		// early timestamp dispatch ignores it entirely, so accepting it would
+		// revoke or refresh state while silently dropping part of the request.
+		if len(rest) != 0 || bundle != "" || len(sensitive) != 0 || script != "" || shell || login || detach || entry != "" ||
 			removeTimestamp && (resetTimestamp || validateTimestamp || list) || list && (resetTimestamp || validateTimestamp) {
 			return usageError(options, "-k, -K, -v and -l do not accept commands or execution modes")
 		}
