@@ -215,14 +215,19 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
 		return 125
 	}
+	timestampCtx, cancelTimestamp := ctx, context.CancelFunc(func() {})
+	if timeout > 0 {
+		timestampCtx, cancelTimestamp = context.WithDeadline(ctx, started.Add(timeout))
+	}
+	defer cancelTimestamp()
 	if removeTimestamp {
-		return runTimestamp(ctx, "remove", "", options)
+		return runTimestamp(timestampCtx, "remove", "", options)
 	}
 	if list {
-		return runTimestamp(ctx, "list", targetUser, options)
+		return runTimestamp(timestampCtx, "list", targetUser, options)
 	}
 	if resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "" {
-		return runTimestamp(ctx, "reset", "", options)
+		return runTimestamp(timestampCtx, "reset", "", options)
 	}
 	if validateTimestamp {
 		rest = []string{"/bin/true"}
@@ -247,8 +252,12 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	// it with the target home, so a deleted caller directory is irrelevant.
 	invocationDir, err := os.Getwd()
 	if err != nil && !login {
-		fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
-		return 125
+		if !validateTimestamp {
+			fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
+			return 125
+		}
+		// Timestamp validation executes no command and needs no caller CWD.
+		invocationDir, err = "/", nil
 	}
 	if shell || login {
 		// The getent/NSS account lookup is part of this invocation, not a

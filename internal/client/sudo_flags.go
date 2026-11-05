@@ -110,6 +110,9 @@ func runTimestamp(ctx context.Context, action, target string, options Options) i
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil {
 			return usageError(options, "askdo: invalid broker error")
 		}
+		if event.Code == "broker_error" {
+			return usageError(options, "askdo: "+event.Message)
+		}
 		return usageErrorCode(options, "askdo: "+event.Message, 1)
 	}
 	var event proto.TimestampStatusEvent
