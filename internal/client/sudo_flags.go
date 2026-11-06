@@ -94,11 +94,27 @@ func runTimestamp(ctx context.Context, action, target string, options Options) i
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
+	interrupted := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-options.Interrupt:
+			close(interrupted)
+			_ = conn.Close()
+		case <-watchDone:
+		}
+	}()
+	defer close(watchDone)
 	if err := send(conn, proto.TimestampRequest{Op: "timestamp", Action: action, TargetUser: target}); err != nil {
 		return timestampFailure(ctx, options, "askdo: timestamp request failed")
 	}
 	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
 	if err != nil {
+		select {
+		case <-interrupted:
+			return 130
+		default:
+		}
 		return timestampFailure(ctx, options, "askdo: timestamp response failed")
 	}
 	var kind struct {

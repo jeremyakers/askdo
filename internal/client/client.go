@@ -186,7 +186,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		return 125
 	}
 	rest := flags.Args()
-	if shell && login || (shell || login) && (bundle != "" || script != "" || entry != "") {
+	if shell && login || (shell || login) && (bundle != "" || script != "" || entry != "" || len(sensitive) != 0) {
 		return usageError(options, "-s/--shell and -i/--login are mutually exclusive and require argv mode")
 	}
 	// -k alone performs the same administrative terminal reset as -K and -l do
@@ -294,14 +294,30 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		// local detail outside its budget: a stalled name service must end at
 		// the same started+timeout deadline that bounds every later exchange
 		// instead of hanging past it.
-		lookupCtx, cancelLookup := ctx, context.CancelFunc(func() {})
+		lookupCtx, cancelLookup := context.WithCancel(ctx)
+		lookupInterrupted := make(chan struct{})
+		lookupWatchDone := make(chan struct{})
+		go func() {
+			select {
+			case <-options.Interrupt:
+				close(lookupInterrupted)
+				cancelLookup()
+			case <-lookupWatchDone:
+			}
+		}()
 		if timeout > 0 {
-			lookupCtx, cancelLookup = context.WithDeadline(ctx, started.Add(timeout))
+			lookupCtx, cancelLookup = context.WithDeadline(lookupCtx, started.Add(timeout))
 		}
 		var home string
 		rest, home, err = shellCommand(lookupCtx, targetUser, rest, login)
 		cancelLookup()
+		close(lookupWatchDone)
 		if err != nil {
+			select {
+			case <-lookupInterrupted:
+				return 130
+			default:
+			}
 			if timeout > 0 && !time.Now().Before(started.Add(timeout)) {
 				return usageErrorCode(options, "askdo: shell: target account lookup timed out", 124)
 			}

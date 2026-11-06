@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -130,6 +131,8 @@ func durableOperation(request proto.SubmitRequest, target ExecutionTarget) []byt
 // lookupTargetAccount resolves a login name or "#UID" (already validated by
 // proto.ValidateTargetUser) in the host account database. It is a variable
 // so tests can present account entries the host database never contains.
+var lookupTargetAccountMu sync.RWMutex
+
 var lookupTargetAccount = func(spec string) (*user.User, error) {
 	if digits, numeric := strings.CutPrefix(spec, "#"); numeric {
 		id, err := strconv.ParseUint(digits, 10, 32)
@@ -139,6 +142,18 @@ var lookupTargetAccount = func(spec string) (*user.User, error) {
 		return user.LookupId(strconv.FormatUint(id, 10))
 	}
 	return user.Lookup(spec)
+}
+
+func setLookupTargetAccountForTest(fn func(string) (*user.User, error)) func() {
+	lookupTargetAccountMu.Lock()
+	previous := lookupTargetAccount
+	lookupTargetAccount = fn
+	lookupTargetAccountMu.Unlock()
+	return func() {
+		lookupTargetAccountMu.Lock()
+		lookupTargetAccount = previous
+		lookupTargetAccountMu.Unlock()
+	}
 }
 
 // resolveExecutionTarget resolves a validated sudo-style target specification
@@ -155,7 +170,10 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	if spec == "" {
 		return ExecutionTarget{}, nil
 	}
-	account, err := lookupTargetAccount(spec)
+	lookupTargetAccountMu.RLock()
+	lookup := lookupTargetAccount
+	lookupTargetAccountMu.RUnlock()
+	account, err := lookup(spec)
 	var unknownName user.UnknownUserError
 	var unknownID user.UnknownUserIdError
 	if errors.As(err, &unknownName) || errors.As(err, &unknownID) {

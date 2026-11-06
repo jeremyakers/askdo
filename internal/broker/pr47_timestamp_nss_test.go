@@ -54,12 +54,11 @@ func TestTimestampListTargetNSSLookupDoesNotBlockAdmission(t *testing.T) {
 	cfg, uid := timestampConfig(t)
 	var approvals atomic.Int32
 	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
-	original := lookupTargetAccount
-	lookupTargetAccount = func(string) (*user.User, error) {
+	restore := setLookupTargetAccountForTest(func(string) (*user.User, error) {
 		time.Sleep(5 * time.Second)
 		return &user.User{Uid: "1000", Gid: "1000", Username: "tyme", HomeDir: "/home/tyme"}, nil
-	}
-	t.Cleanup(func() { lookupTargetAccount = original })
+	})
+	t.Cleanup(restore)
 	var stdout, stderr bytes.Buffer
 	// When the selected-target list request times out and disconnects.
 	code := client.Run(context.Background(), []string{"--timeout", "50ms", "-l", "-u", "tyme"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})

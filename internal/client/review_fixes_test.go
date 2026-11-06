@@ -405,3 +405,82 @@ func TestSudoValidationDoesNotRequireExecutionTERM(t *testing.T) {
 		t.Fatalf("validation request=%+v", request)
 	}
 }
+
+func TestSudoShellRejectsSensitiveBundleOption(t *testing.T) {
+	// Given a shell request with a bundle-only sensitive inclusion.
+	socket, bodies := captureSubmitWire(t)
+	var stdout, stderr bytes.Buffer
+	// When shell mode is combined with the option.
+	code := Run(context.Background(), []string{"-s", "--bundle-include-sensitive", "secret", "echo", "hi"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+	// Then it is rejected instead of silently dropping the inclusion.
+	if code != 125 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	select {
+	case body := <-bodies:
+		t.Fatalf("sensitive shell option was submitted: %s", body)
+	default:
+	}
+}
+
+func TestSudoTimestampRespondsToSIGINT(t *testing.T) {
+	// Given a broker that accepts a timestamp request but never answers.
+	socket := filepath.Join(t.TempDir(), "request.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			defer conn.Close()
+			_, _ = proto.ReadFrame(conn, proto.MaxFrameLength)
+			time.Sleep(3 * time.Second)
+		}
+	}()
+	interrupt := make(chan os.Signal, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		interrupt <- os.Interrupt
+	}()
+	var stdout, stderr bytes.Buffer
+	// When SIGINT arrives while waiting for the response.
+	code := Run(context.Background(), []string{"-l"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: interrupt})
+	// Then the client exits with the documented interrupt status instead of hanging.
+	if code != 130 {
+		t.Fatalf("SIGINT exit=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestSudoShellLookupRespondsToSIGINT(t *testing.T) {
+	// Given a stalled getent/NSS lookup during shell resolution.
+	original := shellPasswd
+	shellPasswd = func(ctx context.Context, _ string) ([]byte, error) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(3 * time.Second):
+			return []byte("root:x:0:0:Root:/root:/bin/sh\n"), nil
+		}
+	}
+	t.Cleanup(func() { shellPasswd = original })
+	socket, bodies := captureSubmitWire(t)
+	interrupt := make(chan os.Signal, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		interrupt <- os.Interrupt
+	}()
+	var stdout, stderr bytes.Buffer
+	// When SIGINT arrives during the lookup.
+	code := Run(context.Background(), []string{"-s", "--detach", "echo", "hello"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: interrupt})
+	// Then the invocation is canceled instead of waiting for NSS.
+	if code != 130 {
+		t.Fatalf("shell SIGINT exit=%d stderr=%q", code, stderr.String())
+	}
+	select {
+	case body := <-bodies:
+		t.Fatalf("interrupted shell was submitted: %s", body)
+	default:
+	}
+}
