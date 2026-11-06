@@ -817,7 +817,10 @@ func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.Res
 // definitively rejects the submission before SubmitReservedJob, so status
 // reports it as cancelled instead of a live reservation.
 func (d *daemon) cancelRejectedReservation(uid uint32, requestID string) {
-	if err := d.store.CancelReservation(context.Background(), uid, requestID); err != nil {
+	// Bounded: this runs while the handler still owns serialized admission.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := d.store.CancelReservation(ctx, uid, requestID); err != nil {
 		slog.Warn("cancel rejected reservation", "request_id", requestID, "error", err)
 	}
 }

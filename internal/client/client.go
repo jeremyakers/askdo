@@ -298,7 +298,9 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		lookupCtx, cancelLookup := context.WithCancel(ctx)
 		lookupInterrupted := make(chan struct{})
 		lookupWatchDone := make(chan struct{})
+		lookupWatcherExited := make(chan struct{})
 		go func() {
+			defer close(lookupWatcherExited)
 			select {
 			case <-options.Interrupt:
 				close(lookupInterrupted)
@@ -313,9 +315,13 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		rest, home, err = shellCommand(lookupCtx, targetUser, rest, login)
 		cancelLookup()
 		close(lookupWatchDone)
-		// SIGINT may land as the lookup succeeds; honor it either way.
+		// Join the watcher, then give any interrupt — consumed by the watcher
+		// or still pending — precedence over a successful lookup.
+		<-lookupWatcherExited
 		select {
 		case <-lookupInterrupted:
+			return 130
+		case <-options.Interrupt:
 			return 130
 		default:
 		}
