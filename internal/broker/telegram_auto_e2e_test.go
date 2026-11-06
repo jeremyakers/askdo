@@ -232,7 +232,10 @@ func TestAutoNotifyingCancelledOrExpiredNeverDispatches(t *testing.T) {
 			req := newReservedRequest(t, h, name)
 			id := req.RequestID
 			if expiry {
-				ms := int64(500)
+				// Long enough for the review to reach the blocked notice even
+				// under a loaded race-enabled suite; expiry still lands while
+				// that notice is held in flight.
+				ms := int64(1500)
 				req.WaitTimeoutMS = &ms
 			}
 			conn := openSubmit(t, h.socket, req)

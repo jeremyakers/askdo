@@ -536,3 +536,23 @@ func TestSudoTimestampNonApprovalErrorsExit125(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
 }
+
+func TestSudoShellLookupInterruptWithTimeoutIsRaceFree(t *testing.T) {
+	// Given a bounded shell lookup and SIGINT arriving during setup.
+	original := shellPasswd
+	shellPasswd = func(ctx context.Context, _ string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { shellPasswd = original })
+	socket, _ := captureSubmitWire(t)
+	interrupt := make(chan os.Signal, 1)
+	interrupt <- os.Interrupt
+	var stdout, stderr bytes.Buffer
+	// When the invocation uses --timeout (race detector checks the cancel path).
+	code := Run(context.Background(), []string{"--timeout", "5s", "-s", "--detach", "echo", "hi"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: interrupt})
+	// Then it is interrupted promptly.
+	if code != 130 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+}

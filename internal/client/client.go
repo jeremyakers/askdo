@@ -295,7 +295,13 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		// local detail outside its budget: a stalled name service must end at
 		// the same started+timeout deadline that bounds every later exchange
 		// instead of hanging past it.
-		lookupCtx, cancelLookup := context.WithCancel(ctx)
+		// Build both contexts before starting the watcher: it only ever
+		// touches the immutable cancelInterrupt.
+		interruptCtx, cancelInterrupt := context.WithCancel(ctx)
+		lookupCtx, cancelLookup := interruptCtx, context.CancelFunc(func() {})
+		if timeout > 0 {
+			lookupCtx, cancelLookup = context.WithDeadline(interruptCtx, started.Add(timeout))
+		}
 		lookupInterrupted := make(chan struct{})
 		lookupWatchDone := make(chan struct{})
 		lookupWatcherExited := make(chan struct{})
@@ -304,16 +310,14 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 			select {
 			case <-options.Interrupt:
 				close(lookupInterrupted)
-				cancelLookup()
+				cancelInterrupt()
 			case <-lookupWatchDone:
 			}
 		}()
-		if timeout > 0 {
-			lookupCtx, cancelLookup = context.WithDeadline(lookupCtx, started.Add(timeout))
-		}
 		var home string
 		rest, home, err = shellCommand(lookupCtx, targetUser, rest, login)
 		cancelLookup()
+		cancelInterrupt()
 		close(lookupWatchDone)
 		// Join the watcher, then give any interrupt — consumed by the watcher
 		// or still pending — precedence over a successful lookup.
