@@ -338,3 +338,35 @@ func TestSudoAdministrativeActionsRejectReviewFlag(t *testing.T) {
 		noRevocation(t, requests)
 	}
 }
+
+func TestSudoStandaloneResetRemoveRejectsNonInteractive(t *testing.T) {
+	// Given standalone timestamp removal combined with non-interactive mode.
+	for _, args := range [][]string{{"-K", "-n"}, {"-k", "-n"}} {
+		socket, requests := timestampObserver(t)
+		var stdout, stderr bytes.Buffer
+		// When the invocation is parsed.
+		code := Run(context.Background(), args, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+		// Then it is rejected before revocation.
+		if code != 125 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		noRevocation(t, requests)
+	}
+}
+
+func TestSudoValidationRejectsForcedReview(t *testing.T) {
+	// Given timestamp validation combined with forced AI review.
+	socket, bodies := captureSubmitWire(t)
+	var stdout, stderr bytes.Buffer
+	// When validation is requested with --review=yes.
+	code := Run(context.Background(), []string{"-v", "--review=yes"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal), HasControllingTTY: func() bool { return true }})
+	// Then the contradictory combination is refused without submitting a job.
+	if code != 125 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	select {
+	case body := <-bodies:
+		t.Fatalf("validation with forced review was submitted: %s", body)
+	default:
+	}
+}
