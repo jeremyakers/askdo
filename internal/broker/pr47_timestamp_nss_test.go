@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/user"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,5 +46,30 @@ func TestTimestampListNSSLookupDoesNotBlockAdmission(t *testing.T) {
 	_ = reserveForTest(t, h.socket, uid)
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("stale NSS lookup blocked admission for %s", elapsed)
+	}
+}
+
+func TestTimestampListTargetNSSLookupDoesNotBlockAdmission(t *testing.T) {
+	// Given a selected-target NSS lookup that stalls after the list client leaves.
+	cfg, uid := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	original := lookupTargetAccount
+	lookupTargetAccount = func(string) (*user.User, error) {
+		time.Sleep(5 * time.Second)
+		return &user.User{Uid: "1000", Gid: "1000", Username: "tyme", HomeDir: "/home/tyme"}, nil
+	}
+	t.Cleanup(func() { lookupTargetAccount = original })
+	var stdout, stderr bytes.Buffer
+	// When the selected-target list request times out and disconnects.
+	code := client.Run(context.Background(), []string{"--timeout", "50ms", "-l", "-u", "tyme"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})
+	if code != 124 {
+		t.Fatalf("selected-target list exit=%d stderr=%q", code, stderr.String())
+	}
+	// Then the next reservation is not held behind the abandoned NSS lookup.
+	started := time.Now()
+	_ = reserveForTest(t, h.socket, uid)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("selected-target NSS lookup blocked admission for %s", elapsed)
 	}
 }

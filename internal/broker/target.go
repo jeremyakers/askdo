@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -209,6 +210,28 @@ func resolveExecutionTarget(spec string) (ExecutionTarget, error) {
 	}
 	slices.Sort(groups)
 	return ExecutionTarget{UID: uint32(uid), GID: uint32(gid), Groups: groups, Name: account.Username, Home: account.HomeDir, loginName: account.Username, loginHome: account.HomeDir}, nil
+}
+
+// resolveExecutionTargetContext bounds an NSS lookup for a selected target.
+// os/user has no context API, so the lookup runs independently while the
+// connection/admission side remains cancellable; a stalled NSS call cannot
+// retain the broker's serialized admission slot after the caller disconnects.
+func resolveExecutionTargetContext(ctx context.Context, spec string) (ExecutionTarget, error) {
+	type answer struct {
+		target ExecutionTarget
+		err    error
+	}
+	result := make(chan answer, 1)
+	go func() {
+		target, err := resolveExecutionTarget(spec)
+		result <- answer{target: target, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return ExecutionTarget{}, ctx.Err()
+	case resolved := <-result:
+		return resolved.target, resolved.err
+	}
 }
 
 // displayableAccountName reports whether an account name can be bound and

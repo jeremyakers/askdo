@@ -264,7 +264,7 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 		fail("current configuration unavailable")
 		return
 	}
-	target, err := resolveExecutionTarget(request.TargetUser)
+	target, err := resolveExecutionTargetContext(ctx, request.TargetUser)
 	if err != nil {
 		fail("target user: " + err.Error())
 		return

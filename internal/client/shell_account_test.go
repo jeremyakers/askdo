@@ -47,3 +47,13 @@ func TestShellCommandUsesRequestedPasswdAccount(t *testing.T) {
 		}
 	}
 }
+
+func TestGetentArgsTerminateOptionsBeforeAccountKey(t *testing.T) {
+	// Given an account name that getent would otherwise parse as an option.
+	args := getentArgs("-odd-user")
+	// When constructing the lookup command.
+	// Then the key is separated from getent's options.
+	if !slices.Equal(args, []string{"passwd", "--", "-odd-user"}) {
+		t.Fatalf("getent args=%v", args)
+	}
+}

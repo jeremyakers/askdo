@@ -44,8 +44,10 @@ func expandShortFlags(args []string, flags *flag.FlagSet) []string {
 
 // The target's passwd shell is deliberately not inherited from the submitter.
 // getent uses the host's NSS account database, including non-local accounts.
+func getentArgs(key string) []string { return []string{"passwd", "--", key} }
+
 var shellPasswd = func(ctx context.Context, key string) ([]byte, error) {
-	return exec.CommandContext(ctx, "/usr/bin/getent", "passwd", key).Output()
+	return exec.CommandContext(ctx, "/usr/bin/getent", getentArgs(key)...).Output()
 }
 
 func shellCommand(ctx context.Context, target string, args []string, login bool) ([]string, string, error) {
