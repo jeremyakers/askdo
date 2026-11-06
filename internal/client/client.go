@@ -883,6 +883,11 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 				state = nextState
 			}
 			if terminal {
+				// A wait_timeout before any accepted event comes only from
+				// admission, which retired the reservation: the handle is dead.
+				if code == 124 && state == "" && nextState == "" && options.cancelHandleFile != "" {
+					_ = os.Remove(options.cancelHandleFile)
+				}
 				if terminalState(nextState) && options.cancelHandleFile != "" {
 					_ = os.Remove(options.cancelHandleFile)
 				}

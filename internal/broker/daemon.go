@@ -1086,6 +1086,16 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: err.Error()})
 		return
 	}
+	if admissionCtx.Err() != nil {
+		// The anchored request budget elapsed during admission work: retire
+		// the reservation instead of persisting an already-expired job.
+		cwd.close()
+		d.queue.release()
+		_ = os.RemoveAll(spool.dir)
+		d.cancelRejectedReservation(uid, request.RequestID)
+		_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		return
+	}
 	operation := durableOperation(request, target)
 	// The wait budget the client sent is the remainder of --timeout measured
 	// when the submit frame left the client. Anchoring the durable deadline
