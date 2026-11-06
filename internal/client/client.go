@@ -281,13 +281,14 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	// hard local error for ordinary and bundle execution. Login mode replaces
 	// it with the target home, so a deleted caller directory is irrelevant.
 	invocationDir, err := os.Getwd()
-	if err != nil && !login {
-		if !validateTimestamp {
-			fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
-			return 125
-		}
-		// Timestamp validation executes no command and needs no caller CWD.
+	if validateTimestamp {
+		// Timestamp validation executes no command, so it binds a stable
+		// placeholder instead of a caller CWD that could change while waiting.
 		invocationDir, err = "/", nil
+	}
+	if err != nil && !login {
+		fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
+		return 125
 	}
 	if shell || login {
 		// The getent/NSS account lookup is part of this invocation, not a
@@ -1013,7 +1014,7 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 			return 125, true, ""
 		}
 		fmt.Fprintln(options.Stderr, event.Message)
-		if event.Code == "approval_required" && options.cancelHandleFile != "" {
+		if (event.Code == "approval_required" || event.Code == "timestamp_disabled") && options.cancelHandleFile != "" {
 			// The broker cancelled the reservation; its handle is now dead.
 			_ = os.Remove(options.cancelHandleFile)
 		}

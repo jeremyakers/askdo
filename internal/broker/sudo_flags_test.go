@@ -107,6 +107,11 @@ func TestSudoValidationDisabledAndDenied(t *testing.T) {
 		if disabled && (!strings.Contains(string(body), `"code":"timestamp_disabled"`) || approvals.Load() != 0) {
 			t.Fatalf("disabled=%s approvals=%d", body, approvals.Load())
 		}
+		if disabled {
+			if state, err := h.daemon.store.GetReservation(context.Background(), uid, req.RequestID); err != nil || state != store.ReservationCancelled {
+				t.Fatalf("disabled validation left reservation state=%v err=%v", state, err)
+			}
+		}
 		if !disabled && (!strings.Contains(string(body), `"state":"denied"`) || approvals.Load() != 1) {
 			t.Fatalf("denial=%s approvals=%d", body, approvals.Load())
 		}

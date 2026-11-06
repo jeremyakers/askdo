@@ -401,7 +401,7 @@ func TestSudoValidationDoesNotRequireExecutionTERM(t *testing.T) {
 	if err := proto.StrictUnmarshal(<-bodies, &request); err != nil {
 		t.Fatal(err)
 	}
-	if !request.ValidateTimestamp || request.TerminalType != "dumb" {
+	if !request.ValidateTimestamp || request.TerminalType != "dumb" || request.CWD != "/" {
 		t.Fatalf("validation request=%+v", request)
 	}
 }
@@ -507,5 +507,32 @@ func TestSudoShellLookupInterruptAfterSuccessStopsSubmission(t *testing.T) {
 	case body := <-bodies:
 		t.Fatalf("interrupted shell was submitted: %s", body)
 	default:
+	}
+}
+
+func TestSudoTimestampNonApprovalErrorsExit125(t *testing.T) {
+	// Given a broker that answers an administrative exchange with invalid_request.
+	socket := filepath.Join(t.TempDir(), "request.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = proto.ReadFrame(conn, proto.MaxFrameLength)
+		body, _ := json.Marshal(proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "unsupported operation"})
+		_ = proto.WriteFrame(conn, body)
+	}()
+	var stdout, stderr bytes.Buffer
+	// When the client receives that error.
+	code := Run(context.Background(), []string{"-K"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal)})
+	// Then it is an infrastructure failure, not an approval outcome.
+	if code != 125 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
 }

@@ -963,6 +963,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	}
 	policy, fleet := d.policy, d.fleet
 	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 {
+		d.cancelRejectedReservation(uid, request.RequestID)
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
 		return
 	}

@@ -128,10 +128,12 @@ func runTimestamp(ctx context.Context, action, target string, options Options) i
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil {
 			return timestampFailure(ctx, options, "askdo: invalid broker error")
 		}
-		if event.Code == "broker_error" {
-			return usageError(options, "askdo: "+event.Message)
+		// Exit 1 is reserved for approval outcomes; protocol, permission and
+		// compatibility errors are infrastructure failures (125).
+		if event.Code == "approval_required" || event.Code == "timestamp_disabled" {
+			return usageErrorCode(options, "askdo: "+event.Message, 1)
 		}
-		return usageErrorCode(options, "askdo: "+event.Message, 1)
+		return usageError(options, "askdo: "+event.Message)
 	}
 	var event proto.TimestampStatusEvent
 	if proto.StrictUnmarshal(body, &event) != nil || event.Op != "timestamp_status" {
