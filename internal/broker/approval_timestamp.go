@@ -291,10 +291,14 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 		// route when Fleet is configured, the local per-UID route otherwise.
 		// Reporting remaining time from the local route instead would never
 		// match a fleet-created window (finding: -l always showed zero).
-		authority := d.timestampWindowAuthority(ctx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
-		expiry := timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority)
-		if expiry.After(time.Now()) {
-			event.RemainingSeconds = int64(time.Until(expiry).Seconds())
+		// Peek keeps expired rows; resolve Fleet authority only for a window
+		// still live by its locally stored expiry.
+		if stamp.ExpiresAt.After(time.Now()) {
+			authority := d.timestampWindowAuthority(ctx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
+			expiry := timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority)
+			if expiry.After(time.Now()) {
+				event.RemainingSeconds = int64(time.Until(expiry).Seconds())
+			}
 		}
 	}
 	event.AutoApprovalMaxRisk = cfg.Review.MaxAutoRisk(uid)

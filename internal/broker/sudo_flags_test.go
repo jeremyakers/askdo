@@ -48,6 +48,13 @@ func TestSudoNonInteractiveAutoPolicy(t *testing.T) {
 			} else if !strings.Contains(string(body), `"code":"approval_required"`) || len(h.executor.Snapshot()) != 0 {
 				t.Fatalf("human result=%s", body)
 			}
+			if !enabled {
+				// The definitive -n rejection must not leave a live reservation.
+				state, err := h.daemon.store.GetReservation(context.Background(), h.peerUID.Load(), req.RequestID)
+				if err != nil || state != store.ReservationCancelled {
+					t.Fatalf("rejected reservation state=%v err=%v", state, err)
+				}
+			}
 		})
 	}
 }

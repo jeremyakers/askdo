@@ -312,12 +312,13 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		rest, home, err = shellCommand(lookupCtx, targetUser, rest, login)
 		cancelLookup()
 		close(lookupWatchDone)
+		// SIGINT may land as the lookup succeeds; honor it either way.
+		select {
+		case <-lookupInterrupted:
+			return 130
+		default:
+		}
 		if err != nil {
-			select {
-			case <-lookupInterrupted:
-				return 130
-			default:
-			}
 			if timeout > 0 && !time.Now().Before(started.Add(timeout)) {
 				return usageErrorCode(options, "askdo: shell: target account lookup timed out", 124)
 			}
@@ -1012,6 +1013,10 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 			return 125, true, ""
 		}
 		fmt.Fprintln(options.Stderr, event.Message)
+		if event.Code == "approval_required" && options.cancelHandleFile != "" {
+			// The broker cancelled the reservation; its handle is now dead.
+			_ = os.Remove(options.cancelHandleFile)
+		}
 		if event.Code == "approval_required" || event.Code == "timestamp_disabled" {
 			return 1, true, ""
 		}

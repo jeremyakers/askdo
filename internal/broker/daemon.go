@@ -813,6 +813,15 @@ func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.Res
 	_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
 }
 
+// cancelRejectedReservation marks a reservation cancelled when admission
+// definitively rejects the submission before SubmitReservedJob, so status
+// reports it as cancelled instead of a live reservation.
+func (d *daemon) cancelRejectedReservation(uid uint32, requestID string) {
+	if err := d.store.CancelReservation(context.Background(), uid, requestID); err != nil {
+		slog.Warn("cancel rejected reservation", "request_id", requestID, "error", err)
+	}
+}
+
 func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func(), admitted time.Time) {
 	// The client's --timeout is a maximum measured from submission, so every
 	// stage of admission must end inside it. The fleet timestamp check below
@@ -880,7 +889,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	// Resolve the sudo-style target on this host before anything durable
 	// exists: an unknown account is a clear submission error with no spool, no
 	// job and no execution, and the resolved identity is fixed for the job.
-	target, err := resolveExecutionTarget(request.TargetUser)
+	target, err := resolveExecutionTargetContext(admissionCtx, request.TargetUser)
 	if err != nil {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
 		return
@@ -899,7 +908,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			// normal root launch; login mode uses that account's entry, so
 			// resolve it through the same path a named target takes.
 			spec = "root"
-			target, err = resolveExecutionTarget(spec)
+			target, err = resolveExecutionTargetContext(admissionCtx, spec)
 			if err != nil {
 				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
 				return
@@ -968,19 +977,33 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		if (request.ValidateTimestamp || !cfg.Review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && cfg.Review.TimestampTimeout(uid) > 0 {
 			key := d.terminalTimestampKey(uid, foreground.tty)
 			stamp, stampErr := d.store.GetApprovalTimestamp(admissionCtx, key)
-			authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, stampErr == nil && !stamp.ApprovedAt.IsZero(), target)
-			valid = stampErr == nil && timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
+			if stampErr != nil {
+				// A missing window is a nil error with a zero stamp; any
+				// error is an unreadable store or an expired request budget,
+				// never proof that authorization is absent.
+				d.cancelRejectedReservation(uid, request.RequestID)
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "approval timestamp unavailable"})
+				return
+			}
+			// Resolve Fleet authority only for a window that is still live
+			// by its locally stored expiry; an expired row needs no lookup.
+			if stamp.ExpiresAt.After(time.Now()) {
+				authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
+				valid = timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
+			}
 		}
 		canAuto := false
 		if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && cfg.Review.MaxAutoRisk(uid) > 0 {
-			threshold, preferenceErr := d.store.GetAutoApprovalThreshold(context.Background(), uid)
+			threshold, preferenceErr := d.store.GetAutoApprovalThreshold(admissionCtx, uid)
 			if preferenceErr != nil {
+				d.cancelRejectedReservation(uid, request.RequestID)
 				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
 				return
 			}
 			canAuto = threshold >= 2
 		}
 		if !valid && !canAuto {
+			d.cancelRejectedReservation(uid, request.RequestID)
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
 			return
 		}

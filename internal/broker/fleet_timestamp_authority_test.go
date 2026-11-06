@@ -239,3 +239,27 @@ func TestFleetTimestampLocalRouteUnchanged(t *testing.T) {
 		t.Fatalf("local list regression: %s err=%v", body, err)
 	}
 }
+
+// An expired stored window is unusable by its local expiry alone; -l must not
+// spend a Fleet catalogue round trip (holding admission) to report zero.
+func TestFleetTimestampExpiredWindowSkipsCatalogue(t *testing.T) {
+	_, g, h, key, _, _ := fleetTimestampWindow(t)
+	live, err := h.daemon.store.PeekApprovalTimestamp(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(50 * time.Millisecond), AuthorityHash: live.AuthorityHash}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	before := g.catalogues.Load()
+	body := sudoExchange(t, h, map[string]any{"op": "timestamp", "action": "list"})
+	var event proto.TimestampStatusEvent
+	if err := json.Unmarshal(body, &event); err != nil || event.RemainingSeconds != 0 {
+		t.Fatalf("list=%s err=%v", body, err)
+	}
+	if got := g.catalogues.Load(); got != before {
+		t.Fatalf("expired window triggered %d catalogue lookups", got-before)
+	}
+}

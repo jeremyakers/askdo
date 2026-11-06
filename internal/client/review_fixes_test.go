@@ -484,3 +484,28 @@ func TestSudoShellLookupRespondsToSIGINT(t *testing.T) {
 	default:
 	}
 }
+
+func TestSudoShellLookupInterruptAfterSuccessStopsSubmission(t *testing.T) {
+	// Given SIGINT that arrives while the account lookup completes successfully.
+	original := shellPasswd
+	interrupt := make(chan os.Signal, 1)
+	shellPasswd = func(context.Context, string) ([]byte, error) {
+		interrupt <- os.Interrupt
+		time.Sleep(50 * time.Millisecond)
+		return []byte("root:x:0:0:Root:/root:/bin/sh\n"), nil
+	}
+	t.Cleanup(func() { shellPasswd = original })
+	socket, bodies := captureSubmitWire(t)
+	var stdout, stderr bytes.Buffer
+	// When the lookup returns without error.
+	code := Run(context.Background(), []string{"-s", "--detach", "echo", "hi"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: interrupt})
+	// Then the interrupt still wins and nothing is submitted.
+	if code != 130 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	select {
+	case body := <-bodies:
+		t.Fatalf("interrupted shell was submitted: %s", body)
+	default:
+	}
+}
