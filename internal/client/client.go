@@ -235,6 +235,15 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
 		return 125
 	}
+	reasonExplicit := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "reason" {
+			reasonExplicit = true
+		}
+	})
+	if reasonExplicit && (removeTimestamp || resetTimestamp || validateTimestamp || list) {
+		return usageError(options, "timestamp-only actions do not accept --reason")
+	}
 	timestampCtx, cancelTimestamp := ctx, context.CancelFunc(func() {})
 	if timeout > 0 {
 		timestampCtx, cancelTimestamp = context.WithDeadline(ctx, started.Add(timeout))
@@ -386,9 +395,15 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		request.Lifecycle = proto.LifecycleDetached
 	} else {
 		request.Lifecycle = proto.LifecycleForeground
-		request.TerminalType = os.Getenv("TERM")
-		if !regexp.MustCompile(`^[A-Za-z0-9+._-]{1,128}$`).MatchString(request.TerminalType) {
-			return usageError(options, "askdo: invalid terminal type")
+		if validateTimestamp {
+			// Validation runs no command, so the execution TERM contract does
+			// not apply; use a valid placeholder for the broker's wire schema.
+			request.TerminalType = "dumb"
+		} else {
+			request.TerminalType = os.Getenv("TERM")
+			if !regexp.MustCompile(`^[A-Za-z0-9+._-]{1,128}$`).MatchString(request.TerminalType) {
+				return usageError(options, "askdo: invalid terminal type")
+			}
 		}
 	}
 	var deadline time.Time

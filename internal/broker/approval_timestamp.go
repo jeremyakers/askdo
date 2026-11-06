@@ -130,6 +130,49 @@ func (d *daemon) timestampWindowAuthority(ctx context.Context, cfg *config.Confi
 	return approvalAuthorityHash(route, cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target)
 }
 
+// askdoGroupLookup is the small NSS seam used by list. It is variable so a
+// slow or failing account database can be tested without changing host NSS.
+var askdoGroupLookup = func(uid uint32) (bool, error) {
+	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		return false, err
+	}
+	group, err := user.LookupGroup("askdo")
+	if err != nil {
+		return false, err
+	}
+	ids, err := account.GroupIds()
+	if err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		if id == group.Gid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (d *daemon) askdoGroupMembership(ctx context.Context, uid uint32) (bool, error) {
+	result := make(chan struct {
+		member bool
+		err    error
+	}, 1)
+	go func() {
+		member, err := askdoGroupLookup(uid)
+		result <- struct {
+			member bool
+			err    error
+		}{member: member, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case answer := <-result:
+		return answer.member, answer.err
+	}
+}
+
 func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.TimestampRequest) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -208,17 +251,12 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 		fail("target user: " + err.Error())
 		return
 	}
-	if account, lookupErr := user.LookupId(strconv.FormatUint(uint64(uid), 10)); lookupErr == nil {
-		if group, groupErr := user.LookupGroup("askdo"); groupErr == nil {
-			if ids, idsErr := account.GroupIds(); idsErr == nil {
-				for _, id := range ids {
-					if id == group.Gid {
-						event.AskdoGroup = true
-					}
-				}
-			}
-		}
+	membership, membershipErr := d.askdoGroupMembership(ctx, uid)
+	if membershipErr != nil {
+		fail("lookup askdo group membership failed")
+		return
 	}
+	event.AskdoGroup = membership
 	event.ReviewMode, event.ReviewRequired = cfg.Review.Mode, cfg.Review.RequiresReview(uid, false)
 	if event.ReviewMode == "" {
 		event.ReviewMode = "required"

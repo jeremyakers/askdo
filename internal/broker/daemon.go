@@ -647,6 +647,7 @@ func (d *daemon) reserveAdmission() *connectionAdmission {
 }
 
 func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) {
+	receivedAt := time.Now()
 	defer conn.Close()
 	admission.wait()
 	defer admission.release()
@@ -706,7 +707,7 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "upgrade_required", Message: "submit requires protocol version 4, 5, or 6 and a reserved job ID"})
 			return
 		}
-		d.handleSubmit(conn, uid, body, request, admission.release)
+		d.handleSubmit(conn, uid, body, request, admission.release, receivedAt)
 	case "status":
 		var request proto.StatusRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
@@ -812,8 +813,7 @@ func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.Res
 	_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
 }
 
-func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func()) {
-	admitted := time.Now()
+func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func(), admitted time.Time) {
 	// The client's --timeout is a maximum measured from submission, so every
 	// stage of admission must end inside it. The fleet timestamp check below
 	// makes a synchronous gateway catalogue lookup: on context.Background()
@@ -830,7 +830,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			budget = 0
 		}
 		var cancelAdmission context.CancelFunc
-		admissionCtx, cancelAdmission = context.WithTimeout(context.Background(), budget)
+		admissionCtx, cancelAdmission = context.WithDeadline(context.Background(), admitted.Add(budget))
 		defer cancelAdmission()
 	}
 	draining, finishAdmission := d.drain.Track()

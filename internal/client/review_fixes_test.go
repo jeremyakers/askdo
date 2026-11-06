@@ -370,3 +370,38 @@ func TestSudoValidationRejectsForcedReview(t *testing.T) {
 	default:
 	}
 }
+
+func TestSudoTimestampActionsRejectExplicitReason(t *testing.T) {
+	// Given a timestamp-only action with an explicitly supplied reason.
+	for _, args := range [][]string{{"-K", "--reason", "cleanup"}, {"-v", "--reason", "refresh"}, {"-l", "--reason", "inspect"}} {
+		socket, requests := timestampObserver(t)
+		var stdout, stderr bytes.Buffer
+		// When the invocation is parsed.
+		code := Run(context.Background(), args, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal), HasControllingTTY: func() bool { return true }})
+		// Then it is rejected before any timestamp action or submission.
+		if code != 125 {
+			t.Fatalf("%v exit=%d stderr=%q", args, code, stderr.String())
+		}
+		noRevocation(t, requests)
+	}
+}
+
+func TestSudoValidationDoesNotRequireExecutionTERM(t *testing.T) {
+	// Given a controlling terminal without a usable execution TERM value.
+	t.Setenv("TERM", "")
+	socket, bodies := captureSubmitWire(t)
+	var stdout, stderr bytes.Buffer
+	// When timestamp validation is requested.
+	code := Run(context.Background(), []string{"-v"}, Options{SocketPath: socket, Stdout: &stdout, Stderr: &stderr, Interrupt: make(chan os.Signal), HasControllingTTY: func() bool { return true }})
+	// Then validation proceeds with a safe wire placeholder instead of rejecting TERM.
+	if code != 0 {
+		t.Fatalf("validation with unset TERM failed: exit=%d stderr=%q", code, stderr.String())
+	}
+	var request proto.SubmitRequest
+	if err := proto.StrictUnmarshal(<-bodies, &request); err != nil {
+		t.Fatal(err)
+	}
+	if !request.ValidateTimestamp || request.TerminalType != "dumb" {
+		t.Fatalf("validation request=%+v", request)
+	}
+}

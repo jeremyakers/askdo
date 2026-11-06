@@ -566,7 +566,7 @@ func admitLiveQueuedJob(t *testing.T, h *brokerHarness, listener *net.UnixListen
 	go func() {
 		defer close(done)
 		defer server.Close()
-		h.daemon.handleSubmit(server, 0, body, req, func() {})
+		h.daemon.handleSubmit(server, 0, body, req, func() {}, time.Now())
 	}()
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	var accepted proto.AcceptedEvent
