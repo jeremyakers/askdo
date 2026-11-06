@@ -16,9 +16,8 @@ func TestTimestampListNSSFailureIsBrokerError(t *testing.T) {
 	cfg, _ := timestampConfig(t)
 	var approvals atomic.Int32
 	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
-	original := askdoGroupLookup
-	askdoGroupLookup = func(uint32) (bool, error) { return false, errors.New("NSS unavailable") }
-	t.Cleanup(func() { askdoGroupLookup = original })
+	restore := setAskdoGroupLookupForTest(func(uint32) (bool, error) { return false, errors.New("NSS unavailable") })
+	t.Cleanup(restore)
 	var stdout, stderr bytes.Buffer
 	// When list is requested.
 	code := client.Run(context.Background(), []string{"-l"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})
@@ -33,9 +32,8 @@ func TestTimestampListNSSLookupDoesNotBlockAdmission(t *testing.T) {
 	cfg, uid := timestampConfig(t)
 	var approvals atomic.Int32
 	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
-	original := askdoGroupLookup
-	askdoGroupLookup = func(uint32) (bool, error) { time.Sleep(5 * time.Second); return true, nil }
-	t.Cleanup(func() { askdoGroupLookup = original })
+	restore := setAskdoGroupLookupForTest(func(uint32) (bool, error) { time.Sleep(5 * time.Second); return true, nil })
+	t.Cleanup(restore)
 	var stdout, stderr bytes.Buffer
 	// When the list client deadline expires and closes the connection.
 	code := client.Run(context.Background(), []string{"--timeout", "50ms", "-l"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})

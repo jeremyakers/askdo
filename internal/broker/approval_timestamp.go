@@ -11,6 +11,7 @@ import (
 	"net"
 	"os/user"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
@@ -132,6 +133,8 @@ func (d *daemon) timestampWindowAuthority(ctx context.Context, cfg *config.Confi
 
 // askdoGroupLookup is the small NSS seam used by list. It is variable so a
 // slow or failing account database can be tested without changing host NSS.
+var askdoGroupLookupMu sync.RWMutex
+
 var askdoGroupLookup = func(uid uint32) (bool, error) {
 	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
 	if err != nil {
@@ -153,13 +156,28 @@ var askdoGroupLookup = func(uid uint32) (bool, error) {
 	return false, nil
 }
 
+func setAskdoGroupLookupForTest(fn func(uint32) (bool, error)) func() {
+	askdoGroupLookupMu.Lock()
+	previous := askdoGroupLookup
+	askdoGroupLookup = fn
+	askdoGroupLookupMu.Unlock()
+	return func() {
+		askdoGroupLookupMu.Lock()
+		askdoGroupLookup = previous
+		askdoGroupLookupMu.Unlock()
+	}
+}
+
 func (d *daemon) askdoGroupMembership(ctx context.Context, uid uint32) (bool, error) {
 	result := make(chan struct {
 		member bool
 		err    error
 	}, 1)
 	go func() {
-		member, err := askdoGroupLookup(uid)
+		askdoGroupLookupMu.RLock()
+		lookup := askdoGroupLookup
+		askdoGroupLookupMu.RUnlock()
+		member, err := lookup(uid)
 		result <- struct {
 			member bool
 			err    error

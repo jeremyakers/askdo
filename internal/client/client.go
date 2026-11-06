@@ -241,7 +241,8 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 			reasonExplicit = true
 		}
 	})
-	if reasonExplicit && (removeTimestamp || resetTimestamp || validateTimestamp || list) {
+	standaloneReset := resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == ""
+	if reasonExplicit && (removeTimestamp || standaloneReset || validateTimestamp || list) {
 		return usageError(options, "timestamp-only actions do not accept --reason")
 	}
 	timestampCtx, cancelTimestamp := ctx, context.CancelFunc(func() {})
