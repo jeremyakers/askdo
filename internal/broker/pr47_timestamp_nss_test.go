@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os/user"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/client"
+	"github.com/jeremyakers/askdo/internal/store"
 )
 
 func TestTimestampListNSSFailureIsBrokerError(t *testing.T) {
@@ -70,5 +73,36 @@ func TestTimestampListTargetNSSLookupDoesNotBlockAdmission(t *testing.T) {
 	_ = reserveForTest(t, h.socket, uid)
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("selected-target NSS lookup blocked admission for %s", elapsed)
+	}
+}
+
+func TestSubmitTargetLookupDeadlineIsTimeout(t *testing.T) {
+	// Given a target-account lookup that outlasts the request budget.
+	cfg, _ := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	restore := setLookupTargetAccountForTest(func(string) (*user.User, error) {
+		time.Sleep(2 * time.Second)
+		return &user.User{Uid: "1000", Gid: "1000", Username: "tyme", HomeDir: "/home/tyme"}, nil
+	})
+	t.Cleanup(restore)
+	req := newReservedRequest(t, h, "slow target")
+	req.TargetUser = "tyme"
+	ms := int64(100)
+	req.WaitTimeoutMS = &ms
+	// When the request is submitted.
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sendFrame(t, conn, req)
+	body := readFrame(t, conn)
+	// Then it is a timeout outcome and the reservation is retired.
+	if !strings.Contains(string(body), `"op":"wait_timeout"`) {
+		t.Fatalf("lookup deadline response=%s", body)
+	}
+	if state, err := h.daemon.store.GetReservation(context.Background(), h.peerUID.Load(), req.RequestID); err != nil || state != store.ReservationCancelled {
+		t.Fatalf("reservation state=%v err=%v", state, err)
 	}
 }

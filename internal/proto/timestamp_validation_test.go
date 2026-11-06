@@ -21,3 +21,17 @@ func TestSubmitValidationRejectsSensitiveInclusions(t *testing.T) {
 		t.Fatal("sensitive inclusion during timestamp validation was accepted")
 	}
 }
+
+func TestSubmitValidationRejectsLoginShellBundle(t *testing.T) {
+	// Given a wire request asking for login-shell semantics on a bundle.
+	request := SubmitRequest{Op: "submit", ProtocolVersion: FeedbackProtocolVersion, RequestID: "2026-11-06_#1", Reason: "x", Mode: "bundle", Lifecycle: LifecycleDetached, CWD: "/", Entry: "run.sh", Args: []string{}, Files: []BundleFile{{Path: "run.sh", ContentBase64: "eA=="}}}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("baseline bundle invalid: %v", err)
+	}
+	request.LoginShell = true
+	// When the broker validates it.
+	// Then the unsupported shape is rejected (-i is argv-only).
+	if err := request.Validate(); err == nil {
+		t.Fatal("login-shell bundle request was accepted")
+	}
+}

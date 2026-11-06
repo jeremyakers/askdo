@@ -357,6 +357,9 @@ func (r SubmitRequest) Validate() error {
 	if (r.ResetTimestamp || r.NonInteractive || r.ValidateTimestamp || r.LoginShell) && r.ProtocolVersion < CanonicalProtocolVersion {
 		return errors.New("sudo flags require protocol version 4 or later")
 	}
+	if r.LoginShell && r.Mode != "argv" {
+		return errors.New("login_shell requires argv mode")
+	}
 	if r.ValidateTimestamp && (r.ForceReview || r.Mode != "argv" || r.Lifecycle != LifecycleForeground || len(r.Argv) != 1 || r.Argv[0] != "/bin/true" || r.CapturedStdinBase64 != "" || r.LoginShell || len(r.SensitiveInclusions) != 0) {
 		return errors.New("timestamp validation requires foreground /bin/true without input")
 	}

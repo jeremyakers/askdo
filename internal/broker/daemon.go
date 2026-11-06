@@ -893,6 +893,13 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	// exists: an unknown account is a clear submission error with no spool, no
 	// job and no execution, and the resolved identity is fixed for the job.
 	target, err := resolveExecutionTargetContext(admissionCtx, request.TargetUser)
+	if err != nil && admissionCtx.Err() != nil {
+		// The request budget expired during the account lookup: classify it
+		// as a timeout and retire the reservation, not an invalid request.
+		d.cancelRejectedReservation(uid, request.RequestID)
+		_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		return
+	}
 	if err != nil {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
 		return
@@ -912,6 +919,11 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			// resolve it through the same path a named target takes.
 			spec = "root"
 			target, err = resolveExecutionTargetContext(admissionCtx, spec)
+			if err != nil && admissionCtx.Err() != nil {
+				d.cancelRejectedReservation(uid, request.RequestID)
+				_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+				return
+			}
 			if err != nil {
 				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
 				return
