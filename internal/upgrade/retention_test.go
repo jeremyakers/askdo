@@ -64,6 +64,15 @@ func TestHelperSuccessfulActivationRetainsOnlyTwoNewestSuccessfulStages(t *testi
 	if err := writeReceipt(f.helper.ReceiptRoot, interrupted); err != nil {
 		t.Fatal(err)
 	}
+	// The other carries the marker of an earlier failed prune.
+	failed, err := ReadReceipt(f.helper.ReceiptRoot, filepath.Base(older[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed.Detail = "activated; stage removal by retention failed; inspect stage"
+	if err := writeReceipt(f.helper.ReceiptRoot, failed); err != nil {
+		t.Fatal(err)
+	}
 	newestPrevious := putStage(10, stateSucceeded, 3000)
 	keep := []string{newestPrevious, f.stage, putStage(40, stateFailed, 500), putStage(50, stateUnknown, 500), putStage(60, "", 500)}
 	foreign := filepath.Join(f.helper.BackupRoot, "rc22-nas.maintenance")
@@ -105,7 +114,7 @@ func TestHelperSuccessfulActivationRetainsOnlyTwoNewestSuccessfulStages(t *testi
 		pruned, err := ReadReceipt(f.helper.ReceiptRoot, filepath.Base(stage))
 		if err != nil {
 			t.Errorf("retention removed public receipt: %v", err)
-		} else if !strings.Contains(pruned.Detail, "stage removed by retention") || strings.Contains(pruned.Detail, "pending") {
+		} else if !strings.Contains(pruned.Detail, "stage removed by retention") || strings.Contains(pruned.Detail, "pending") || strings.Contains(pruned.Detail, "failed") {
 			t.Errorf("pruned receipt still implies a retained backup: %+v", pruned)
 		}
 	}

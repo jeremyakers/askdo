@@ -78,8 +78,11 @@ func (h Helper) pruneSuccessfulStages(current string) error {
 		// Commit "removal pending" before deleting, so an interrupted prune
 		// never leaves a receipt pointing at a silently deleted backup.
 		pruned := successes[i]
-		// Drop a marker left by an interrupted earlier prune before retrying.
-		original := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(pruned.Detail), "; stage removal by retention pending"))
+		// Drop a marker left by an interrupted or failed earlier prune before retrying.
+		original := strings.TrimSpace(pruned.Detail)
+		for _, marker := range []string{"; stage removal by retention pending", "; stage removal by retention failed; inspect stage"} {
+			original = strings.TrimSpace(strings.TrimSuffix(original, marker))
+		}
 		pruned.Detail = strings.TrimSpace(original + "; stage removal by retention pending")
 		if err := writeReceipt(h.ReceiptRoot, pruned); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("record pruning of %s: %w", pruned.ID, err))
