@@ -318,10 +318,31 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 		}
 		if existing.State == stateScheduled && scheduledReceiptExpired(existing, now) {
 			existing.State = stateFailed
-			existing.Detail = "activation never started before its deadline; no live changes"
+			const detail = "activation never started before its deadline; no live changes"
+			existing.Detail = detail
 			existing.UpdatedAtUnixMS = now.UnixMilli()
+			// Nothing live changed, and failed stages are never pruned later:
+			// remove the never-activated stage now so it cannot pile up. As in
+			// failUnchanged, commit "cleanup pending" first, then the outcome.
+			// Delete only a stage that is exactly <backup root>/<id> beside the
+			// new operation's stage and is a private, non-symlink directory.
+			removable := existing.Stage == filepath.Join(filepath.Dir(stage), otherID) && privateStageDirectory(existing.Stage)
+			if removable {
+				existing.Detail = detail + "; stage cleanup pending"
+			}
 			if err := writeReceipt(root, existing); err != nil {
 				return failure(fmt.Errorf("reconcile expired operation %s: %w", otherID, err))
+			}
+			if removable {
+				existing.Detail = detail + "; stage removed"
+				// Persist the parent directory entry before recording removal,
+				// as removeStage does, so the stage cannot reappear after a crash.
+				if err := os.RemoveAll(existing.Stage); err != nil || syncDirectory(filepath.Dir(existing.Stage)) != nil {
+					existing.Detail = detail + "; stage cleanup failed; inspect stage"
+				}
+				if err := writeReceipt(root, existing); err != nil {
+					return failure(fmt.Errorf("record expired operation %s cleanup: %w", otherID, err))
+				}
 			}
 		}
 		if isActiveReceiptState(existing.State) {
@@ -430,4 +451,15 @@ func UpdateReceipt(root, id, state, stage, detail string) error {
 	existing.Detail = detail
 	existing.UpdatedAtUnixMS = time.Now().UnixMilli()
 	return writeReceipt(root, existing)
+}
+
+// privateStageDirectory reports whether path is a real (non-symlink),
+// root-owned 0700 directory, the shape the helper creates for every stage.
+func privateStageDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
 }

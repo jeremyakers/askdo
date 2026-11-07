@@ -813,16 +813,21 @@ func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.Res
 	_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
 }
 
-// cancelRejectedReservation marks a reservation cancelled when admission
-// definitively rejects the submission before SubmitReservedJob, so status
-// reports it as cancelled instead of a live reservation.
-func (d *daemon) cancelRejectedReservation(uid uint32, requestID string) {
+// rejectReservation marks a reservation cancelled when admission definitively
+// rejects the submission before SubmitReservedJob, then sends the rejection.
+// The client treats these rejections as proof the reservation is retired and
+// drops its cancellation handle, so if cancellation cannot be confirmed it
+// reports a broker error instead and the handle stays usable.
+func (d *daemon) rejectReservation(conn *net.UnixConn, uid uint32, requestID string, event any) {
 	// Bounded: this runs while the handler still owns serialized admission.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := d.store.CancelReservation(ctx, uid, requestID); err != nil {
 		slog.Warn("cancel rejected reservation", "request_id", requestID, "error", err)
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "askdo: request rejected, but its reservation could not be cancelled; use the cancellation handle"})
+		return
 	}
+	_ = writeClient(conn, event)
 }
 
 func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func(), admitted time.Time) {
@@ -896,8 +901,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	if err != nil && admissionCtx.Err() != nil {
 		// The request budget expired during the account lookup: classify it
 		// as a timeout and retire the reservation, not an invalid request.
-		d.cancelRejectedReservation(uid, request.RequestID)
-		_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		d.rejectReservation(conn, uid, request.RequestID, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
 		return
 	}
 	if err != nil {
@@ -920,8 +924,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			spec = "root"
 			target, err = resolveExecutionTargetContext(admissionCtx, spec)
 			if err != nil && admissionCtx.Err() != nil {
-				d.cancelRejectedReservation(uid, request.RequestID)
-				_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+				d.rejectReservation(conn, uid, request.RequestID, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
 				return
 			}
 			if err != nil {
@@ -978,8 +981,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	}
 	policy, fleet := d.policy, d.fleet
 	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 {
-		d.cancelRejectedReservation(uid, request.RequestID)
-		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
+		d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
 		return
 	}
 	// A stored fleet window hashes the signed catalogue route (the job's
@@ -997,14 +999,19 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 				// A missing window is a nil error with a zero stamp; any
 				// error is an unreadable store or an expired request budget,
 				// never proof that authorization is absent.
-				d.cancelRejectedReservation(uid, request.RequestID)
-				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "approval timestamp unavailable"})
+				d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "approval timestamp unavailable"})
 				return
 			}
 			// Resolve Fleet authority only for a window that is still live
 			// by its locally stored expiry; an expired row needs no lookup.
 			if stamp.ExpiresAt.After(time.Now()) {
 				authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
+				if admissionCtx.Err() != nil {
+					// The Fleet lookup ran out the request budget: that is a
+					// timeout, not proof that approval is required.
+					d.rejectReservation(conn, uid, request.RequestID, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+					return
+				}
 				valid = timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
 			}
 		}
@@ -1012,15 +1019,13 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && cfg.Review.MaxAutoRisk(uid) > 0 {
 			threshold, preferenceErr := d.store.GetAutoApprovalThreshold(admissionCtx, uid)
 			if preferenceErr != nil {
-				d.cancelRejectedReservation(uid, request.RequestID)
-				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
+				d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
 				return
 			}
 			canAuto = threshold >= 2
 		}
 		if !valid && !canAuto {
-			d.cancelRejectedReservation(uid, request.RequestID)
-			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
+			d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
 			return
 		}
 	}
@@ -1092,8 +1097,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		cwd.close()
 		d.queue.release()
 		_ = os.RemoveAll(spool.dir)
-		d.cancelRejectedReservation(uid, request.RequestID)
-		_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		d.rejectReservation(conn, uid, request.RequestID, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
 		return
 	}
 	operation := durableOperation(request, target)

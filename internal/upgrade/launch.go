@@ -51,7 +51,9 @@ func cleanupStaleLaunchDirectory(root, name, id, current string, info os.FileInf
 		return nil
 	}
 	r, err := ReadReceipt(root, id)
-	stale := now.After(info.ModTime().Add(OperationTimeout)) || errors.Is(err, os.ErrNotExist)
+	// A receiptless directory may belong to a concurrent scheduler that has
+	// not published its receipt yet; only the operation timeout proves it stale.
+	stale := now.After(info.ModTime().Add(OperationTimeout))
 	if err == nil {
 		stale = stale || !isActiveReceiptState(r.State) || (r.State == stateScheduled && scheduledReceiptExpired(r, now))
 	}

@@ -81,9 +81,39 @@ func shellCommand(ctx context.Context, target string, args []string, login bool)
 		argv = append(argv, "-l")
 	}
 	if len(args) != 0 {
-		argv = append(argv, "-c", strings.Join(args, " "))
+		argv = append(argv, "-c", shellJoin(args))
 	}
 	return argv, fields[5], nil
+}
+
+// shellJoin builds the -c string the way sudo does for -s/-i: every byte
+// other than ASCII letters, digits, '_', '-' and '$' is backslash-escaped, so
+// argument boundaries survive the shell while $VAR expansion still works.
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		if arg == "" {
+			quoted[i] = "''"
+			continue
+		}
+		var b strings.Builder
+		for j := 0; j < len(arg); j++ {
+			c := arg[j]
+			if c == '\n' {
+				// Backslash-newline is a line continuation; single-quote it.
+				b.WriteString("'\n'")
+				continue
+			}
+			if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '$' {
+				b.WriteByte(c)
+				continue
+			}
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		}
+		quoted[i] = b.String()
+	}
+	return strings.Join(quoted, " ")
 }
 
 func runTimestamp(ctx context.Context, action, target string, options Options) int {
