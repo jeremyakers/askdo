@@ -324,7 +324,9 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 			// Nothing live changed, and failed stages are never pruned later:
 			// remove the never-activated stage now so it cannot pile up. As in
 			// failUnchanged, commit "cleanup pending" first, then the outcome.
-			removable := existing.Stage != "" && filepath.IsAbs(existing.Stage) && filepath.Base(existing.Stage) == otherID
+			// Delete only a stage that is exactly <backup root>/<id> beside the
+			// new operation's stage and is a private, non-symlink directory.
+			removable := existing.Stage == filepath.Join(filepath.Dir(stage), otherID) && privateStageDirectory(existing.Stage)
 			if removable {
 				existing.Detail = detail + "; stage cleanup pending"
 			}
@@ -447,4 +449,15 @@ func UpdateReceipt(root, id, state, stage, detail string) error {
 	existing.Detail = detail
 	existing.UpdatedAtUnixMS = time.Now().UnixMilli()
 	return writeReceipt(root, existing)
+}
+
+// privateStageDirectory reports whether path is a real (non-symlink),
+// root-owned 0700 directory, the shape the helper creates for every stage.
+func privateStageDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
 }

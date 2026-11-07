@@ -55,6 +55,15 @@ func TestHelperSuccessfulActivationRetainsOnlyTwoNewestSuccessfulStages(t *testi
 		return stage
 	}
 	older := []string{putStage(30, stateSucceeded, 1000), putStage(20, stateSucceeded, 2000)}
+	// One older stage carries the marker of an interrupted earlier prune.
+	interrupted, err := ReadReceipt(f.helper.ReceiptRoot, filepath.Base(older[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted.Detail = "activated; stage removal by retention pending"
+	if err := writeReceipt(f.helper.ReceiptRoot, interrupted); err != nil {
+		t.Fatal(err)
+	}
 	newestPrevious := putStage(10, stateSucceeded, 3000)
 	keep := []string{newestPrevious, f.stage, putStage(40, stateFailed, 500), putStage(50, stateUnknown, 500), putStage(60, "", 500)}
 	foreign := filepath.Join(f.helper.BackupRoot, "rc22-nas.maintenance")

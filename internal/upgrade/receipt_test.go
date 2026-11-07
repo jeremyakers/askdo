@@ -365,7 +365,7 @@ func TestNewOperationReconcilesOnlyExpiredScheduledReceipts(t *testing.T) {
 			if err := writeReceipt(root, before); err != nil {
 				t.Fatal(err)
 			}
-			unlock, err := NewOperation(root, testOpID2, testRelease, testSourceCommit, "new stage")
+			unlock, err := NewOperation(root, testOpID2, testRelease, testSourceCommit, filepath.Join(filepath.Dir(stage), testOpID2))
 			if err == nil {
 				unlock()
 			}
@@ -767,5 +767,32 @@ func TestRequireMountedDataVolumeRefusesUnmountedDSMVolume(t *testing.T) {
 	// Non-DSM paths are unaffected.
 	if err := requireMountedDataVolume("/var/backups/askdo"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExpiredScheduleNeverDeletesStageOutsideBackupRoot(t *testing.T) {
+	// Given an expired scheduled receipt whose stage is outside the backup root
+	// the new operation uses (a legacy or corrupted path with a matching name).
+	root, elsewhere, backups := t.TempDir(), filepath.Join(t.TempDir(), testOpID), t.TempDir()
+	if err := os.Mkdir(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * OperationTimeout)
+	r := Receipt{Version: 1, ID: testOpID, Release: testRelease, SourceCommit: testSourceCommit, State: stateScheduled, Stage: elsewhere, UpdatedAtUnixMS: old.UnixMilli()}
+	if err := writeReceipt(root, r); err != nil {
+		t.Fatal(err)
+	}
+	// When the next operation reconciles it.
+	unlock, err := NewOperation(root, testOpID2, testRelease, testSourceCommit, filepath.Join(backups, testOpID2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	// Then the unrelated directory survives and the receipt is still reconciled.
+	if _, err := os.Lstat(elsewhere); err != nil {
+		t.Fatalf("stage outside the backup root was deleted: %v", err)
+	}
+	if after, err := ReadReceipt(root, testOpID); err != nil || after.State != stateFailed {
+		t.Fatalf("receipt=%+v err=%v", after, err)
 	}
 }
