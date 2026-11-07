@@ -372,3 +372,38 @@ func TestVariantsAndModelRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogWebfetchPolicySignedAndOptional(t *testing.T) {
+	public, private, _ := ed25519.GenerateKey(rand.Reader)
+	yes, no := true, false
+	for _, tc := range []struct {
+		name string
+		set  *bool
+	}{{"absent", nil}, {"true", &yes}, {"false", &no}} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := catalogFixture(t)
+			want.ReviewerWebfetchEnabled = tc.set
+			wire, err := Sign(private, want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _, err := Verify[Catalog](public, wire)
+			if err != nil || CheckCatalog(got, want, 100) != nil {
+				t.Fatal(err)
+			}
+			if (got.ReviewerWebfetchEnabled == nil) != (tc.set == nil) {
+				t.Fatal("field presence changed through signing")
+			}
+			// A tampered policy must not match the frozen catalog.
+			flipped := got
+			flip := tc.set == nil || !*tc.set
+			flipped.ReviewerWebfetchEnabled = &flip
+			if tc.set != nil && *tc.set == flip {
+				t.Fatal("test bug")
+			}
+			if CheckCatalog(flipped, want, 100) != ErrBinding {
+				t.Fatal("changed policy accepted")
+			}
+		})
+	}
+}

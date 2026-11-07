@@ -1605,7 +1605,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 		RiskPolicy: riskPolicy, AccountNotes: accountNotes,
 		ConfigProjection: proto.ConfigProjection{
 			Models:   models,
-			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.configuration().Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.configuration().Review.WebfetchEnabled, InspectionCaps: j.inspectionCapabilities()},
+			Limits:   proto.WorkerLimits{MaxModelCallsPerAttempt: j.configuration().Review.MaxModelCallsPerAttempt, MaxOutputTokens: j.fleetOutputTokenLimit(), WebfetchEnabled: j.webfetchEnabled(), InspectionCaps: j.inspectionCapabilities()},
 			Telegram: j.workerTelegram(),
 		},
 	}

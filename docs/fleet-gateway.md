@@ -72,6 +72,10 @@ handles provider authentication and proxies responses, including structured
 tool calls, back to that reviewer.
 
 Filesystem and webfetch tools still execute locally under that host's limits.
+The gateway config may set `"reviewer_webfetch_enabled": true|false` (optional
+top-level boolean) to control webfetch for all hosts; it is published in the
+signed catalog and overrides each host's `review.webfetch_enabled`. If omitted,
+each host's own setting applies (as it does with older gateways).
 Only permitted evidence reaches the model; the gateway cannot ask for an
 unrestricted directory dump or bypass the local broker's inspection policy.
 

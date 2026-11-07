@@ -159,7 +159,7 @@ func (j *jobRuntime) fleetTurn(r proto.ModelTurnRequest) (fleetproto.ModelTurn, 
 	if f.turn >= uint32(j.configuration().Review.MaxModelCallsPerAttempt) || r.Request.Model != u.Model || r.Request.MaxOutputTokens < 1 || r.Request.MaxOutputTokens > min(j.fleetOutputTokenLimit(), u.MaxOutputTokens) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
-	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsForCapabilities(j.inspectionCapabilities(), j.configuration().Review.WebfetchEnabled)) {
+	if !reflect.DeepEqual(r.Request.Tools, reviewer.DefinitionsForCapabilities(j.inspectionCapabilities(), j.webfetchEnabled())) {
 		return bad(fleetproto.ErrCodeProtocol)
 	}
 	if snapshot := j.frozenRiskPolicy(); snapshot != nil && !pinsTrustedSystemMessage(snapshot, r.Request.Messages) {
