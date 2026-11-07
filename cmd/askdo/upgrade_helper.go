@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,26 +32,49 @@ import (
 const (
 	upgradeSystemdRun = "/usr/bin/systemd-run"
 	// Public operation metadata only; the private broker state stays private.
-	defaultUpgradeReceiptRoot = "/var/lib/askdo-upgrade"
+	defaultUpgradeReceiptRoot = config.UpgradeReceiptRoot
 )
 
 // Hidden root entry point. Main command routing is deliberately separate from
 // the helper so an ordinary user can never select its privileged dependencies.
+var upgradeReadConfig = operator.ReadRootPrivate
+
 func runUpgradeHelper(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	return runUpgradeHelperWith(ctx, args, getEUID(), func() upgrade.Helper {
-		tools := upgradeSystemTools{}
-		return upgrade.Helper{BackupRoot: "/var/backups/askdo", ReceiptRoot: defaultUpgradeReceiptRoot, Manager: upgradeSystemdManager{tools: tools}, Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
-			return preflightUpgradeTopology(defaultConfigPath, defaultGatewayConfig)
-		}}
+	return runUpgradeHelperWith(ctx, args, getEUID(), func(stage string) (upgrade.Helper, error) {
+		return newUpgradeHelper(defaultConfigPath, stage, upgradeReadConfig)
 	}, stdin, stdout, stderr)
 }
 
-func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func() upgrade.Helper, stdin io.Reader, stdout, stderr io.Writer) int {
+func newUpgradeHelper(configPath, stage string, readConfig func(string, int64) ([]byte, error)) (upgrade.Helper, error) {
+	tools := upgradeSystemTools{}
+	helper := upgrade.Helper{ReceiptRoot: defaultUpgradeReceiptRoot, Manager: newUpgradeActivationManager(tools), Host: &upgradeLocalHost{tools: tools}, Preflight: func(context.Context) error {
+		return preflightUpgradeTopology(configPath, defaultGatewayConfig)
+	}}
+	if stage != "" {
+		// Activation and reconciliation recover their backup root from the
+		// receipt-bound stage, never from configuration edited after scheduling.
+		return helper, nil
+	}
+	data, err := readConfig(configPath, 1<<20)
+	if err != nil {
+		return upgrade.Helper{}, fmt.Errorf("read root upgrade config: %w", err)
+	}
+	cfg, err := config.DecodeForFleetMutation(data)
+	if err != nil {
+		return upgrade.Helper{}, err
+	}
+	if err := cfg.ValidateUpgradeBackupDir(); err != nil {
+		return upgrade.Helper{}, err
+	}
+	helper.BackupRoot = cfg.UpgradeBackupDir
+	return helper, nil
+}
+
+func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory func(string) (upgrade.Helper, error), stdin io.Reader, stdout, stderr io.Writer) int {
 	if euid != 0 {
-		fmt.Fprintln(stderr, "upgrade-helper requires root")
-		return 125
+		return rootRequired(stderr, "upgrade-helper requires root")
 	}
 	flags := flag.NewFlagSet("upgrade-helper", flag.ContinueOnError)
 	flags.SetOutput(io.Discard) // Never echo mistaken secret-valued arguments.
@@ -61,13 +85,31 @@ func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory 
 		fmt.Fprintln(stderr, "invalid upgrade-helper arguments")
 		return 125
 	}
-	helper := factory()
+	helper, err := factory(*activate)
+	if err != nil {
+		fmt.Fprintln(stderr, "upgrade-helper:", err)
+		return 1
+	}
 	if *activate != "" {
 		if host, ok := helper.Host.(*upgradeLocalHost); ok {
 			host.operation = filepath.Base(*activate)
 		}
+		if os.Getenv("ASKDO_UPGRADE_DETACHED") == "1" {
+			if err := upgradeEscapeCgroups(); err != nil {
+				fmt.Fprintln(stderr, "upgrade-helper: escape service cgroups:", err)
+				if receiptErr := helper.FailScheduled(ctx, *activate, "detached activation could not escape service cgroups"); receiptErr != nil {
+					fmt.Fprintln(stderr, "upgrade-helper: record activation failure:", receiptErr)
+				}
+				return 1
+			}
+		}
 		if err := helper.Activate(ctx, *activate); err != nil {
 			fmt.Fprintln(stderr, "upgrade-helper:", err)
+			// Activate owns receipt updates after its preflight. Reconcile only a
+			// still-scheduled receipt when it failed before reaching that point.
+			if receiptErr := helper.FailScheduled(ctx, *activate, "activation failed before receipt ownership; see activation log"); receiptErr != nil {
+				fmt.Fprintln(stderr, "upgrade-helper: reconcile activation receipt:", receiptErr)
+			}
 			return 1
 		}
 		fmt.Fprintln(stdout, "upgrade activation verified:", *activate)
@@ -97,13 +139,84 @@ type upgradeToolRunner interface {
 	Run(context.Context, string, ...string) (string, error)
 }
 
-type upgradeSystemdManager struct{ tools upgradeToolRunner }
+type upgradeSystemdManager struct {
+	tools       upgradeToolRunner
+	receiptRoot string // Tests isolate the fixed executable namespace.
+}
 
-func (m upgradeSystemdManager) Start(ctx context.Context, id, stage string) error {
+// Open once, verify that inode against the approval, then execute that same
+// descriptor. Neither a replaced stage entry nor a replaced parent directory
+// can redirect execution after verification. Arguments are data, not shell code.
+const upgradeActivationScript = `set -eu
+stage=$1
+digest=$2
+candidate=$3
+exec 3<"$candidate"
+printf '%s  %s\n' "$digest" /proc/self/fd/3 | /usr/bin/sha256sum -c -
+exec /proc/self/fd/3 upgrade-helper --activate "$stage"
+`
+
+func upgradeActivationArgs(id, stage, cliDigest, receiptRoot string) ([]string, error) {
+	if !upgradeRuntimeOperation.MatchString(id) || !filepath.IsAbs(stage) || filepath.Clean(stage) != stage || filepath.Base(stage) != id || strings.ContainsRune(stage, 0) {
+		return nil, errors.New("activation stage must be a clean absolute operation directory")
+	}
+	if len(cliDigest) != 64 {
+		return nil, errors.New("activation CLI digest must be 64 hex digits")
+	}
+	if _, err := hex.DecodeString(cliDigest); err != nil {
+		return nil, errors.New("activation CLI digest must be 64 hex digits")
+	}
+	if receiptRoot == "" {
+		receiptRoot = defaultUpgradeReceiptRoot
+	}
+	candidate := filepath.Join(receiptRoot, "activate-"+id, "askdo")
+	return []string{"/bin/sh", "-c", upgradeActivationScript, "sh", stage, cliDigest, candidate}, nil
+}
+
+func (m upgradeSystemdManager) Start(ctx context.Context, id, stage, cliDigest string) error {
+	command, err := upgradeActivationArgs(id, stage, cliDigest, m.receiptRoot)
+	if err != nil {
+		return err
+	}
 	// --no-block is essential for Type=oneshot: wait-for-completion would
 	// deadlock against the scheduling job's own terminal/quietness gate.
-	_, err := m.tools.Run(ctx, upgradeSystemdRun, "--unit=askdo-upgrade-"+id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/usr/local/bin/askdo", "upgrade-helper", "--activate", stage)
+	args := append([]string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--"}, command...)
+	_, err = m.tools.Run(ctx, upgradeSystemdRun, args...)
 	return err
+}
+
+// upgradeDetachedManager is used on hosts without systemd-run, including DSM.
+// The helper starts in a new session, outside the broker's process group, and
+// writes its own durable activation log. The broker does not cancel it during
+// shutdown, so activation can finish and report its receipt after restart.
+type upgradeDetachedManager struct{ receiptRoot string }
+
+func newUpgradeActivationManager(tools upgradeToolRunner) upgrade.ActivationManager {
+	if info, err := os.Stat(upgradeSystemdRun); err == nil && !info.IsDir() {
+		return upgradeSystemdManager{tools: tools}
+	}
+	return upgradeDetachedManager{}
+}
+
+func (m upgradeDetachedManager) Start(_ context.Context, id, stage, cliDigest string) error {
+	command, err := upgradeActivationArgs(id, stage, cliDigest, m.receiptRoot)
+	if err != nil {
+		return err
+	}
+	log, err := os.OpenFile(filepath.Join(stage, "activation.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	cmd := exec.Command(command[0], command[1:]...)
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "UPGRADE_STAGE=" + stage, "ASKDO_UPGRADE_DETACHED=1"}
+	cmd.Dir = "/"
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 type upgradeSystemTools struct{}

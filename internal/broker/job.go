@@ -50,6 +50,7 @@ type jobRuntime struct {
 	executionContainer string
 	cwd                *cwdBinding
 	resolvedArgv       []string
+	target             ExecutionTarget                 // resolved at admission; zero value is root
 	foreground         *foregroundPeer                 // immutable after queue submission
 	handoffReady       chan proto.ForegroundReadyEvent // original submit follower only
 	handoffHash        [32]byte
@@ -419,7 +420,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 	}
 	// Explicit policy exemptions never construct a provider. Codex preparation
 	// failures are typed availability outcomes, not raw provider diagnostics.
-	approvalOnly := !j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)
+	approvalOnly := j.req.ValidateTimestamp || !j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)
 	models := []proto.ProjectedModel{}
 	preflight := []proto.AvailabilityFailure{}
 	if j.configuration().Fleet != nil {
@@ -530,7 +531,9 @@ func (j *jobRuntime) run(ctx context.Context) {
 		}
 		reason := "AI review skipped by configured approval-only policy"
 		history := []proto.AvailabilityFailure{}
-		if j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
+		if j.req.ValidateTimestamp {
+			reason = "Validate approval timestamp only; no command will run"
+		} else if j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
 			reason = "AI review unavailable for all configured models"
 			history = j.orderedAvailabilityHistory(unavailable)
 		} else if len(preflight) != 0 {
@@ -592,6 +595,12 @@ func (j *jobRuntime) run(ctx context.Context) {
 		slog.Warn("approval timestamp unavailable", "request_id", j.req.RequestID, "error", timestampErr)
 	}
 	_, brokerApproval := j.daemon.worker.(interface{ brokerApproval() })
+	// This gate precedes *any* worker/fleet/broker notification. The worker
+	// cannot create an approval card until it receives the frozen manifest.
+	if j.req.NonInteractive && timestampApproval == nil && autoPlan == nil {
+		j.fail("askdo: a Telegram approval is required")
+		return
+	}
 	brokerApproval = brokerApproval && j.fleet == nil && autoPlan == nil
 	if brokerApproval || timestampApproval != nil {
 		switch value := frozen.(type) {
@@ -991,6 +1000,10 @@ func (j *jobRuntime) createHandoff(ctx context.Context, pending *approvalBinding
 	evidence, err := j.daemon.ttyEvidence(peer.pid)
 	if err != nil || evidence != peer.tty {
 		j.fail("submitter terminal identity changed")
+		return
+	}
+	if j.req.ValidateTimestamp {
+		j.completeValidation(ctx, pending, decision)
 		return
 	}
 	var token [32]byte
@@ -1572,19 +1585,20 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	}
 	// Project the actual fixed launch variables, never the private bundle
 	// staging path or any future sensitive execution variable.
-	executionEnvironment := make([]string, 0, 4)
+	executionEnvironment := make([]string, 0, 6)
 	for _, entry := range j.operation().Env {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 		switch name {
-		case "PATH", "HOME", "LANG", "PWD":
+		case "PATH", "HOME", "LANG", "PWD", "USER", "LOGNAME":
 			executionEnvironment = append(executionEnvironment, entry)
 		}
 	}
 	return proto.Bootstrap{
-		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: 0, RequestID: j.req.RequestID,
+		Type: "bootstrap", FleetMode: j.fleet != nil, Host: j.executionHost, TargetUID: j.target.UID, TargetName: j.target.Name, LoginShell: j.req.LoginShell, RequestID: j.req.RequestID,
+		TargetGID: j.target.gid(), TargetGroups: j.target.groups(), TargetGroupNames: j.target.groupNames(),
 		SubmitterUID: j.uid, SubmitterName: j.submitterName, Container: j.executionContainer,
 		Operation: operation, ExecutionEnvironment: executionEnvironment, DeadlineUnixMS: deadlineMS, ReviewDeadlineUnixMS: reviewDeadline,
 		ApprovalOnly: j.approvalOnly, PreflightFailures: append([]proto.AvailabilityFailure(nil), j.preflightFailures...),
@@ -1600,7 +1614,9 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 // operation builds the frozen privileged invocation. The environment is
 // explicit and complete — the executor installs it verbatim and never
 // inherits the daemon's or the caller's environment (no SSH_AUTH_SOCK,
-// BASH_ENV, PYTHONPATH, LD_PRELOAD or credentials).
+// BASH_ENV, PYTHONPATH, LD_PRELOAD or credentials). A non-root target (sudo
+// -u) keeps the same allowlist with HOME set to the account's home directory
+// and USER/LOGNAME naming it; the root launch is unchanged.
 //
 // Both modes run with the submitter's invocation directory as cwd — bound at
 // submission via a held directory descriptor and enforced by the executor's
@@ -1617,7 +1633,13 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 func (j *jobRuntime) operation() Operation {
 	argv := append([]string(nil), j.req.Argv...)
 	cwd := j.req.CWD
-	env := []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PWD=" + cwd}
+	env := []string{"PATH=/usr/bin:/bin", "HOME=" + j.target.home(), "LANG=C.UTF-8", "PWD=" + cwd}
+	if !j.target.root() || j.req.LoginShell {
+		env = append(env, "USER="+j.target.Name, "LOGNAME="+j.target.Name)
+	}
+	if j.req.Lifecycle == proto.LifecycleForeground {
+		env = append(env, "TERM="+j.req.TerminalType)
+	}
 	if len(j.resolvedArgv) != 0 {
 		argv = append([]string(nil), j.resolvedArgv...)
 	}
@@ -1626,7 +1648,9 @@ func (j *jobRuntime) operation() Operation {
 		argv = append([]string{"/bin/bash", "--noprofile", "--norc", entry}, j.req.Args...)
 		env = append(env, "ASKDO_BUNDLE="+j.spool.bundle)
 	}
-	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd}
+	target := j.target
+	target.Groups = j.target.groups()
+	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd, Target: target}
 }
 
 func decodeStoredResult(job store.Job) store.Result {

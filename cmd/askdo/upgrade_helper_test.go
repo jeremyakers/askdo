@@ -3,13 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,9 +56,9 @@ func TestUpgradeHelperRequiresRootBeforeConstructingDependencies(t *testing.T) {
 	// Given
 	var stderr bytes.Buffer
 	called := false
-	factory := func() upgrade.Helper {
+	factory := func(string) (upgrade.Helper, error) {
 		called = true
-		return upgrade.Helper{}
+		return upgrade.Helper{}, nil
 	}
 	// When
 	code := runUpgradeHelperWith(t.Context(), []string{"--activate", "/stage"}, 1000, factory, nil, io.Discard, &stderr)
@@ -66,7 +73,7 @@ func TestUpgradeHelperRejectsAmbiguousArgumentsWithoutEffects(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			// Given
 			called := false
-			factory := func() upgrade.Helper { called = true; return upgrade.Helper{} }
+			factory := func(string) (upgrade.Helper, error) { called = true; return upgrade.Helper{}, nil }
 			// When
 			code := runUpgradeHelperWith(t.Context(), args, 0, factory, nil, io.Discard, io.Discard)
 			// Then
@@ -88,10 +95,76 @@ func (r *trackingUpgradeInput) Read(p []byte) (int, error) {
 	return n, err
 }
 
-type upgradeScheduleManagerFunc func(context.Context, string, string) error
+type upgradeScheduleManagerFunc func(context.Context, string, string, string) error
 
-func (f upgradeScheduleManagerFunc) Start(ctx context.Context, id, stage string) error {
-	return f(ctx, id, stage)
+func (f upgradeScheduleManagerFunc) Start(ctx context.Context, id, stage, cliDigest string) error {
+	return f(ctx, id, stage, cliDigest)
+}
+
+func TestUpgradeHelperUsesRootConfiguredBackupDirectory(t *testing.T) {
+	// Given: the trusted config read seam; candidate, staging and receipts remain
+	// real files. No installed configuration, system tool or live service is used.
+	root := t.TempDir()
+	backup := filepath.Join(root, "data-volume", "upgrade-backups")
+	configPath := filepath.Join(root, "config.json")
+	body := strings.TrimSuffix(hostDoc(), "}") + `,"upgrade_backup_dir":` + strconv.Quote(backup) + `}`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read := false
+	helper, err := newUpgradeHelper(configPath, "", func(path string, max int64) ([]byte, error) {
+		read = path == configPath && max == 1<<20
+		return os.ReadFile(path)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !read || helper.BackupRoot != backup {
+		t.Fatalf("root config read=%v backup=%q, want %q", read, helper.BackupRoot, backup)
+	}
+	helper.Preflight = nil
+	helper.ReceiptRoot = filepath.Join(root, "receipts")
+	helper.TrustDirectory = func(path string, create bool) error {
+		if create {
+			return os.MkdirAll(path, 0o755)
+		}
+		_, err := os.Stat(path)
+		return err
+	}
+	accepted := false
+	helper.Manager = upgradeScheduleManagerFunc(func(_ context.Context, id, stage, _ string) error {
+		accepted = id == cliUpgradeID && stage == filepath.Join(backup, cliUpgradeID)
+		return nil
+	})
+	source := t.TempDir()
+	raw, assets := cliReleaseFixture("v3.2.1")
+	assets["install-manifest.v1"] = []byte(raw)
+	for name, data := range assets {
+		if err := os.WriteFile(filepath.Join(source, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest, err := upgrade.ParseManifest(strings.NewReader(raw), "v3.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := upgrade.NewPlan(cliUpgradeID, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured, _ := json.Marshal(plan)
+	// When: scheduling invokes the helper selected from root-only configuration.
+	_, err = helper.Schedule(t.Context(), cliUpgradeID, source, captured)
+	// Then: only the configured data-volume root contains the private stage.
+	info, statErr := os.Stat(backup)
+	if err != nil || !accepted || statErr != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("configured staging: err=%v accepted=%v root=%v stat=%v", err, accepted, info, statErr)
+	}
+	// A failed trusted read cannot silently fall back to the system partition.
+	_, err = newUpgradeHelper(configPath, "", func(string, int64) ([]byte, error) { return nil, os.ErrPermission })
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("config read failure ignored: %v", err)
+	}
 }
 
 func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
@@ -107,8 +180,8 @@ func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 				input = nil
 			}
 			called := false
-			factory := func() upgrade.Helper {
-				return upgrade.Helper{Manager: upgradeScheduleManagerFunc(func(context.Context, string, string) error { called = true; return nil })}
+			factory := func(string) (upgrade.Helper, error) {
+				return upgrade.Helper{Manager: upgradeScheduleManagerFunc(func(context.Context, string, string, string) error { called = true; return nil })}, nil
 			}
 			var stdout, stderr bytes.Buffer
 			// When
@@ -124,10 +197,73 @@ func TestUpgradeHelperSchedulingRequiresBoundedCapturedStdin(t *testing.T) {
 	}
 }
 
+func TestUpgradeHelperActivationReconcilesWithoutReadingMutableConfig(t *testing.T) {
+	for _, scenario := range []string{"changed root", "unreadable", "malformed"} {
+		t.Run(scenario, func(t *testing.T) {
+			// Given: scheduling selected a root and published its durable receipt.
+			root := t.TempDir()
+			configPath := filepath.Join(root, "config.json")
+			body := func(backup string) []byte {
+				return []byte(strings.TrimSuffix(hostDoc(), "}") + `,"upgrade_backup_dir":` + strconv.Quote(backup) + `}`)
+			}
+			if err := os.WriteFile(configPath, body(filepath.Join(root, "original-backups")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			read := func(path string, _ int64) ([]byte, error) { return os.ReadFile(path) }
+			scheduled, err := newUpgradeHelper(configPath, "", read)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipts := filepath.Join(root, "receipts")
+			stage := filepath.Join(scheduled.BackupRoot, cliUpgradeID)
+			if err := os.MkdirAll(stage, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unlock, err := upgrade.NewOperation(receipts, cliUpgradeID, "v3.2.1", strings.Repeat("ab", 20), stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			unlock()
+			if scenario == "changed root" {
+				err = os.WriteFile(configPath, body(filepath.Join(root, "different-backups")), 0o600)
+			} else if scenario == "malformed" {
+				err = os.WriteFile(configPath, []byte("{malformed"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			reads := 0
+			factory := func(activationStage string) (upgrade.Helper, error) {
+				h, err := newUpgradeHelper(configPath, activationStage, func(path string, max int64) ([]byte, error) {
+					reads++
+					if scenario == "unreadable" {
+						return nil, os.ErrPermission
+					}
+					return read(path, max)
+				})
+				h.ReceiptRoot = receipts
+				h.TrustDirectory = func(path string, _ bool) error { _, err := os.Stat(path); return err }
+				return h, err
+			}
+			var stderr bytes.Buffer
+			// When: a missing activation record fails before Activate owns updates.
+			code := runUpgradeHelperWith(t.Context(), []string{"--activate", stage}, 0, factory, nil, io.Discard, &stderr)
+			// Then: config cannot strand the receipt scheduled or block later work.
+			r, err := upgrade.ReadReceipt(receipts, cliUpgradeID)
+			if code != 1 || err != nil || r.State != "failed" || reads != 0 || !strings.Contains(r.Detail, "stage removed") {
+				t.Fatalf("activation code=%d reads=%d receipt=%+v err=%v stderr=%s", code, reads, r, err, &stderr)
+			}
+			if _, err := os.Stat(stage); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unused stage retained: %v", err)
+			}
+		})
+	}
+}
+
 func TestUpgradeHelperActivateDoesNotConsumeStdin(t *testing.T) {
 	// Given: activation reads the trusted stage, not a new approval stream.
 	input := &trackingUpgradeInput{Reader: strings.NewReader("must not be consumed")}
-	factory := func() upgrade.Helper { return upgrade.Helper{} }
+	factory := func(string) (upgrade.Helper, error) { return upgrade.Helper{}, nil }
 	// When: even a rejected activation must not inspect scheduling stdin.
 	code := runUpgradeHelperWith(t.Context(), []string{"--activate", "/not-a-stage"}, 0, factory, input, io.Discard, io.Discard)
 	// Then
@@ -149,9 +285,10 @@ func TestMainPassesStdinToUpgradeHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer input.Close()
-	previousInput, previousUID := os.Stdin, getEUID
+	previousInput, previousUID, previousRead := os.Stdin, getEUID, upgradeReadConfig
 	os.Stdin, getEUID = input, func() int { return 0 }
-	defer func() { os.Stdin, getEUID = previousInput, previousUID }()
+	upgradeReadConfig = func(string, int64) ([]byte, error) { return []byte(hostDoc()), nil }
+	defer func() { os.Stdin, getEUID, upgradeReadConfig = previousInput, previousUID, previousRead }()
 	// When
 	code := runWithClient([]string{"upgrade-helper", "--operation", cliUpgradeID, "--source", t.TempDir()}, func(context.Context, []string, client.Options) int {
 		t.Fatal("helper routed to ordinary client")
@@ -170,9 +307,10 @@ func TestUpgradeSystemdManagerStartsUniqueIndependentOneShotWithoutWaiting(t *te
 	manager := upgradeSystemdManager{tools: tools}
 	id, stage := "up_"+strings.Repeat("ab", 16), "/var/backups/askdo/up_"+strings.Repeat("ab", 16)
 	// When
-	err := manager.Start(t.Context(), id, stage)
+	digest := strings.Repeat("ab", 32)
+	err := manager.Start(t.Context(), id, stage, digest)
 	// Then
-	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/usr/local/bin/askdo", "upgrade-helper", "--activate", stage}}}
+	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/bin/sh", "-c", upgradeActivationScript, "sh", stage, digest, filepath.Join(defaultUpgradeReceiptRoot, "activate-"+id, "askdo")}}}
 	if err != nil || !reflect.DeepEqual(tools.calls, want) {
 		t.Fatalf("manager: %v calls=%+v", err, tools.calls)
 	}
@@ -328,3 +466,165 @@ func TestUpgradeBrokerProbeRequiresValidatedResponseNotJustConnect(t *testing.T)
 type upgradeRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f upgradeRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestUpgradeDetachedManagerStartsStagedHelper(t *testing.T) {
+	// Given a verified helper copied off the backup volume and no systemd-run dependency.
+	stage := filepath.Join(t.TempDir(), "quotes ' spaces $()", cliUpgradeID)
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	receipts := t.TempDir()
+	helper := filepath.Join(receipts, "activate-"+cliUpgradeID, "askdo")
+	if err := os.Mkdir(filepath.Dir(helper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := []byte("#!/bin/sh\nprintf '%s\\n' \"$0\" \"$UPGRADE_STAGE $ASKDO_UPGRADE_DETACHED\" \"$@\" \"$PWD\" \"$PATH\" \"$LANG $LC_ALL\" > \"$UPGRADE_STAGE/executed\"\nprintf 'stderr preserved\\n' >&2\n")
+	if err := os.WriteFile(helper, candidate, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(candidate)
+	// When the detached manager starts activation.
+	if err := (upgradeDetachedManager{receiptRoot: receipts}).Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	// Then the staged helper, not the old installed binary, produced the log.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(filepath.Join(stage, "executed"))
+		log, logErr := os.ReadFile(filepath.Join(stage, "activation.log"))
+		if err == nil && logErr == nil && strings.Contains(string(log), "stderr preserved") {
+			want := "/proc/self/fd/3\n" + stage + " 1\nupgrade-helper\n--activate\n" + stage + "\n/\n/usr/sbin:/usr/bin:/sbin:/bin\nC C\n"
+			if string(data) != want || !strings.Contains(string(log), "/proc/self/fd/3: OK") {
+				t.Fatalf("activation output=%q log=%q", data, log)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("staged helper did not write activation log")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestUpgradeActivationManagersRejectInvalidBindingsBeforeLaunch(t *testing.T) {
+	id, digest := cliUpgradeID, strings.Repeat("ab", 32)
+	stage := filepath.Join(t.TempDir(), id)
+	for _, tc := range []struct{ name, id, stage, digest string }{
+		{"invalid operation", "up_invalid", stage, digest},
+		{"relative stage", id, id, digest},
+		{"unclean stage", id, "/backups/../backups/" + id, digest},
+		{"different operation", id, filepath.Join(t.TempDir(), "up_"+strings.Repeat("34", 16)), digest},
+		{"nul in stage", id, "/backups\x00/" + id, digest},
+		{"short digest", id, stage, "ab"},
+		{"nonhex digest", id, stage, strings.Repeat("z", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tools := &fakeUpgradeTools{}
+			for _, manager := range []upgrade.ActivationManager{upgradeSystemdManager{tools: tools}, upgradeDetachedManager{}} {
+				if err := manager.Start(t.Context(), tc.id, tc.stage, tc.digest); err == nil {
+					t.Fatal("invalid activation binding accepted")
+				}
+			}
+			if len(tools.calls) != 0 {
+				t.Fatalf("invalid binding reached systemd-run: %+v", tools.calls)
+			}
+			if _, err := os.Stat(filepath.Join(stage, "activation.log")); !os.IsNotExist(err) {
+				t.Fatalf("invalid binding created activation log: %v", err)
+			}
+		})
+	}
+}
+
+// Execute the unit's actual command locally, without talking to a live systemd.
+type activationShellTools struct{ output string }
+
+func (s *activationShellTools) Run(ctx context.Context, path string, args ...string) (string, error) {
+	if path != upgradeSystemdRun || len(args) != 13 || args[5] != "--" {
+		return "", fmt.Errorf("unexpected systemd command: %s %q", path, args)
+	}
+	output, err := exec.CommandContext(ctx, args[6], args[7:]...).CombinedOutput()
+	s.output = string(output)
+	return string(output), err
+}
+
+func TestUpgradeActivationRejectsReplacedCandidateBeforeExecution(t *testing.T) {
+	for _, detached := range []bool{false, true} {
+		name := "systemd command"
+		if detached {
+			name = "detached"
+		}
+		t.Run(name, func(t *testing.T) {
+			stage := filepath.Join(t.TempDir(), cliUpgradeID)
+			if err := os.Mkdir(stage, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			receipts := t.TempDir()
+			candidate := filepath.Join(receipts, "activate-"+cliUpgradeID, "askdo")
+			if err := os.Mkdir(filepath.Dir(candidate), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			approved := []byte("#!/bin/sh\nprintf approved > \"$3/executed\"\n")
+			if err := os.WriteFile(candidate, approved, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// The scheduler freezes this digest after validating the candidate.
+			digest := sha256.Sum256(approved)
+			// An ACL writer swaps in a different inode before the manager opens it.
+			replacement := candidate + ".replacement"
+			if err := os.WriteFile(replacement, []byte("#!/bin/sh\nprintf replaced > \"$3/executed\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, candidate); err != nil {
+				t.Fatal(err)
+			}
+			if !detached {
+				tools := &activationShellTools{}
+				manager := upgradeSystemdManager{tools: tools, receiptRoot: receipts}
+				if err := manager.Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err == nil {
+					t.Fatal("digest mismatch did not make shell exit nonzero")
+				}
+				if !strings.Contains(tools.output, "did NOT match") {
+					t.Fatalf("shell failed for a reason other than digest mismatch: %s", tools.output)
+				}
+			} else {
+				unlock, err := upgrade.NewOperation(receipts, cliUpgradeID, "v2.3.4", strings.Repeat("ab", 20), stage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unlock()
+				if err := (upgradeDetachedManager{receiptRoot: receipts}).Start(t.Context(), cliUpgradeID, stage, hex.EncodeToString(digest[:])); err != nil {
+					t.Fatalf("shell startup was not accepted: %v", err)
+				}
+				deadline := time.Now().Add(2 * time.Second)
+				for {
+					log, err := os.ReadFile(filepath.Join(stage, "activation.log"))
+					if err == nil && strings.Contains(string(log), "did NOT match") {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("shell did not report digest mismatch: log=%q err=%v", log, err)
+					}
+					time.Sleep(time.Millisecond)
+				}
+				// No approved helper ran, so it cannot call FailScheduled. Admission
+				// reconciles this receipt after its deadline; explicit recovery can
+				// also fail it immediately using the existing trusted helper path.
+				r, err := upgrade.ReadReceipt(receipts, cliUpgradeID)
+				if err != nil || r.State != "scheduled" {
+					t.Fatalf("pre-helper failure receipt=%+v err=%v", r, err)
+				}
+				helper := upgrade.Helper{BackupRoot: filepath.Dir(stage), ReceiptRoot: receipts, TrustDirectory: func(string, bool) error { return nil }}
+				if err := helper.FailScheduled(t.Context(), stage, "candidate digest mismatch; no helper executed"); err != nil {
+					t.Fatal(err)
+				}
+				r, err = upgrade.ReadReceipt(receipts, cliUpgradeID)
+				if err != nil || r.State != "failed" {
+					t.Fatalf("reconciled receipt=%+v err=%v", r, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(stage, "executed")); !os.IsNotExist(err) {
+				t.Fatalf("replacement executed: %v", err)
+			}
+		})
+	}
+}

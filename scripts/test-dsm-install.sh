@@ -6,7 +6,7 @@ if [ "${1:-}" != --inside ]; then
   case "$(docker info --format '{{json .SecurityOptions}}')" in
     *'"name=rootless"'*) ;; *) exit 1 ;;
   esac
-  C=$(docker create --tmpfs /stage:rw,noexec,mode=0700 -w /src golang:1.27 sh /src/scripts/test-dsm-install.sh --inside "${1:-}")
+  C=$(docker create -e GOMAXPROCS -e GOFLAGS --tmpfs /stage:rw,noexec,mode=0700 -w /src golang:1.27 sh /src/scripts/test-dsm-install.sh --inside "${1:-}")
   trap 'docker rm -f "$C" >/dev/null 2>&1 || :' EXIT
   git -C "$ROOT" ls-files -z | tar -C "$ROOT" --null -T - -cf - | docker cp - "$C:/src"
   docker cp "$0" "$C:/src/scripts/test-dsm-install.sh"
@@ -19,7 +19,7 @@ if [ "${1:-}" != --inside ]; then
 fi
 fail() { printf '%s\n' "$*" >&2; cat /tmp/result >&2; exit 1; }
 apt-get update -qq >/dev/null && apt-get install -y -qq sudo python3 >/dev/null
-mkdir -p /etc.defaults /usr/syno/sbin /usr/syno/bin /fixture /usr/local/libexec
+mkdir -p /etc.defaults /usr/syno/sbin /usr/syno/bin /fixture /usr/local/libexec /volume1
 # Native absence replies for synouser/synogroup adapters. The measured DSM user
 # reply lists the absence code before the source hint; shape files are per kind.
 cat > /fixture/absence.sh <<'EOF'
@@ -66,6 +66,7 @@ cat > /usr/syno/bin/synoacltool <<'EOF'
 #!/bin/sh
 if [ -e /fixture/acl-unknown ]; then echo 'unknown ACL'; exit 255; fi
 if [ -e /fixture/acl-permission ]; then echo 'permission denied'; exit 1; fi
+if [ -e /fixture/volume-acl ] && [ "$2" = /volume1 ]; then echo 'native ACL'; exit 0; fi
 if [ -e /fixture/validator-foreign ]; then
   case "$2" in /usr/local/libexec/.askdo-validate.*) if [ -d "$2" ]; then echo foreign > "$2/foreign"; fi;; esac
 fi
@@ -148,15 +149,19 @@ if grep -q forbidden-go /fixture/calls; then fail 'destination Go invoked'; fi
 cmp /etc/sudoers.d/askdo /src/contrib/askdo.sudoers || fail 'policy mismatch'
 test "$(stat -c %g /etc/askdo/credentials)" = "$(/usr/bin/getent group askdo-review | cut -d: -f3)" || fail 'named credential group mismatch'
 if grep -E '^service (enable|start|restart)' /fixture/calls; then fail 'service activated'; fi
+python3 -I -S -c 'import json; assert json.load(open("/etc/askdo/config.json"))["upgrade_backup_dir"] == "/volume1/@askdo/upgrade-backups"' || fail 'DSM backup directory not configured on data volume'
+test "$(stat -c %a:%u:%g /volume1/@askdo/upgrade-backups)" = 700:0:0 || fail 'DSM backup directory not root-private'
 printf 'DSM fresh success passed (native adapters only)\n'
 uid=$(id -u askdo-review)
 gid=$(/usr/bin/getent group askdo-review | cut -d: -f3)
 /usr/sbin/useradd -G askdo -s /usr/sbin/nologin existing-submitter
 printf 'operator configuration\n' > /etc/askdo/config.json
+rmdir /volume1/@askdo/upgrade-backups /volume1/@askdo
 : > /fixture/calls
 sh /src/install.sh > /tmp/result 2>&1 || fail 'repeat DSM install failed'
 test "$(id -u askdo-review)" = "$uid" && test "$(/usr/bin/getent group askdo-review | cut -d: -f3)" = "$gid" || fail 'repeat identities changed'
 grep -qx 'operator configuration' /etc/askdo/config.json || fail 'operator config changed'
+test ! -e /volume1/@askdo || fail 'existing install automatically created a backup directory'
 id -nG existing-submitter | grep -qw askdo || fail 'existing submitter membership changed'
 if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'repeat mutated roles or used generic backend'; fi
 reset_fixture() {
@@ -166,7 +171,7 @@ reset_fixture() {
   /usr/sbin/groupdel askdo 2>/dev/null || :
   sed -i '/^#/d' /etc/group /etc/passwd
   rm -f /fixture/nss-header
-  rm -rf /etc/askdo /var/lib/askdo /var/lib/askdo-review /run/askdo
+  rm -rf /etc/askdo /var/lib/askdo /var/lib/askdo-review /run/askdo /volume1/@askdo
   rm -f /usr/local/bin/askdo /usr/local/libexec/askdo-launch /etc/sudoers.d/askdo \
     /etc/systemd/system/askdo.service /etc/systemd/system/askdo-gateway.service
   rm -f /fixture/enabled /fixture/*-permission /fixture/acl-unknown /fixture/bad-* \
@@ -181,6 +186,29 @@ expect_failure() {
 no_mutations() {
   if grep -E '^(user|group) (add|del)|generic-' /fixture/calls; then fail 'early failure mutated identity'; fi
 }
+# A data-volume recommendation must not become a fresh-install prerequisite.
+for volume in missing symlink writable nonroot acl; do
+  reset_fixture
+  case "$volume" in
+    missing) rmdir /volume1 ;;
+    symlink) rmdir /volume1; ln -s /fixture /volume1 ;;
+    writable) chmod 0777 /volume1 ;;
+    nonroot) chown 65534:65534 /volume1 ;;
+    acl) touch /fixture/volume-acl ;;
+  esac
+  sh /src/install.sh > /tmp/result 2>&1 || fail "DSM install without trusted volume failed ($volume)"
+  python3 -I -S -c 'import json; assert "upgrade_backup_dir" not in json.load(open("/etc/askdo/config.json"))' || fail 'fallback did not preserve the previous backup default'
+  grep -q 'WARNING.*upgrade_backup_dir.*trusted data-volume directory' /tmp/result || fail 'missing fallback recommendation'
+  test ! -e /volume1/@askdo || fail 'fallback touched untrusted volume'
+  case "$volume" in
+    missing) mkdir /volume1 ;;
+    symlink) rm /volume1; mkdir /volume1 ;;
+    writable) chmod 0755 /volume1 ;;
+    nonroot) chown 0:0 /volume1 ;;
+    acl) rm /fixture/volume-acl ;;
+  esac
+  printf 'DSM backup-volume fallback passed: %s\n' "$volume"
+done
 # Native absence diagnostics: both recognized lines, either order, only with 255 and no local row.
 for absent in user:reverse user:forward group:reverse group:forward; do
   reset_fixture

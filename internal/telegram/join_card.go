@@ -61,6 +61,6 @@ func RenderJoinCard(in JoinCardInput, nonce string) (string, InlineKeyboardMarku
 		"<b>Profiles:</b> " + scope + "\n" +
 		"<b>Channel:</b> " + esc(in.Channel) + "\n" +
 		fmt.Sprintf("<b>Expires:</b> %s\n", esc(expiryText(in.Expiry))) +
-		"Approve only if you expected this request and its code matches the host."
+		"Confirm this code matches the host terminal before approving. The code binds this request to the gateway certificate. Do not approve if the codes differ or you did not expect this request."
 	return text, keyboard, nil
 }

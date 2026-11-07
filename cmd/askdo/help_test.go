@@ -67,9 +67,16 @@ func TestTopLevelHelpRoutesWithoutIO(t *testing.T) {
 		if code != 0 || calls != 0 {
 			t.Fatalf("%s: code=%d clientCalls=%d", arg, code, calls)
 		}
-		for _, want := range []string{"--reason", "--timeout", "--detach", "--script PATH", "--", "auth login|status|logout", "config check", "gateway", "askdo auth --help"} {
+		for _, want := range []string{"-u USER", "--user USER", "#UID", "askdo -u tyme npm start", "askdo -u '#1001' id -u", "--reason", "--timeout", "--detach", "--script PATH", "--", "askdo-config --help", "askdo-config auth --help"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%s: help missing %q", arg, want)
+			}
+		}
+		// Bundle and script submissions run as root only, so their synopsis
+		// lines must not advertise a target the broker refuses.
+		for _, line := range strings.Split(out, "\n") {
+			if (strings.Contains(line, "--bundle DIR") || strings.Contains(line, "--script PATH")) && strings.Contains(line, "-u USER") {
+				t.Fatalf("%s: root-only synopsis advertises -u: %q", arg, line)
 			}
 		}
 	}
@@ -93,6 +100,31 @@ func TestHelpWordsAreNotHijackedFromCommands(t *testing.T) {
 	}
 	if topHelpRequested([]string{"reviewer"}) || topHelpRequested(nil) {
 		t.Fatal("bare reviewer and no-arg must not route to help")
+	}
+}
+
+func TestTopLevelHelpListsSudoFlags(t *testing.T) {
+	out := captureStdout(t, func() {
+		code := runWithClient([]string{"--help"}, func(context.Context, []string, client.Options) int {
+			t.Error("help invoked the client")
+			return 99
+		})
+		if code != 0 {
+			t.Errorf("askdo --help exit=%d", code)
+		}
+	})
+	tokens := make(map[string]bool)
+	for _, token := range strings.Fields(strings.NewReplacer(",", " ", "[", " ", "]", " ", "|", " ").Replace(out)) {
+		tokens[token] = true
+	}
+	for _, flag := range []string{
+		"-k", "--reset-timestamp", "-K", "--remove-timestamp",
+		"-v", "--validate", "-n", "--non-interactive",
+		"-s", "--shell", "-i", "--login", "-l", "--list",
+	} {
+		if !tokens[flag] {
+			t.Errorf("askdo --help missing flag token %q", flag)
+		}
 	}
 }
 

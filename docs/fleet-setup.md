@@ -18,9 +18,10 @@ access.
 - A Linux host for the gateway (it needs inbound HTTPS from the fleet hosts
   and outbound HTTPS to providers and Telegram).
 - A TLS certificate and key for the gateway's public name, provisioned by
-  you. There is no self-signed auto-generation, insecure mode, or
-  trust-on-first-use: hosts verify the certificate chain with normal
-  hostname checks, optionally against an explicitly supplied additional CA.
+  you, with matching DNS/IP SANs and valid dates. There is no self-signed
+  auto-generation or insecure mode. Publicly trusted certificates and private
+  LAN certificates are supported; joining hosts confirm gateway identity by
+  comparing a certificate-bound request code with the Telegram card below.
 - A Telegram bot **dedicated to the gateway**. One running poller per bot
   token, ever (see [cutover](#exclusive-bot-cutover-and-rollback)).
 - Optional: provider API keys or a Codex subscription for central AI review.
@@ -45,7 +46,7 @@ sudo install -d -m 0700 /etc/askdo-gateway /etc/askdo-gateway/credentials
 sudo install -m 0444 -o root -g root tls.crt /etc/askdo-gateway/tls.crt   # your cert (0400 also fine)
 sudo install -m 0600 -o root -g root tls.key /etc/askdo-gateway/tls.key   # your key
 sudo install -m 0600 -o root -g root /dev/stdin /etc/askdo-gateway/credentials/telegram.token  # paste the bot token
-sudo askdo gateway init \
+sudo askdo-config gateway init \
   --url https://gateway.example.com:8443 \
   --listen 0.0.0.0:8443 \
   --tls-cert /etc/askdo-gateway/tls.crt \
@@ -70,7 +71,7 @@ files is refused; `--force` is not a signing-key rotation command.
 Start the service explicitly when ready:
 
 ```sh
-sudo askdo gateway check --config /etc/askdo-gateway/config.json
+sudo askdo-config gateway check --config /etc/askdo-gateway/config.json
 sudo systemctl enable --now askdo-gateway
 ```
 
@@ -82,16 +83,66 @@ configured provider endpoints with a synthetic fixture (never host files).
 With askdo installed, run **on the joining host**:
 
 ```sh
-sudo askdo fleet join https://gateway.example.com:8443
-# For a private CA, add --ca-file /path/to/root-owned-read-only-ca.pem
+sudo askdo-config fleet join https://gateway.example.com:8443
+# Optional explicit trust: --ca-file /path/to/root-owned-read-only-ca.pem
 ```
 
-Match the printed request code to the dedicated **fleet enrollment** card in
-Telegram, then tap **Approve**. No server-side host command, bundle copy,
-profile flag or channel flag is needed. Join automatically allows/selects the
+Approve the dedicated **fleet enrollment** card in Telegram **ONLY if its
+six-character request code matches the host terminal**. No server-side host
+command, bundle copy, profile flag or channel flag is needed. Join automatically allows/selects the
 gateway's configured profiles (up to the existing 16-profile selection limit)
 and uses the channel literally named `default`; no profiles means approval-only.
 The host generates its bearer locally; the gateway stores only its hash.
+For a provisionally trusted private CA, keep the host terminal open: after the
+gateway reports approval, it asks `Did the Telegram card show code XXXXXX, and
+did you approve it? [y/N] `. Answer `y` or `yes` only after comparing the code
+and approving that card yourself. A gateway's approval claim alone is not proof
+that a Telegram card existed.
+
+### Gateway trust and the request code
+
+On a private LAN, no CA copying or fingerprint pasting is needed. Without
+`--ca-file`, an **unknown certificate authority only** permits
+provisional trust of the certificate on the first TLS connection. The host pins
+the top-most certificate the gateway presented (a root/intermediate when sent,
+otherwise the leaf). Normal Go TLS verification still checks the chain,
+DNS/IP SANs, validity and server-auth usage; an expired, not-yet-valid or
+wrong-name certificate is refused, not provisionally trusted.
+
+The host's first leaf certificate and top-most anchor cannot change during that
+join, even to another valid leaf from the same CA. A change aborts enrollment;
+rerun `fleet join` and compare the new code. Only after approval and terminal
+confirmation (when trust is provisional) is the anchor
+saved as the existing `<host_id>.ca.pem` credential for later fleet connections.
+An explicit `--ca-file` retains normal system-plus-supplied-CA verification and
+is saved unchanged; it never falls back to provisional trust. System-trusted
+gateways and `--ca-file` joins do not ask the terminal confirmation question.
+For provisional trust, the answer is read from `/dev/tty`, never piped stdin.
+Anything other than `y`/`yes` (case-insensitive), EOF, or an unavailable terminal
+aborts with `enrollment not confirmed; local configuration unchanged`: no local
+config, bearer, verification key or CA is installed, and setup does not run.
+
+The version-2 join first commits to a fresh host nonce without disclosing it.
+The gateway durably fixes its own random nonce and the request's hashes before
+returning that challenge. Only then does the host reveal its nonce, authenticated
+with its join secret. The gateway verifies the commitment before making the
+Telegram card available; the host prints its code only after reveal acceptance.
+Replayed POSTs cannot replace the fixed hashes, commitment or gateway nonce, and
+a second reveal is rejected (a lost response is recovered through status).
+
+The request code binds the host ID, bearer hash, join-secret hash, commitment,
+both nonces and SHA-256 of the gateway's **leaf certificate**. This commit/reveal
+exchange prevents a TLS relay from adaptively grinding substitute join hashes
+after learning the host nonce. The host uses the leaf it actually received;
+the gateway uses its own serving leaf, including when system trust or
+`--ca-file` is used. A TLS relay with a different certificate normally produces
+different codes on the host and the genuine gateway's Telegram card. The
+six-hex-digit comparison provides 24-bit authentication per fixed exchange,
+not an absolute collision guarantee.
+**Approving a card whose code differs from the terminal is unsafe: do not approve
+it.** The code is not a credential or automatic approval. It is printed only
+after the gateway accepts the reveal, with the remaining enrollment wait time.
+Older join-wire versions are rejected; upgrade the host and gateway together.
 
 Join preflights local policy before sending a card, installs the root-private
 v5 config and credentials, validates them offline, adds the invoking non-root
@@ -113,11 +164,11 @@ created (individual credentials; one fleet-wide key would lose isolation and
 revocation):
 
 ```sh
-sudo askdo gateway hosts add --config /etc/askdo-gateway/config.json \
+askdo-config gateway hosts add --config /etc/askdo-gateway/config.json \
   --output /root/host-pi-bundle.json \
   --channel default --default-channel default
 # optional extras:  --uid-channel 1000=default   --ca-file /etc/askdo-gateway/ca.pem
-sudo askdo gateway hosts list --config /etc/askdo-gateway/config.json
+askdo-config gateway hosts list --config /etc/askdo-gateway/config.json
 ```
 
 The bundle is written root-only `0600` and contains the individual host ID,
@@ -127,8 +178,8 @@ database. Treat the bundle as a secret until it is imported on the host;
 copy it over a trusted channel, then on the host:
 
 ```sh
-sudo askdo gateway connect --enrollment /root/host-pi-bundle.json --approval-only
-sudo askdo config check
+sudo askdo-config gateway connect --enrollment /root/host-pi-bundle.json --approval-only
+sudo askdo-config config check
 ```
 
 A running host broker uses the new connection for its next submitted job;
@@ -191,7 +242,7 @@ then validate and restart:
 ```
 
 ```sh
-sudo askdo gateway check --config /etc/askdo-gateway/config.json
+askdo-config gateway check --config /etc/askdo-gateway/config.json
 sudo systemctl restart askdo-gateway
 ```
 
@@ -199,7 +250,7 @@ For the ChatGPT-subscription Codex backend, log in centrally — exactly once,
 on the gateway:
 
 ```sh
-sudo askdo auth login openai-codex --token-file /etc/askdo-gateway/credentials/openai-codex.json
+askdo-config auth login openai-codex --token-file /etc/askdo-gateway/credentials/openai-codex.json
 ```
 
 and use a profile with `"api": "openai_codex"`, `"api_key_file"` pointing at
@@ -212,7 +263,7 @@ whose outcome is uncertain (`refresh_pending`) requires re-login; an old
 refresh token is never retried. Hosts never hold OAuth copies.
 
 Once the profile is configured, re-authorize with no path:
-`sudo askdo auth login` (also `auth status` / `auth logout`) reads
+`askdo-config auth login` (also `auth status` / `auth logout`) reads
 `/etc/askdo-gateway/config.json` and `/etc/askdo/config.json`, and uses the
 one configured `openai_codex` token file. If both name different files the
 command stops and asks for `--config PATH` (or `--token-file`). On a
@@ -222,7 +273,7 @@ instead of creating an unused local copy.
 Then enroll (or re-enroll) hosts with the profile allowed and selected:
 
 ```sh
-sudo askdo gateway hosts add --config /etc/askdo-gateway/config.json \
+askdo-config gateway hosts add --config /etc/askdo-gateway/config.json \
   --output /root/host-pi-ai-bundle.json \
   --profile local --channel default --default-channel default
 ```
@@ -231,7 +282,7 @@ Use a fresh bundle filename: `hosts add` does not overwrite the approval-only
 bundle from step 2. Transfer the new bundle to the host, then:
 
 ```sh
-sudo askdo gateway connect --enrollment /root/host-pi-ai-bundle.json --profile local
+askdo-config gateway connect --enrollment /root/host-pi-ai-bundle.json --profile local
 ```
 
 If the host used step 2's `--approval-only`, edit its root-owned
@@ -240,8 +291,8 @@ review. Keep the other local policy fields unchanged; selecting `local` does
 not itself change the mode. Validate the new configuration:
 
 ```sh
-sudo askdo config check
-sudo askdo config check --live
+askdo-config config check
+askdo-config config check --live
 ```
 
 New submissions use that policy without restarting the local broker; queued,
@@ -257,7 +308,7 @@ working; creating a new enrollment does not revoke the old credential.
 ## Revocation and its limits
 
 ```sh
-sudo askdo gateway hosts revoke HOST_ID --config /etc/askdo-gateway/config.json
+askdo-config gateway hosts revoke HOST_ID --config /etc/askdo-gateway/config.json
 ```
 
 Revocation takes effect live in the gateway database: the host's

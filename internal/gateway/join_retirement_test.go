@@ -252,7 +252,7 @@ func TestJoinRetirementIndexesUpgradeExistingV2(t *testing.T) {
 		t.Fatal("v2 index upgrade changed protocol state", status, err)
 	}
 	var version int
-	if err := reopened.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := reopened.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
 		t.Fatal("index upgrade changed schema generation", version, err)
 	}
 }

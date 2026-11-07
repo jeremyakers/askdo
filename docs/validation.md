@@ -87,7 +87,8 @@ reviewer and broker over real TLS and real SQLite.
 `scripts/test-fleet-binary.sh` goes one step further: it builds a disposable
 fixture-tagged binary (`go build -tags askdo_fleet_fixture ./cmd/askdo`; a
 normal build has **no** Telegram endpoint override) and runs an actual
-compiled `askdo gateway serve` subprocess serving verified TLS, while two
+compiled `askdo gateway serve` (the notice-free service alias of
+`askdo-config gateway serve`) subprocess serving verified TLS, while two
 isolated in-process root brokers (separate spool, socket and SQLite store)
 approve **colliding local job IDs** concurrently — proving one waiting host
 does not block another and that signed proofs stay bound to separate host
@@ -220,18 +221,18 @@ No new capability is enabled by these instructions or shipped example defaults.
 Run these as root after a reviewed installation:
 
 ```sh
-askdo config check         # offline validation + warnings + kernel feature
+askdo-config config check         # offline validation + warnings + kernel feature
                            # probe (prints the actually selected backend)
-askdo config check --live  # additionally probes each model endpoint
+askdo-config config check --live  # additionally probes each model endpoint
                            # with a synthetic fixture (never host files)
-askdo inspection check /path/to/file   # diagnose a rule without reading content
+askdo-config inspection check /path/to/file   # diagnose a rule without reading content
 systemctl status askdo
 journalctl -u askdo
 ```
 
 A fleet host runs the same `config check [--live]` (it validates the v5 fleet
 connection and exercises the signed gateway catalog). On a gateway server,
-`askdo gateway check --config /etc/askdo-gateway/config.json [--live]`
+`askdo-config gateway check --config /etc/askdo-gateway/config.json [--live]`
 validates the server config and probes its provider endpoints the same way.
 
 `config check --live` sends a synthetic multi-turn tool fixture to each

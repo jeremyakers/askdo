@@ -8,12 +8,16 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const reviewUsage = "usage: askdo review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review timestamp set USER SECONDS|clear USER|list [--config PATH] | review log [--since DURATION] [--job ID] [--json]"
+const reviewUsage = "usage: askdo-config review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review timestamp_timeout set USER VALUE|clear USER|list [--config PATH] | review log [--since DURATION] [--job ID] [--json]\nVALUE matches sudo's timestamp_timeout: minutes (decimals allowed), or Go durations like 90s, 10m, 1h; range 30s..1h. One approval is reused on the same terminal, per target user."
 
 func runReview(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, reviewUsage)
 		return 125
+	}
+	if len(args) == 1 && isHelpWord(args[0]) {
+		fmt.Fprintln(stdout, reviewUsage)
+		return 0
 	}
 	switch args[0] {
 	case "log":
@@ -23,7 +27,13 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	case "exempt":
 		return reviewExempt(args[1:], stdout, stderr)
 	case "timestamp":
-		return reviewTimestamp(args[1:], stdout, stderr)
+		code := reviewTimestamp(args[1:], stdout, stderr)
+		if approval, ok := stderr.(*configApproval); !ok || !approval.needed {
+			fmt.Fprintln(stderr, "askdo: 'review timestamp' moved to askdo-config review timestamp_timeout; this form will be removed in a future release")
+		}
+		return code
+	case "timestamp_timeout":
+		return reviewTimestampTimeout(args[1:], stdout, stderr, false)
 	default:
 		fmt.Fprintln(stderr, reviewUsage)
 		return 125
@@ -44,7 +54,7 @@ func reviewMode(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) > 1 || (len(positional) == 1 && positional[0] != "required" && positional[0] != "approval-only") {
-		fmt.Fprintln(stderr, "usage: askdo review mode [required|approval-only] [--config PATH]")
+		fmt.Fprintln(stderr, "usage: askdo-config review mode [required|approval-only] [--config PATH]")
 		return 125
 	}
 	mutating := len(positional) == 1
@@ -53,6 +63,12 @@ func reviewMode(args []string, stdout, stderr io.Writer) int {
 	}
 	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
+		// The installed config is root:root 0600: a real permission denial on
+		// the read-only form routes through approval like `config check`, not
+		// a user-facing failure. Missing/invalid configs stay ordinary errors.
+		if !mutating && requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintln(stderr, "review mode:", err)
 		return 1
 	}
@@ -106,6 +122,12 @@ func reviewExempt(args []string, stdout, stderr io.Writer) int {
 	}
 	store, err := operator.LoadForReviewPolicyMutation(path)
 	if err != nil {
+		// `review exempt list` is read-only: a permission denial on the
+		// root-private installed config routes through approval (add/remove
+		// already stopped at requireRoot).
+		if verb == "list" && requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintf(stderr, "review exempt %s: %v\n", verb, err)
 		return 1
 	}

@@ -120,6 +120,22 @@ type Identity struct {
 	Hostname     string `json:"hostname"`
 	Username     string `json:"username"`
 	SubmitterUID uint32 `json:"submitter_uid"`
+	// TargetUID and TargetUser name the account the command runs as (sudo
+	// -u). Both are present for a non-root target and absent for root, which
+	// keeps legacy display hashes unchanged and makes an older gateway reject
+	// rather than misrender a non-root ticket.
+	TargetUID  uint32 `json:"target_uid,omitempty"`
+	TargetUser string `json:"target_user,omitempty"`
+	// TargetLogin marks the one exception to root's unnamed identity: a
+	// UID-0 login shell (-i) whose account database resolved a real alias
+	// (for example toor). The broker places that name in USER/LOGNAME, the
+	// manifest, bootstrap and audit, so the Fleet display must carry it too
+	// or the approver sees "root" everywhere the records say "toor". The
+	// marker makes an aliased root ticket a distinct contract instead of a
+	// bare uid-0 name an older gateway would silently misrender: absent for
+	// ordinary root, for a root login under the canonical name, and for
+	// every pre-alias ticket, so their frozen display hashes are unchanged.
+	TargetLogin bool `json:"target_login,omitempty"`
 }
 type Display struct {
 	CapturedStdinKind proto.DeliveryKind `json:"captured_stdin_kind,omitempty"`

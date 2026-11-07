@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
@@ -50,13 +51,21 @@ var (
 // URL, the host identity and the in-memory join secret; nothing is read from
 // or written to disk. The bearer never passes through it.
 type JoinClient struct {
-	base      *url.URL
-	host      fleetproto.ID
-	secret    string
-	http      *http.Client
-	transport *http.Transport
+	base         *url.URL
+	host         fleetproto.ID
+	secret       string
+	http         *http.Client
+	transport    *http.Transport
+	trustMu      sync.Mutex
+	roots        *x509.CertPool
+	allowUnknown bool
+	provisional  bool
+	leaf, anchor *x509.Certificate
+	gatewayNonce fleetproto.Hash
 }
 
+// A nil caPEM means no --ca-file was supplied. A non-nil, empty CA file keeps
+// system-only verification; it must not enable provisional private-CA trust.
 func NewJoinClient(rawURL, hostID, joinSecret string, caPEM []byte) (*JoinClient, error) {
 	if err := config.ValidateHTTPSURL(rawURL); err != nil {
 		return nil, &Error{fleetproto.ErrCodeProtocol}
@@ -84,8 +93,11 @@ func NewJoinClient(rawURL, hostID, joinSecret string, caPEM []byte) (*JoinClient
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
-	return &JoinClient{base: base, host: host, secret: joinSecret, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}, nil
+	client := &JoinClient{base: base, host: host, secret: joinSecret, roots: roots, allowUnknown: caPEM == nil, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}
+	// Verification is performed explicitly so an unknown first-connection CA
+	// can be provisionally pinned before ANY HTTP bytes are sent.
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, VerifyConnection: client.verifyGateway}
+	return client, nil
 }
 
 func (c *JoinClient) Close() { c.transport.CloseIdleConnections() }
@@ -116,6 +128,26 @@ func (c *JoinClient) Status(ctx context.Context) (fleetproto.JoinResponse, error
 	return c.decode(wire)
 }
 
+// Reveal must follow a received challenge. A lost response can be reconciled by
+// Status; replaying the reveal itself is rejected by the gateway.
+func (c *JoinClient) Reveal(ctx context.Context, nonce fleetproto.Hash) (fleetproto.JoinResponse, error) {
+	c.trustMu.Lock()
+	hasChallenge := c.gatewayNonce != ""
+	c.trustMu.Unlock()
+	if !hasChallenge {
+		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	data, err := fleetproto.MarshalJoinReveal(fleetproto.JoinReveal{Version: fleetproto.JoinVersion, HostNonce: nonce})
+	if err != nil {
+		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	wire, err := c.exchange(ctx, http.MethodPost, "/v1/join/"+string(c.host)+"/reveal", "Bearer "+c.secret, data)
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	return c.decode(wire)
+}
+
 func (c *JoinClient) exchange(ctx context.Context, method, target, auth string, body []byte) ([]byte, error) {
 	endpoint := *c.base
 	endpoint.Path = strings.TrimRight(c.base.Path, "/") + target
@@ -136,9 +168,12 @@ func (c *JoinClient) exchange(ctx context.Context, method, target, auth string, 
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		var verification *tls.CertificateVerificationError
-		if errors.As(err, &verification) {
-			return nil, &Error{fleetproto.ErrCodeSignature}
+		var certificate *JoinCertificateError
+		if errors.As(err, &certificate) {
+			return nil, certificate
+		}
+		if errors.Is(err, ErrJoinGatewayChanged) {
+			return nil, ErrJoinGatewayChanged
 		}
 		return nil, requestError(ctx, err)
 	}
@@ -190,6 +225,14 @@ func (c *JoinClient) decode(wire []byte) (fleetproto.JoinResponse, error) {
 	}
 	if value.HostID != c.host {
 		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	c.trustMu.Lock()
+	defer c.trustMu.Unlock()
+	if c.gatewayNonce != "" && value.GatewayNonce != c.gatewayNonce {
+		return fleetproto.JoinResponse{}, &Error{fleetproto.ErrCodeProtocol}
+	}
+	if value.GatewayNonce != "" {
+		c.gatewayNonce = value.GatewayNonce
 	}
 	return value, nil
 }

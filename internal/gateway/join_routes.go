@@ -185,8 +185,27 @@ func (s *Server) handleJoinGet(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusUnauthorized, fleetproto.ErrCodeAuth)
 		return
 	}
-	response, err := s.joins.Status(r.Context(), string(host), secret)
+	var response fleetproto.JoinResponse
+	if r.Method == http.MethodPost {
+		data, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, fleetproto.MaxJoinWireBytes))
+		reveal, parseErr := fleetproto.ParseJoinReveal(data)
+		if readErr != nil || parseErr != nil {
+			writeFailure(w, http.StatusBadRequest, fleetproto.ErrCodeProtocol)
+			return
+		}
+		response, err = s.joins.Reveal(r.Context(), string(host), secret, reveal)
+	} else {
+		response, err = s.joins.Status(r.Context(), string(host), secret)
+	}
 	if err != nil {
+		if errors.Is(err, ErrJoinRevealed) {
+			writeFailure(w, http.StatusConflict, fleetproto.ErrCodeProtocol)
+			return
+		}
+		if errors.Is(err, ErrJoinReveal) {
+			writeFailure(w, http.StatusBadRequest, fleetproto.ErrCodeProtocol)
+			return
+		}
 		if errors.Is(err, ErrUnauthorized) {
 			writeFailure(w, http.StatusUnauthorized, fleetproto.ErrCodeAuth)
 			return

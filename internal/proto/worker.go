@@ -79,15 +79,25 @@ func (t *RequestTracker) Match(result InspectResult) error {
 
 // Bootstrap is the immutable broker-to-worker job bootstrap message.
 type Bootstrap struct {
-	FleetMode     bool            `json:"fleet_mode,omitempty"`
-	Type          string          `json:"type"`
-	Host          string          `json:"host"`
-	TargetUID     uint32          `json:"target_uid"`
-	RequestID     string          `json:"request_id"`
-	SubmitterUID  uint32          `json:"submitter_uid"`
-	SubmitterName string          `json:"submitter_name"`
-	Container     string          `json:"container"`
-	Operation     WorkerOperation `json:"operation"`
+	FleetMode bool   `json:"fleet_mode,omitempty"`
+	Type      string `json:"type"`
+	Host      string `json:"host"`
+	TargetUID uint32 `json:"target_uid"`
+	// TargetName is the broker-resolved account name (sudo-style -u).
+	// Root carries no name except in explicit login-shell mode.
+	TargetName string `json:"target_name,omitempty"`
+	// LoginShell permits the target account's HOME/USER/LOGNAME for root too.
+	LoginShell bool `json:"login_shell,omitempty"`
+	// TargetGID and TargetGroups carry the complete non-root credential.
+	// Names are optional display labels keyed by numeric GID, not authority.
+	TargetGID        *uint32           `json:"target_gid,omitempty"`
+	TargetGroups     []uint32          `json:"target_groups,omitempty"`
+	TargetGroupNames map[uint32]string `json:"target_group_names,omitempty"`
+	RequestID        string            `json:"request_id"`
+	SubmitterUID     uint32            `json:"submitter_uid"`
+	SubmitterName    string            `json:"submitter_name"`
+	Container        string            `json:"container"`
+	Operation        WorkerOperation   `json:"operation"`
 	// Only the fixed, non-secret launch variables cross to the reviewer.
 	// ASKDO_BUNDLE contains a private spool path and is not projected.
 	ExecutionEnvironment []string         `json:"execution_environment,omitempty"`
@@ -1079,25 +1089,20 @@ func validateBootstrap(m Bootstrap) error {
 	if !bounded(m.SubmitterName, 256) || !bounded(m.Container, 128) {
 		return errors.New("invalid bootstrap identity")
 	}
+	// Root carries its resolved account name only for login-shell mode.
+	if !bounded(m.TargetName, 256) || (m.LoginShell && m.TargetName == "") || (m.TargetUID == 0 && ((!m.LoginShell && m.TargetName != "") || m.TargetGID != nil || len(m.TargetGroups) != 0 || len(m.TargetGroupNames) != 0)) {
+		return errors.New("invalid bootstrap target identity")
+	}
+	for _, name := range m.TargetGroupNames {
+		if !bounded(name, 256) {
+			return errors.New("invalid bootstrap target group name")
+		}
+	}
 	if err := validateOperation(m.Operation); err != nil {
 		return err
 	}
-	if len(m.ExecutionEnvironment) != 0 {
-		if len(m.ExecutionEnvironment) != 4 {
-			return errors.New("invalid execution environment projection")
-		}
-		allowed := map[string]string{"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "PWD": m.Operation.CWD}
-		seen := make(map[string]struct{}, len(allowed))
-		for _, entry := range m.ExecutionEnvironment {
-			name, value, ok := strings.Cut(entry, "=")
-			if expected, exists := allowed[name]; !ok || !exists || value != expected {
-				return errors.New("invalid execution environment projection")
-			}
-			if _, duplicate := seen[name]; duplicate {
-				return errors.New("duplicate execution environment projection")
-			}
-			seen[name] = struct{}{}
-		}
+	if err := validateExecutionEnvironment(m); err != nil {
+		return err
 	}
 	if len(m.PreflightFailures) != 0 {
 		if err := validateAvailabilityHistory(m.PreflightFailures); err != nil {
@@ -1109,6 +1114,56 @@ func validateBootstrap(m Bootstrap) error {
 	}
 	return validateProjectionMode(m.ConfigProjection, m.ApprovalOnly, m.FleetMode)
 }
+
+// MaxExecutionHomeBytes is the worker bootstrap's HOME value byte limit.
+const MaxExecutionHomeBytes = 4096
+
+// validateExecutionEnvironment pins the projected launch variables to the
+// fixed values the broker installs: PATH, LANG and PWD are constants of the
+// launch; HOME is /root for a root target or the target account's home
+// directory; USER and LOGNAME exist for a named non-root or login target and
+// carry exactly its name. Each variable appears once and nothing else is
+// projected.
+func validateExecutionEnvironment(m Bootstrap) error {
+	if len(m.ExecutionEnvironment) == 0 {
+		return nil
+	}
+	fixed := map[string]string{"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PWD": m.Operation.CWD}
+	want := len(fixed) + 1 // HOME
+	if m.TargetUID == 0 && !m.LoginShell {
+		fixed["HOME"] = "/root"
+	}
+	if m.TargetName != "" {
+		fixed["USER"], fixed["LOGNAME"] = m.TargetName, m.TargetName
+		want += 2
+	}
+	if len(m.ExecutionEnvironment) != want {
+		return errors.New("invalid execution environment projection")
+	}
+	seen := make(map[string]struct{}, want)
+	for _, entry := range m.ExecutionEnvironment {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			return errors.New("invalid execution environment projection")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return errors.New("duplicate execution environment projection")
+		}
+		seen[name] = struct{}{}
+		if expected, exists := fixed[name]; exists {
+			if value != expected {
+				return errors.New("invalid execution environment projection")
+			}
+			continue
+		}
+		if name == "HOME" && (m.TargetUID != 0 || m.LoginShell) && bounded(value, MaxExecutionHomeBytes) {
+			continue
+		}
+		return errors.New("invalid execution environment projection")
+	}
+	return nil
+}
+
 func validateOperation(o WorkerOperation) error {
 	if o.CapturedStdin != nil && (!o.CapturedStdin.DeliveryKind.Valid() || o.Mode != "argv" || o.CapturedStdin.Path != "stdin" || o.CapturedStdin.Size < 1 || o.CapturedStdin.Size > MaxCapturedStdinBytes || !digestPattern.MatchString(o.CapturedStdin.SHA256)) {
 		return errors.New("invalid captured stdin metadata")

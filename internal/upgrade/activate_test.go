@@ -16,10 +16,10 @@ import (
 	"time"
 )
 
-type activationManagerFunc func(context.Context, string, string) error
+type activationManagerFunc func(context.Context, string, string, string) error
 
-func (f activationManagerFunc) Start(ctx context.Context, id, stage string) error {
-	return f(ctx, id, stage)
+func (f activationManagerFunc) Start(ctx context.Context, id, stage, cliDigest string) error {
+	return f(ctx, id, stage, cliDigest)
 }
 
 // The fake models service state and preserves real temp-file preimages. It
@@ -214,7 +214,7 @@ func newActivationFixture(t *testing.T, gateway bool) *activationFixture {
 		t.Fatal(err)
 	}
 	put(filepath.Join(source, "plan.json"), string(encoded))
-	helper := Helper{BackupRoot: filepath.Join(root, "backups"), ReceiptRoot: filepath.Join(root, "receipts"), Host: host, Manager: activationManagerFunc(func(context.Context, string, string) error { return nil }), TrustDirectory: func(path string, create bool) error {
+	helper := Helper{BackupRoot: filepath.Join(root, "backups"), ReceiptRoot: filepath.Join(root, "receipts"), Host: host, Manager: activationManagerFunc(func(context.Context, string, string, string) error { return nil }), TrustDirectory: func(path string, create bool) error {
 		if create {
 			return os.MkdirAll(path, 0o755)
 		}
@@ -247,7 +247,10 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 	// Given: verified source bytes and a fake manager observing the durable receipt.
 	f := newActivationFixture(t, false)
 	accepted := false
-	f.helper.Manager = activationManagerFunc(func(_ context.Context, id, stage string) error {
+	f.helper.Manager = activationManagerFunc(func(_ context.Context, id, stage, cliDigest string) error {
+		if cliDigest != f.plan.CLIDigest {
+			t.Fatalf("manager digest=%q, want approved digest %q", cliDigest, f.plan.CLIDigest)
+		}
 		r := activationReceipt(t, f)
 		if r.State != "scheduled" || r.ID != id || r.Stage != stage {
 			t.Fatalf("initial receipt: %+v", r)
@@ -255,6 +258,10 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 		info, err := os.Stat(stage)
 		if err != nil || info.Mode().Perm() != 0o700 {
 			t.Fatalf("stage metadata: %v, %v", info, err)
+		}
+		cli, err := os.Stat(filepath.Join(stage, f.plan.CLIAsset))
+		if err != nil || cli.Mode().Perm() != 0o600 {
+			t.Fatalf("staged CLI must remain non-executable backup data: %v, %v", cli, err)
 		}
 		accepted = true
 		return nil
@@ -264,6 +271,29 @@ func TestHelperScheduleReturnsOnlyDurableScheduledAcceptance(t *testing.T) {
 	// Then: manager acceptance is not activation success and no live action occurred.
 	if err != nil || !accepted || stage != f.stage || activationReceipt(t, f).State != "scheduled" || len(f.host.events) != 0 {
 		t.Fatalf("schedule: stage=%s accepted=%v err=%v events=%v", stage, accepted, err, f.host.events)
+	}
+}
+
+func TestHelperFailScheduledIsTerminalAndNotReplayed(t *testing.T) {
+	// Given a scheduled activation whose detached process cannot reach Activate.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+
+	// When the pre-activation failure is recorded.
+	err := f.helper.FailScheduled(t.Context(), f.stage, "detached activation could not start")
+
+	// Then the receipt is terminal and activation cannot replay it.
+	if err != nil || activationReceipt(t, f).State != "failed" {
+		t.Fatalf("failure receipt: %+v, %v", activationReceipt(t, f), err)
+	}
+	if err := f.helper.Activate(t.Context(), f.stage); err == nil || len(f.host.events) != 0 {
+		t.Fatalf("failed activation replayed: %v, events=%v", err, f.host.events)
+	}
+	if err := f.helper.FailScheduled(t.Context(), f.stage, "duplicate reconciliation must be a no-op"); err != nil {
+		t.Fatalf("terminal receipt reconciliation: %v", err)
+	}
+	if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+		t.Fatalf("failed scheduled stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
 	}
 }
 
@@ -337,18 +367,58 @@ func TestHelperActivateWaitsForSchedulingJobTerminal(t *testing.T) {
 	}
 }
 
-func TestHelperActivateRefusesTamperedStageBeforeEffects(t *testing.T) {
-	// Given
+func TestHelperActivateUsesScheduledStageRoot(t *testing.T) {
+	// Given: an accepted operation, followed by a config edit selecting another
+	// backup root. Activation must use the receipt's original stage instead.
 	f := newActivationFixture(t, false)
 	f.schedule(t)
-	if err := os.WriteFile(filepath.Join(f.stage, f.plan.CLIAsset), []byte("tampered"), 0o600); err != nil {
+	newRoot := filepath.Join(t.TempDir(), "different-backups")
+	data, err := json.Marshal(map[string]string{"upgrade_backup_dir": newRoot})
+	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(f.host.layout.Config, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.helper.BackupRoot = newRoot
 	// When
-	err := f.helper.Activate(t.Context(), f.stage)
-	// Then
-	if err == nil || activationReceipt(t, f).State != "failed" || len(f.host.events) != 0 {
-		t.Fatalf("tamper: %v receipt=%+v effects=%v", err, activationReceipt(t, f), f.host.events)
+	err = f.helper.Activate(t.Context(), f.stage)
+	// Then: installation and verification succeed on the scheduled stage.
+	r := activationReceipt(t, f)
+	if err != nil || r.State != "succeeded" || r.Stage != f.stage {
+		t.Fatalf("config edit stranded activation: err=%v receipt=%+v", err, r)
+	}
+	if _, err := os.Stat(filepath.Join(f.stage, "backup", "askdo")); err != nil {
+		t.Fatalf("original recovery backup missing: %v", err)
+	}
+	if _, err := os.Stat(newRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("activation used changed config root: %v", err)
+	}
+}
+
+func TestHelperActivateRefusesTamperedStageBeforeEffects(t *testing.T) {
+	cli, helper := "askdo-linux-"+runtime.GOARCH, "askdo-launch-linux-"+runtime.GOARCH
+	for _, name := range []string{cli, cli + ".sha256", helper, helper + ".sha256", "install-manifest.v1"} {
+		t.Run(name, func(t *testing.T) {
+			f := newActivationFixture(t, false)
+			f.schedule(t)
+			path := filepath.Join(f.stage, name)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data[len(data)-1] ^= 1
+			if err := os.WriteFile(path+".replacement", data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".replacement", path); err != nil {
+				t.Fatal(err)
+			}
+			assertActivationRefusedBeforeEffects(t, f)
+			if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+				t.Fatalf("pre-activation stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
+			}
+		})
 	}
 }
 
@@ -356,7 +426,7 @@ func TestHelperScheduleRejectsDuplicateWithoutNewAcceptance(t *testing.T) {
 	// Given
 	f := newActivationFixture(t, false)
 	f.schedule(t)
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error {
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error {
 		t.Fatal("duplicate sent to manager")
 		return nil
 	})
@@ -371,13 +441,16 @@ func TestHelperScheduleRejectsDuplicateWithoutNewAcceptance(t *testing.T) {
 func TestHelperScheduleManagerRejectionLeavesLiveFilesUntouched(t *testing.T) {
 	// Given
 	f := newActivationFixture(t, false)
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error { return errors.New("rejected") })
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error { return errors.New("rejected") })
 	// When
 	_, err := f.helper.Schedule(t.Context(), f.plan.Operation, f.source, f.captured)
 	// Then
 	data, readErr := os.ReadFile(f.host.layout.CLI)
 	if err == nil || readErr != nil || string(data) != "old cli" || len(f.host.events) != 0 || activationReceipt(t, f).State != "failed" {
 		t.Fatalf("rejection: %v receipt=%+v live=%q effects=%v", err, activationReceipt(t, f), data, f.host.events)
+	}
+	if _, err := os.Lstat(f.stage); !errors.Is(err, os.ErrNotExist) || !strings.Contains(activationReceipt(t, f).Detail, "stage removed") {
+		t.Fatalf("rejected stage retained: %v, receipt=%+v", err, activationReceipt(t, f))
 	}
 }
 
@@ -408,6 +481,9 @@ func TestHelperActivateStartFailurePreservesBackupAndDoesNotRetry(t *testing.T) 
 	if err == nil || r.State != "failed" || starts != 1 || !strings.Contains(r.Detail, "backup") {
 		t.Fatalf("start failure: %v receipt=%+v starts=%d", err, r, starts)
 	}
+	if _, err := os.Stat(f.stage); err != nil || strings.Contains(r.Detail, "stage removed") {
+		t.Fatalf("post-stop failure lost recovery stage: %v, receipt=%+v", err, r)
+	}
 }
 
 func TestHelperActivateInterruptedIntentIsUnknownWithoutReplay(t *testing.T) {
@@ -432,7 +508,7 @@ func TestHelperActivateWaitsForManagerAcceptanceLock(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 		defer cancel()
 		result := make(chan error, 1)
-		f.helper.Manager = activationManagerFunc(func(_ context.Context, _ string, stage string) error {
+		f.helper.Manager = activationManagerFunc(func(_ context.Context, _ string, stage string, _ string) error {
 			go func() { result <- f.helper.Activate(ctx, stage) }()
 			synctest.Wait()
 			select {
@@ -457,7 +533,7 @@ func TestHelperActivateWaitsForManagerAcceptanceLock(t *testing.T) {
 func TestHelperScheduleInterruptedManagerAcceptanceIsUnknown(t *testing.T) {
 	// Given: the adapter's own deadline can expire after the manager accepts.
 	f := newActivationFixture(t, false)
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error {
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error {
 		return context.DeadlineExceeded
 	})
 	// When
@@ -473,7 +549,12 @@ func TestHelperActivatePartialReplacementRetainsPairBackupWithoutStarting(t *tes
 	f := newActivationFixture(t, false)
 	f.schedule(t)
 	f.host.afterBackup = func(_, _ string) {
-		if err := os.Remove(filepath.Join(f.stage, f.plan.HelperAsset)); err != nil {
+		// Block the live destination, not a staged source: stage paths are no
+		// longer consulted after verification. This also fails for root runners.
+		if err := os.Rename(f.host.layout.Launch, f.host.layout.Launch+".previous"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(f.host.layout.Launch, 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -481,7 +562,7 @@ func TestHelperActivatePartialReplacementRetainsPairBackupWithoutStarting(t *tes
 	err := f.helper.Activate(t.Context(), f.stage)
 	// Then: do not roll back the first rename or lose its compatible preimage.
 	cli, cliErr := sha256HexFile(f.host.layout.CLI)
-	helper, helperErr := os.ReadFile(f.host.layout.Launch)
+	helper, helperErr := os.ReadFile(f.host.layout.Launch + ".previous")
 	backup, backupErr := os.ReadFile(filepath.Join(f.stage, "backup", "askdo-launch"))
 	if err == nil || cliErr != nil || helperErr != nil || backupErr != nil || cli != f.plan.CLIDigest || string(helper) != "old helper" || string(backup) != "old helper" || activationReceipt(t, f).State != "failed" {
 		t.Fatalf("partial replacement: %v cli=%s helper=%q backup=%q receipt=%+v", err, cli, helper, backup, activationReceipt(t, f))
@@ -626,9 +707,9 @@ func TestPlanConstructorAndWriterRoundTripThroughVerifiedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _, _, err := verifiedSource(f.source, f.plan.Operation)
-	if err != nil || got != f.plan {
-		t.Fatalf("plan roundtrip: %+v %v", got, err)
+	got, err := verifiedSource(f.source, f.plan.Operation)
+	if err != nil || got.plan != f.plan {
+		t.Fatalf("plan roundtrip: %+v %v", got.plan, err)
 	}
 }
 
@@ -671,9 +752,9 @@ func TestPlanWriterAtomicallyReplacesExistingPlan(t *testing.T) {
 	if err := json.NewDecoder(old).Decode(&previous); err != nil || previous != f.plan {
 		t.Fatalf("original inode changed: %+v %v", previous, err)
 	}
-	got, _, _, err := verifiedSource(f.source, replacement.Operation)
-	if err != nil || got != replacement {
-		t.Fatalf("replacement: %+v %v", got, err)
+	got, err := verifiedSource(f.source, replacement.Operation)
+	if err != nil || got.plan != replacement {
+		t.Fatalf("replacement: %+v %v", got.plan, err)
 	}
 	info, err := os.Stat(filepath.Join(f.source, PlanFileName))
 	if err != nil || info.Mode().Perm() != 0o600 {
@@ -746,7 +827,7 @@ func TestHelperScheduleCapturedPlanRejectsChangedAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := false
-	f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error { called = true; return nil })
+	f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error { called = true; return nil })
 	// When
 	_, err = f.helper.Schedule(t.Context(), f.plan.Operation, f.source, f.captured)
 	// Then: captured authority does not waive any asset verification.
@@ -764,7 +845,7 @@ func TestHelperScheduleRequiresValidBoundedCapturedPlan(t *testing.T) {
 			// Given: a valid mutable local plan MUST NOT substitute for bad captured input.
 			f := newActivationFixture(t, false)
 			called := false
-			f.helper.Manager = activationManagerFunc(func(context.Context, string, string) error { called = true; return nil })
+			f.helper.Manager = activationManagerFunc(func(context.Context, string, string, string) error { called = true; return nil })
 			// When
 			_, err := f.helper.Schedule(t.Context(), f.plan.Operation, f.source, tc.data)
 			// Then

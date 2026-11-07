@@ -27,7 +27,7 @@ import (
 )
 
 const defaultGatewayConfig = "/etc/askdo-gateway/config.json"
-const gatewayUsage = "usage: askdo gateway init|hosts add|hosts list|hosts revoke HOST_ID|connect|check|serve [--config PATH]"
+const gatewayUsage = "usage: askdo-config gateway init|hosts add|hosts list|hosts revoke HOST_ID|connect|check|serve [--config PATH]"
 
 type gatewayStrings []string
 
@@ -44,8 +44,7 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		helpOnly = true
 	}
 	if getEUID() != 0 && !helpOnly {
-		fmt.Fprintln(stderr, "gateway requires root")
-		return 125
+		return rootRequired(stderr, "gateway requires root")
 	}
 	var err error
 	switch args[0] {

@@ -57,6 +57,9 @@ type CardInput struct {
 	Container string
 	// TargetUID is the execution identity of the dispatched process.
 	TargetUID uint32
+	// TargetName is the broker-resolved account name for a non-root
+	// TargetUID; root renders as "root" and an unnamed UID as "uid N".
+	TargetName string
 	// JobID is the ordinary job ID (request_id).
 	JobID string
 	// Operation is the exact shell-quoted command text, already constructed
@@ -96,13 +99,32 @@ type DetailsInput struct {
 // ApprovalOnlyInput contains operation facts and typed availability statuses,
 // never a review report, model history text, or model identity.
 type ApprovalOnlyInput struct {
-	CapturedStdinKind                                             proto.DeliveryKind
-	CapturedStdinBytes                                            int64
-	Host, Container, JobID, Operation, Reason, SubmitterName, CWD string
-	TargetUID, SubmitterUID                                       uint32
-	Expiry                                                        time.Time
-	Failures                                                      []proto.AvailabilityFailure
-	WithheldCount                                                 int
+	CapturedStdinKind                                                         proto.DeliveryKind
+	CapturedStdinBytes                                                        int64
+	Host, Container, JobID, Operation, Reason, SubmitterName, TargetName, CWD string
+	TargetUID, SubmitterUID                                                   uint32
+	Expiry                                                                    time.Time
+	Failures                                                                  []proto.AvailabilityFailure
+	WithheldCount                                                             int
+}
+
+// targetLabel names the execution identity: a resolved account name as
+// "name (uid N)" (the name rendered through escape, which already bounds and
+// strips controls), "root" for the plain UID 0 launch, or a bare "uid N"
+// when no name is known. A UID-0 login alias (for example toor) reaches here
+// with its resolved name, so the card matches the reviewer bootstrap,
+// manifest and audit. The canonical spelling "root" keeps the unchanged
+// label byte-for-byte, and the Fleet identity contract guarantees a UID-0
+// name only for such an alias.
+func targetLabel(uid uint32, name string, escape func(string) string) string {
+	switch {
+	case uid == 0 && (name == "" || name == "root"):
+		return "root"
+	case name != "":
+		return fmt.Sprintf("%s (uid %d)", escape(name), uid)
+	default:
+		return fmt.Sprintf("uid %d", uid)
+	}
 }
 
 var safeProviderName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
@@ -160,10 +182,7 @@ func approvalOnlyBlocks(in ApprovalOnlyInput) ([]string, error) {
 	if submitter == "" {
 		submitter = fmt.Sprintf("uid %d", in.SubmitterUID)
 	}
-	target := fmt.Sprintf("uid %d", in.TargetUID)
-	if in.TargetUID == 0 {
-		target = "root"
-	}
+	target := targetLabel(in.TargetUID, in.TargetName, func(name string) string { return "<code>" + esc(name) + "</code>" })
 	blocks = append(blocks, fmt.Sprintf("<b>Submitted by:</b> <code>%s</code> (uid %d) → %s\n", submitter, in.SubmitterUID, target))
 	if in.CWD != "" {
 		blocks = append(blocks, "<b>Working directory:</b>\n", fmt.Sprintf("<code>%s</code>\n", esc(displayPath(in.CWD))))
@@ -223,7 +242,7 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 	if len(in.Failures) > 0 {
 		reason = "providers unavailable"
 	}
-	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
+	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, TargetName: in.TargetName, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
 	return "⚠️ <b>NO AI REVIEW</b> — " + reason + ". Risks NOT assessed.\n" + compactIdentity(facts, expiryText(in.Expiry)) + compactOperation(facts, "Details"), kb, nil
 }
 
@@ -372,10 +391,7 @@ func compactIdentity(in CardInput, deadline string) string {
 	if submitter == "" {
 		submitter = fmt.Sprintf("uid %d", in.SubmitterUID)
 	}
-	target := fmt.Sprintf("uid %d", in.TargetUID)
-	if in.TargetUID == 0 {
-		target = "root"
-	}
+	target := targetLabel(in.TargetUID, in.TargetName, func(name string) string { return compactLine(name, 80) })
 	text := fmt.Sprintf("<code>%s / %s</code> · %s → %s", compactLine(in.Host, 160), compactLine(in.JobID, 384), compactLine(submitter, 80), target)
 	if deadline != "" {
 		text += " · expires " + compactLine(deadline, 96)
@@ -580,10 +596,7 @@ func requestBlocks(in CardInput) []string {
 	if submitter == "" {
 		submitter = fmt.Sprintf("uid %d", in.SubmitterUID)
 	}
-	target := fmt.Sprintf("uid %d", in.TargetUID)
-	if in.TargetUID == 0 {
-		target = "root"
-	}
+	target := targetLabel(in.TargetUID, in.TargetName, func(name string) string { return "<code>" + esc(name) + "</code>" })
 	add("<b>Submitted by:</b> <code>%s</code> (uid %d) → %s\n", submitter, in.SubmitterUID, target)
 	if in.CWD != "" {
 		add("<b>Working directory:</b>\n")

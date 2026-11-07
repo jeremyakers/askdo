@@ -89,7 +89,7 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 // requireRoot gates a mutation verb on the same euid seam as auth.go.
 func requireRoot(verb string, stderr io.Writer) bool {
 	if getEUID() != 0 {
-		fmt.Fprintf(stderr, "%s requires root: it writes config and credential files owned by root (re-run with sudo)\n", verb)
+		rootRequired(stderr, fmt.Sprintf("%s requires root: it writes config and credential files owned by root (re-run with sudo)", verb))
 		return false
 	}
 	return true

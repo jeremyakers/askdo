@@ -34,7 +34,7 @@ func notifyAutoApproval(ctx context.Context, pipe *asyncBroker, bootstrap proto.
 		return fmt.Errorf("render auto-approval command: %w", err)
 	}
 	input := telegram.CardInput{
-		Host: bootstrap.Host, Container: bootstrap.Container, TargetUID: bootstrap.TargetUID,
+		Host: bootstrap.Host, Container: bootstrap.Container, TargetUID: bootstrap.TargetUID, TargetName: bootstrap.TargetName,
 		JobID: bootstrap.RequestID, Operation: command, Reason: bootstrap.Operation.Reason,
 		Report: frozen.Report, WithheldRefs: frozen.WithheldRefs, WithheldCount: frozen.WithheldCount,
 		ReviewerModel: model, Expiry: time.Now().Add(time.Duration(bootstrap.ConfigProjection.Telegram.ApprovalTTLMS) * time.Millisecond),

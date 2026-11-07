@@ -207,6 +207,9 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 			server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
+				if fleetJoinRevealFixture(t, w, r, requested, &bytes.Buffer{}, nil) {
+					return
+				}
 				if r.Method == http.MethodPost {
 					postCount.Add(1)
 					data, _ := io.ReadAll(r.Body)
@@ -215,7 +218,7 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 					if err != nil || r.Header.Get("Authorization") != "" {
 						t.Error("POST must carry only hashes, not either secret", err)
 					}
-					wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinPending, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+					wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, GatewayNonce: fixtureGatewayNonce, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
 					_, _ = w.Write(wire)
 					return
 				}
@@ -227,7 +230,7 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 					_, _ = w.Write([]byte(`{"code":"gateway_transport"}`))
 					return
 				}
-				value := fleetproto.JoinResponse{Version: 1, State: tc.state, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()}
+				value := fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: tc.state, GatewayNonce: fixtureGatewayNonce, HostID: requested.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()}
 				if tc.state == fleetproto.JoinApproved {
 					value.URL, value.VerificationKey = server.URL, base64.StdEncoding.EncodeToString(make([]byte, 32))
 					value.AllowedProfiles, value.DefaultProfiles = tc.profiles, tc.profiles
@@ -311,6 +314,9 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 			if !tc.setupFail && !strings.Contains(out.String(), "Log out and back in once") {
 				t.Fatal("missing final relogin instruction")
 			}
+			if strings.Count(out.String(), "Approve the Telegram card ONLY if it shows this same code.") != 1 {
+				t.Fatalf("accepted join must prompt exactly once: %q", out.String())
+			}
 		})
 	}
 }
@@ -331,6 +337,42 @@ func TestFleetJoinOldGatewayExplainsUpgrade(t *testing.T) {
 	// Then it explains gateway upgrade, never falls back to a manual bundle flow.
 	if err == nil || !strings.Contains(err.Error(), "upgrade") || len(runner.calls) != 0 || fileContent(t, path) != localJoinConfig {
 		t.Fatalf("old gateway: %v %s", err, out.String())
+	}
+	// And it never promised a Telegram card the gateway did not create.
+	if strings.Contains(out.String(), "Fleet enrollment request code:") {
+		t.Fatalf("approval prompt printed without a gateway card: %q", out.String())
+	}
+}
+
+func TestFleetJoinExplicitCAFailureDoesNotProvisionallyTrust(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty=%t", empty), func(t *testing.T) {
+			// Given an explicit CA file that does not trust the gateway certificate.
+			path := fleetJoinHostFixture(t, localJoinConfig)
+			var posts atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { posts.Add(1) }))
+			defer server.Close()
+			wrong, _ := fleetJoinTLSIdentity(t, false, "")
+			ca := filepath.Join(filepath.Dir(path), "wrong-ca.pem")
+			data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: wrong.Certificate[0]})
+			if empty {
+				data = nil
+			}
+			if err := os.WriteFile(ca, data, 0400); err != nil {
+				t.Fatal(err)
+			}
+			var out, stderr bytes.Buffer
+			runner := new(fakeFleetSetup)
+			// When join runs with --ca-file, automatic trust is never a fallback.
+			err := runFleetJoin(t.Context(), []string{server.URL, "--ca-file", ca}, path, runner, &out, &stderr)
+			// Then it names the trust problem and fix, sends nothing, and promises no card.
+			if err == nil || !strings.Contains(err.Error(), "--ca-file") || !strings.Contains(err.Error(), "no enrollment request was sent") {
+				t.Fatalf("untrusted gateway error: %v", err)
+			}
+			if posts.Load() != 0 || strings.Contains(out.String(), "Fleet enrollment request code:") || len(runner.calls) != 0 || fileContent(t, path) != localJoinConfig {
+				t.Fatalf("untrusted gateway had effects: posts=%d out=%q", posts.Load(), out.String())
+			}
+		})
 	}
 }
 

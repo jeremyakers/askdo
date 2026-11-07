@@ -89,6 +89,8 @@ func TestDrainRejectsSubmissionAfterLastTerminalObservation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("existing job did not start")
 	}
+	// The executor can signal before the store records running; settle first.
+	waitForState(t, d.store, testUID, id, store.StateRunning)
 	// When: admissions close, but the existing execution is not interrupted.
 	if err := d.drain.SetDraining(true); err != nil {
 		t.Fatal(err)

@@ -76,32 +76,36 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 	// Include broker-known execution identity and only fixed, non-secret
 	// launch variables. The private bundle staging path never enters a model
 	// request.
-	environment := make(map[string]string, 4)
+	environment := make(map[string]string, 6)
 	for _, entry := range l.Bootstrap.ExecutionEnvironment {
 		name, value, ok := strings.Cut(entry, "=")
 		if !ok {
 			continue
 		}
 		switch name {
-		case "PATH", "HOME", "LANG", "PWD":
+		case "PATH", "HOME", "LANG", "PWD", "USER", "LOGNAME":
 			environment[name] = value
 		}
 	}
 	modelOperation := struct {
-		Mode          string               `json:"mode"`
-		CapturedStdin *proto.CapturedInput `json:"captured_stdin,omitempty"`
-		Argv          []string             `json:"argv,omitempty"`
-		Entry         string               `json:"entry,omitempty"`
-		Args          []string             `json:"args,omitempty"`
-		CWD           string               `json:"cwd"`
-		Reason        string               `json:"reason"`
-		TargetUID     uint32               `json:"target_uid"`
-		SubmitterUID  uint32               `json:"submitter_uid"`
-		SubmitterName string               `json:"submitter_name"`
-		Host          string               `json:"host"`
-		Container     string               `json:"container,omitempty"`
-		Environment   map[string]string    `json:"environment"`
-	}{Mode: l.Bootstrap.Operation.Mode, CapturedStdin: l.Bootstrap.Operation.CapturedStdin, Argv: l.Bootstrap.Operation.Argv, Entry: l.Bootstrap.Operation.Entry, Args: l.Bootstrap.Operation.Args, CWD: l.Bootstrap.Operation.CWD, Reason: l.Bootstrap.Operation.Reason, TargetUID: l.Bootstrap.TargetUID, SubmitterUID: l.Bootstrap.SubmitterUID, SubmitterName: l.Bootstrap.SubmitterName, Host: l.Bootstrap.Host, Container: l.Bootstrap.Container, Environment: environment}
+		Mode             string               `json:"mode"`
+		CapturedStdin    *proto.CapturedInput `json:"captured_stdin,omitempty"`
+		Argv             []string             `json:"argv,omitempty"`
+		Entry            string               `json:"entry,omitempty"`
+		Args             []string             `json:"args,omitempty"`
+		CWD              string               `json:"cwd"`
+		Reason           string               `json:"reason"`
+		TargetUID        uint32               `json:"target_uid"`
+		TargetUser       string               `json:"target_user,omitempty"`
+		TargetGID        *uint32              `json:"target_gid,omitempty"`
+		TargetGroups     []uint32             `json:"target_groups,omitempty"`
+		TargetGroupNames map[uint32]string    `json:"target_group_names,omitempty"`
+		SubmitterUID     uint32               `json:"submitter_uid"`
+		SubmitterName    string               `json:"submitter_name"`
+		Host             string               `json:"host"`
+		Container        string               `json:"container,omitempty"`
+		Environment      map[string]string    `json:"environment"`
+	}{Mode: l.Bootstrap.Operation.Mode, CapturedStdin: l.Bootstrap.Operation.CapturedStdin, Argv: l.Bootstrap.Operation.Argv, Entry: l.Bootstrap.Operation.Entry, Args: l.Bootstrap.Operation.Args, CWD: l.Bootstrap.Operation.CWD, Reason: l.Bootstrap.Operation.Reason, TargetUID: l.Bootstrap.TargetUID, TargetUser: l.Bootstrap.TargetName, TargetGID: l.Bootstrap.TargetGID, TargetGroups: l.Bootstrap.TargetGroups, TargetGroupNames: l.Bootstrap.TargetGroupNames, SubmitterUID: l.Bootstrap.SubmitterUID, SubmitterName: l.Bootstrap.SubmitterName, Host: l.Bootstrap.Host, Container: l.Bootstrap.Container, Environment: environment}
 	operation, err := json.Marshal(modelOperation)
 	if err != nil {
 		return proto.ReviewComplete{}, err

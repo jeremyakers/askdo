@@ -11,17 +11,17 @@ import (
 	"github.com/jeremyakers/askdo/internal/inspection"
 )
 
-const inspectionCheckScope = "inspection policy decision only; run askdo config check to validate full service configuration"
+const inspectionCheckScope = "inspection policy decision only; run askdo-config config check to validate full service configuration"
 
 func runInspection(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "check" {
-		fmt.Fprintln(stderr, "usage: askdo inspection check <path> [--config PATH]")
+		fmt.Fprintln(stderr, "usage: askdo-config inspection check <path> [--config PATH]")
 		return 125
 	}
 	flags := flag.NewFlagSet("inspection check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "usage: askdo inspection check <path> [--config PATH]")
+		fmt.Fprintln(stderr, "usage: askdo-config inspection check <path> [--config PATH]")
 		fmt.Fprintln(stderr, inspectionCheckScope)
 		flags.PrintDefaults()
 	}
@@ -31,12 +31,11 @@ func runInspection(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if err != nil || len(paths) != 1 {
-		fmt.Fprintln(stderr, "usage: askdo inspection check <path> [--config PATH]")
+		fmt.Fprintln(stderr, "usage: askdo-config inspection check <path> [--config PATH]")
 		return 125
 	}
-	if os.Geteuid() != 0 {
-		fmt.Fprintln(stderr, "inspection check requires root")
-		return 125
+	if getEUID() != 0 {
+		return rootRequired(stderr, "inspection check requires root")
 	}
 	data, err := os.ReadFile(*configPath)
 	if err != nil {

@@ -28,6 +28,9 @@ const (
 	maxInspectedBytes       = int64(66060288)
 	MaxHashFileBytes        = int64(32 << 20)
 	MaxHashedBytesPerReview = int64(64 << 20)
+	defaultUpgradeBackupDir = "/var/backups/askdo"
+	// UpgradeReceiptRoot is reserved for upgrade receipts and pinned bootstraps.
+	UpgradeReceiptRoot = "/var/lib/askdo-upgrade"
 )
 
 // Duration is a JSON Go-duration string.
@@ -60,14 +63,15 @@ func (d Duration) Value() time.Duration { return time.Duration(d) }
 // Config is a direct version 4 or explicit fleet version 5 document. Submit access is
 // controlled by Unix socket permissions, not a configuration section.
 type Config struct {
-	ConfigVersion int              `json:"config_version"`
-	Inspection    InspectionConfig `json:"inspection"`
-	Review        ReviewConfig     `json:"review"`
-	Limits        LimitsConfig     `json:"limits"`
-	Telegram      TelegramConfig   `json:"telegram"`
-	Fleet         *FleetConfig     `json:"fleet,omitempty"`
-	Warnings      []string         `json:"-"`
-	present       configPresence
+	ConfigVersion    int              `json:"config_version"`
+	UpgradeBackupDir string           `json:"upgrade_backup_dir,omitempty"`
+	Inspection       InspectionConfig `json:"inspection"`
+	Review           ReviewConfig     `json:"review"`
+	Limits           LimitsConfig     `json:"limits"`
+	Telegram         TelegramConfig   `json:"telegram"`
+	Fleet            *FleetConfig     `json:"fleet,omitempty"`
+	Warnings         []string         `json:"-"`
+	present          configPresence
 }
 
 // MarshalJSON preserves the direct document unchanged, but omits its forbidden
@@ -83,6 +87,11 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		MaxHashedBytesPerReview *int64 `json:"max_hashed_bytes_per_review,omitempty"`
 	}
 	limits := limitsJSON{LimitsConfig: c.Limits}
+	// Like the hash budgets, the runtime backup-directory default is not pinned
+	// into an older document on an unrelated save; explicit values are kept.
+	if c.UpgradeBackupDir == defaultUpgradeBackupDir && !hasField(c.present.top, "upgrade_backup_dir") {
+		c.UpgradeBackupDir = ""
+	}
 	if hasField(c.present.limits, "max_hash_file_bytes") || (c.Limits.MaxHashFileBytes != 0 && c.Limits.MaxHashFileBytes != MaxHashFileBytes) {
 		limits.MaxHashFileBytes = &c.Limits.MaxHashFileBytes
 	}
@@ -103,11 +112,11 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		profiles = []string{}
 	}
 	type fleetReviewJSON struct {
-		ReviewConfig
+		reviewWire
 		Models          json.RawMessage `json:"models,omitempty"`
 		GatewayProfiles []string        `json:"gateway_profiles"`
 	}
-	review := fleetReviewJSON{ReviewConfig: c.Review, GatewayProfiles: profiles}
+	review := fleetReviewJSON{reviewWire: reviewForJSON(c.Review), GatewayProfiles: profiles}
 	return json.Marshal(struct {
 		configJSON
 		Limits   limitsJSON      `json:"limits"`
@@ -298,9 +307,11 @@ type InspectionConfig struct {
 
 // ReviewConfig controls model review.
 type ReviewConfig struct {
-	Mode                    string         `json:"mode,omitempty"`
-	ApprovalOnlyUsers       []string       `json:"approval_only_users,omitempty"`
-	ApprovalTimestampUsers  map[string]int `json:"approval_timestamp_users,omitempty"`
+	Mode              string   `json:"mode,omitempty"`
+	ApprovalOnlyUsers []string `json:"approval_only_users,omitempty"`
+	// Internally stored in seconds; JSON uses sudo-style minutes under
+	// timestamp_timeout_users, with approval_timestamp_users as a seconds alias.
+	ApprovalTimestampUsers  map[string]int `json:"-"`
 	LocalOnly               bool           `json:"local_only"`
 	Models                  []ModelConfig  `json:"models"`
 	GatewayProfiles         []string       `json:"gateway_profiles,omitempty"`
@@ -784,6 +795,9 @@ func (c *Config) Validate() error {
 		return errors.New("config is nil")
 	}
 	c.Warnings = c.Warnings[:0]
+	if err := c.ValidateUpgradeBackupDir(); err != nil {
+		return err
+	}
 	if c.Limits.MaxHashFileBytes == 0 && !hasField(c.present.limits, "max_hash_file_bytes") {
 		c.Limits.MaxHashFileBytes = MaxHashFileBytes
 	}
@@ -925,10 +939,10 @@ func validateReviewPolicy(review ReviewConfig) error {
 	}
 	for name, seconds := range review.ApprovalTimestampUsers {
 		if name == "" || strings.TrimSpace(name) != name {
-			return errors.New("review.approval_timestamp_users contains an invalid login name")
+			return errors.New("review.timestamp_timeout_users contains an invalid login name")
 		}
 		if seconds < 30 || seconds > 3600 {
-			return errors.New("review.approval_timestamp_users seconds must be 30 through 3600")
+			return errors.New("review.timestamp_timeout_users must be 0.5 through 60 minutes (30 through 3600 seconds)")
 		}
 	}
 	if len(review.AutoApproveGrants) > 128 {
@@ -1215,6 +1229,9 @@ func validateModelList(models []ModelConfig, localOnly, checkFiles bool) error {
 }
 
 func applyDefaults(c *Config) {
+	if c.UpgradeBackupDir == "" && !hasField(c.present.top, "upgrade_backup_dir") {
+		c.UpgradeBackupDir = defaultUpgradeBackupDir
+	}
 	if c.Inspection.SudoPolicyUIDs == nil && !hasField(c.present.inspection, "sudo_policy_uids") {
 		c.Inspection.SudoPolicyUIDs = []uint32{}
 	}
@@ -1276,6 +1293,27 @@ func applyDefaults(c *Config) {
 		c.Telegram.ApprovalTTL = Duration(defaultApprovalTTL)
 	}
 }
+
+// ValidateUpgradeBackupDir checks only the root helper's backup location, so
+// reading it does not depend on unrelated reviewer or channel credentials.
+func (c *Config) ValidateUpgradeBackupDir() error {
+	if c.UpgradeBackupDir == "" && !hasField(c.present.top, "upgrade_backup_dir") {
+		c.UpgradeBackupDir = defaultUpgradeBackupDir
+	}
+	if !filepath.IsAbs(c.UpgradeBackupDir) || filepath.Clean(c.UpgradeBackupDir) != c.UpgradeBackupDir {
+		return errors.New("upgrade_backup_dir must be an absolute clean path")
+	}
+	// Receipts store the full stage, not just this root: reserve /up_<32hex>.
+	stage := filepath.Join(c.UpgradeBackupDir, "up_"+strings.Repeat("0", 32))
+	if len(stage) > 512 || strings.IndexFunc(stage, func(r rune) bool { return r < 0x20 || r > 0x7e }) != -1 {
+		return errors.New("upgrade_backup_dir must form a printable ASCII receipt stage of at most 512 bytes")
+	}
+	if c.UpgradeBackupDir == UpgradeReceiptRoot || strings.HasPrefix(c.UpgradeBackupDir, UpgradeReceiptRoot+string(filepath.Separator)) {
+		return fmt.Errorf("upgrade_backup_dir must be outside the receipt/bootstrap namespace %s", UpgradeReceiptRoot)
+	}
+	return nil
+}
+
 func validatePathList(name string, paths []string, deduplicate bool) error {
 	seen := map[string]struct{}{}
 	for _, path := range paths {

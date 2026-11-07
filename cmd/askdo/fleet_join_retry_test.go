@@ -51,6 +51,10 @@ func TestFleetJoinReconcilesPostFailureThenCooldown(t *testing.T) {
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
+		if fleetJoinRevealFixture(t, w, r, first, &bytes.Buffer{}, nil) {
+			calls = append(calls, "REVEAL accepted")
+			return
+		}
 		if r.Method == http.MethodPost {
 			data, _ := io.ReadAll(r.Body)
 			request, err := fleetproto.ParseJoinRequest(data)
@@ -81,7 +85,7 @@ func TestFleetJoinReconcilesPostFailureThenCooldown(t *testing.T) {
 				w.WriteHeader(http.StatusConflict)
 				return
 			}
-			wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinPending, HostID: first.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
+			wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinCommitted, GatewayNonce: fixtureGatewayNonce, HostID: first.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix()})
 			_, _ = w.Write(wire)
 			return
 		}
@@ -91,7 +95,7 @@ func TestFleetJoinReconcilesPostFailureThenCooldown(t *testing.T) {
 			return
 		}
 		calls = append(calls, "GET approved")
-		wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: 1, State: fleetproto.JoinApproved, HostID: first.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix(), URL: server.URL, VerificationKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), AllowedProfiles: []string{"codex"}, DefaultProfiles: []string{"codex"}})
+		wire, _ := fleetproto.MarshalJoinResponse(fleetproto.JoinResponse{Version: fleetproto.JoinVersion, State: fleetproto.JoinApproved, GatewayNonce: fixtureGatewayNonce, HostID: first.HostID, ExpiresAt: time.Now().Add(time.Minute).Unix(), URL: server.URL, VerificationKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), AllowedProfiles: []string{"codex"}, DefaultProfiles: []string{"codex"}})
 		_, _ = w.Write(wire)
 	}))
 	defer server.Close()
@@ -111,7 +115,7 @@ func TestFleetJoinReconcilesPostFailureThenCooldown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recovery aborted: %v; calls=%v", err, calls)
 	}
-	if !reflect.DeepEqual(calls, []string{"POST failure", "GET 401", "POST 429", "POST registered", "GET approved"}) || cards != 1 {
+	if !reflect.DeepEqual(calls, []string{"POST failure", "GET 401", "POST 429", "POST registered", "REVEAL accepted", "GET approved"}) || cards != 1 {
 		t.Fatal("wrong recovery sequence or duplicate card", calls, cards)
 	}
 	if !reflect.DeepEqual(waits, []time.Duration{time.Second, 7 * time.Second, time.Second}) {

@@ -126,14 +126,48 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	flags := flag.NewFlagSet("askdo", flag.ContinueOnError)
 	flags.SetOutput(options.Stderr)
 	var timeout time.Duration
-	var reason, bundle, entry, script string
+	var reason, bundle, entry, script, targetUser string
 	var sensitive stringList
 	var review forceReviewFlag
 	var detach bool
+	var resetTimestamp, removeTimestamp, validateTimestamp, nonInteractive, shell, login, list bool
+	for _, option := range []struct {
+		short, long, help string
+		value             *bool
+	}{
+		{"k", "reset-timestamp", "invalidate this terminal's timestamp; with COMMAND, ignore it", &resetTimestamp},
+		{"K", "remove-timestamp", "remove all caller timestamps (no command allowed)", &removeTimestamp},
+		{"v", "validate", "refresh the approval timestamp without running a command", &validateTimestamp},
+		{"n", "non-interactive", "never wait for human approval; fail if required", &nonInteractive},
+		{"s", "shell", "run the target user's shell", &shell},
+		{"i", "login", "run the target user's login shell in their home", &login},
+		{"l", "list", "list the caller's askdo privileges without approval", &list},
+	} {
+		flags.BoolVar(option.value, option.short, false, option.help)
+		flags.BoolVar(option.value, option.long, false, "same as -"+option.short)
+	}
 	flags.BoolVar(&options.Verbose, "verbose", options.Verbose, "show job lifecycle diagnostics")
 	flags.DurationVar(&timeout, "timeout", 0, "maximum time to wait")
 	flags.StringVar(&reason, "reason", "privileged command", "reason for privileged operation")
 	flags.BoolVar(&detach, "detach", false, "run detached without a terminal")
+	// Like sudo -u: one target, given as a login name or #UID, resolved and
+	// bound by the broker. Both spellings set the same value; a second,
+	// different value is a usage error rather than a silent override.
+	setTargetUser := func(value string) error {
+		if err := proto.ValidateTargetUser(value); err != nil {
+			return err
+		}
+		if value == "" {
+			return errors.New("-u/--user requires a user name or #UID")
+		}
+		if targetUser != "" && targetUser != value {
+			return errors.New("-u/--user given twice with different users")
+		}
+		targetUser = value
+		return nil
+	}
+	flags.Func("u", "run COMMAND as `USER` (login name or #UID) instead of root", setTargetUser)
+	flags.Func("user", "same as -u", setTargetUser)
 	flags.StringVar(&bundle, "bundle", "", "bundle directory")
 	flags.StringVar(&entry, "entry", "", "bundle entry point")
 	flags.Func("script", "capture one Bash script as a bundle; remaining arguments go to the script", func(path string) error {
@@ -148,8 +182,85 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	})
 	flags.Var(&sensitive, "bundle-include-sensitive", "include one default-excluded bundle file")
 	flags.Var(&review, "review", "force AI review (yes only)")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(expandShortFlags(args, flags)); err != nil {
 		return 125
+	}
+	rest := flags.Args()
+	if shell && login || (shell || login) && (bundle != "" || script != "" || entry != "" || len(sensitive) != 0) {
+		return usageError(options, "-s/--shell and -i/--login are mutually exclusive and require argv mode")
+	}
+	// -k alone performs the same administrative terminal reset as -K and -l do
+	// theirs, but it used to bypass this check entirely: `-k --entry foo` and
+	// `-k --detach` silently revoked the terminal and reported success. Every
+	// administrative exchange is now validated before the socket is dialled,
+	// so a rejected invocation changes nothing. Execution modes (a command,
+	// --bundle, --script, --entry, -s, -i, --detach) remain refused, and the
+	// --timeout/--reason checks below moved ahead of the dispatch so an
+	// invalid value cannot skip validation by riding an administrative flag.
+	administrative := removeTimestamp || validateTimestamp || list ||
+		// -k alone is the fourth administrative exchange: same condition the
+		// reset dispatch below already uses, hoisted so its options are
+		// validated here too instead of only reaching the broker.
+		(resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "")
+	if administrative {
+		// Only the exchanges that genuinely take no target reject one: -K
+		// removes every terminal window of the caller and standalone -k
+		// resets this terminal's window. -k with -v is not that reset: it is
+		// sudo's force-fresh-approval validation submission, which reaches
+		// the broker as an ordinary (validated /bin/true) submit carrying
+		// reset_timestamp — and an ordinary submit may name a target. A
+		// target-less window would make `askdo -k -v -u tyme` a usage error
+		// while plain `askdo -v -u tyme` was accepted.
+		if (removeTimestamp || resetTimestamp) && !validateTimestamp && targetUser != "" {
+			return usageError(options, "-k and -K do not accept a target user")
+		}
+		if (removeTimestamp || resetTimestamp && !validateTimestamp || list) && bool(review) {
+			return usageError(options, "administrative timestamp actions do not accept --review")
+		}
+		if (removeTimestamp || resetTimestamp && !validateTimestamp) && nonInteractive {
+			return usageError(options, "-k and -K do not accept -n")
+		}
+		if validateTimestamp && bool(review) {
+			return usageError(options, "-v does not accept --review; validation always requires a human decision")
+		}
+		// --bundle-include-sensitive is an execution-only bundle option: the
+		// early timestamp dispatch ignores it entirely, so accepting it would
+		// revoke or refresh state while silently dropping part of the request.
+		if len(rest) != 0 || bundle != "" || len(sensitive) != 0 || script != "" || shell || login || detach || entry != "" ||
+			removeTimestamp && (resetTimestamp || validateTimestamp || list) || list && (resetTimestamp || validateTimestamp) {
+			return usageError(options, "-k, -K, -v and -l do not accept commands or execution modes")
+		}
+	}
+	if timeout < 0 || strings.TrimSpace(reason) == "" {
+		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
+		return 125
+	}
+	reasonExplicit := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "reason" {
+			reasonExplicit = true
+		}
+	})
+	standaloneReset := resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == ""
+	if reasonExplicit && (removeTimestamp || standaloneReset || validateTimestamp || list) {
+		return usageError(options, "timestamp-only actions do not accept --reason")
+	}
+	timestampCtx, cancelTimestamp := ctx, context.CancelFunc(func() {})
+	if timeout > 0 {
+		timestampCtx, cancelTimestamp = context.WithDeadline(ctx, started.Add(timeout))
+	}
+	defer cancelTimestamp()
+	if removeTimestamp {
+		return runTimestamp(timestampCtx, "remove", "", options)
+	}
+	if list {
+		return runTimestamp(timestampCtx, "list", targetUser, options)
+	}
+	if resetTimestamp && !validateTimestamp && !shell && !login && len(rest) == 0 && bundle == "" && script == "" {
+		return runTimestamp(timestampCtx, "reset", "", options)
+	}
+	if validateTimestamp {
+		rest = []string{"/bin/true"}
 	}
 	if script != "" {
 		var conflictingFlag string
@@ -162,19 +273,71 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 			return usageError(options, "--script cannot be combined with --"+conflictingFlag)
 		}
 	}
-	if timeout < 0 || strings.TrimSpace(reason) == "" {
-		fmt.Fprintln(options.Stderr, "--reason must be nonempty and --timeout must be nonnegative")
-		return 125
-	}
-	rest := flags.Args()
+	// Bundle mode with a non-root target is refused by the broker, which alone
+	// resolves the account: every UID-0 spelling (root, #0, #00, aliases) is root.
 	// The caller's own working directory is part of the request: both argv
 	// and bundle executions run there. Capture it before any submission so
 	// the broker can bind the exact directory. A missing/unusable cwd is a
-	// hard local error — there is no silent substitute directory.
+	// hard local error for ordinary and bundle execution. Login mode replaces
+	// it with the target home, so a deleted caller directory is irrelevant.
 	invocationDir, err := os.Getwd()
-	if err != nil {
+	if validateTimestamp {
+		// Timestamp validation executes no command, so it binds a stable
+		// placeholder instead of a caller CWD that could change while waiting.
+		invocationDir, err = "/", nil
+	}
+	if err != nil && !login {
 		fmt.Fprintf(options.Stderr, "cannot determine the working directory: %v\n", err)
 		return 125
+	}
+	if shell || login {
+		// The getent/NSS account lookup is part of this invocation, not a
+		// local detail outside its budget: a stalled name service must end at
+		// the same started+timeout deadline that bounds every later exchange
+		// instead of hanging past it.
+		// Build both contexts before starting the watcher: it only ever
+		// touches the immutable cancelInterrupt.
+		interruptCtx, cancelInterrupt := context.WithCancel(ctx)
+		lookupCtx, cancelLookup := interruptCtx, context.CancelFunc(func() {})
+		if timeout > 0 {
+			lookupCtx, cancelLookup = context.WithDeadline(interruptCtx, started.Add(timeout))
+		}
+		lookupInterrupted := make(chan struct{})
+		lookupWatchDone := make(chan struct{})
+		lookupWatcherExited := make(chan struct{})
+		go func() {
+			defer close(lookupWatcherExited)
+			select {
+			case <-options.Interrupt:
+				close(lookupInterrupted)
+				cancelInterrupt()
+			case <-lookupWatchDone:
+			}
+		}()
+		var home string
+		rest, home, err = shellCommand(lookupCtx, targetUser, rest, login)
+		cancelLookup()
+		cancelInterrupt()
+		close(lookupWatchDone)
+		// Join the watcher, then give any interrupt — consumed by the watcher
+		// or still pending — precedence over a successful lookup.
+		<-lookupWatcherExited
+		select {
+		case <-lookupInterrupted:
+			return 130
+		case <-options.Interrupt:
+			return 130
+		default:
+		}
+		if err != nil {
+			if timeout > 0 && !time.Now().Before(started.Add(timeout)) {
+				return usageErrorCode(options, "askdo: shell: target account lookup timed out", 124)
+			}
+			return usageError(options, "askdo: shell: "+err.Error())
+		}
+		if login {
+			invocationDir = home
+		}
 	}
 	// Only an explicit --timeout bounds capture. There is no default capture
 	// timer: a pipe with no writer close waits indefinitely unless the caller
@@ -183,7 +346,11 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	if timeout > 0 {
 		captureDeadline = started.Add(timeout)
 	}
-	captured, interrupted, err := captureStdinGuarded(ctx, options.Stdin, captureDeadline, options.Interrupt)
+	var captured []byte
+	var interrupted bool
+	if !validateTimestamp {
+		captured, interrupted, err = captureStdinGuarded(ctx, options.Stdin, captureDeadline, options.Interrupt)
+	}
 	if interrupted {
 		fmt.Fprintln(options.Stderr, "interrupted; no command submitted")
 		return 130
@@ -200,7 +367,10 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	if len(captured) > 0 && script != "" {
 		return usageError(options, "askdo: captured stdin cannot be combined with --script")
 	}
-	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review)}
+	request := proto.SubmitRequest{Op: "submit", ProtocolVersion: proto.FeedbackProtocolVersion, Reason: reason, CWD: invocationDir, ForceReview: bool(review), TargetUser: targetUser, ResetTimestamp: resetTimestamp, NonInteractive: nonInteractive, ValidateTimestamp: validateTimestamp, LoginShell: login}
+	if validateTimestamp {
+		request.Reason = "validate approval timestamp (no command will run)"
+	}
 	if bundle == "" && script == "" {
 		if entry != "" || len(rest) == 0 {
 			fmt.Fprintln(options.Stderr, "argv mode requires a command (use -- before command flags)")
@@ -247,13 +417,22 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		hasTTY = hasControllingTTY
 	}
 	controllingTTY := hasTTY()
+	if validateTimestamp && !controllingTTY {
+		return usageErrorCode(options, "askdo: timestamp validation requires a controlling terminal", 1)
+	}
 	if detach || !controllingTTY || len(captured) > 0 {
 		request.Lifecycle = proto.LifecycleDetached
 	} else {
 		request.Lifecycle = proto.LifecycleForeground
-		request.TerminalType = os.Getenv("TERM")
-		if !regexp.MustCompile(`^[A-Za-z0-9+._-]{1,128}$`).MatchString(request.TerminalType) {
-			return usageError(options, "askdo: invalid terminal type")
+		if validateTimestamp {
+			// Validation runs no command, so the execution TERM contract does
+			// not apply; use a valid placeholder for the broker's wire schema.
+			request.TerminalType = "dumb"
+		} else {
+			request.TerminalType = os.Getenv("TERM")
+			if !regexp.MustCompile(`^[A-Za-z0-9+._-]{1,128}$`).MatchString(request.TerminalType) {
+				return usageError(options, "askdo: invalid terminal type")
+			}
 		}
 	}
 	var deadline time.Time
@@ -704,6 +883,11 @@ func eventLoop(ctx context.Context, conn net.Conn, requestID string, deadline ti
 				state = nextState
 			}
 			if terminal {
+				// A wait_timeout before any accepted event comes only from
+				// admission, which retired the reservation: the handle is dead.
+				if code == 124 && state == "" && nextState == "" && options.cancelHandleFile != "" {
+					_ = os.Remove(options.cancelHandleFile)
+				}
 				if terminalState(nextState) && options.cancelHandleFile != "" {
 					_ = os.Remove(options.cancelHandleFile)
 				}
@@ -789,12 +973,8 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		if proto.StrictUnmarshal(body, &event) != nil || event.Validate() != nil || event.RequestID != requestID {
 			return 125, true, ""
 		}
-		if event.State == "queued" {
-			if !options.quietForeground {
-				fmt.Fprintln(options.Stderr, "queued: broker accepted; review/notification pending")
-			} else {
-				fmt.Fprintf(options.Stderr, "Job %s: check Telegram for the review card\n", requestID)
-			}
+		if event.State == "queued" && !options.quietForeground {
+			fmt.Fprintln(options.Stderr, "queued: broker accepted; review/notification pending")
 		}
 		return 0, false, event.State
 	case "progress":
@@ -804,6 +984,10 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		}
 		if !options.quietForeground {
 			fmt.Fprintf(options.Stderr, "%s: %s\n", event.Stage, event.Detail)
+		} else if event.Stage == "awaiting-human" {
+			// This progress event follows NotificationSent. Timestamp reuse skips
+			// notification and therefore never produces this prompt.
+			fmt.Fprintf(options.Stderr, "Job %s: check Telegram for the review card\n", requestID)
 		}
 		return 0, false, event.Stage
 	case "stdout", "stderr":
@@ -832,6 +1016,9 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 		if event.Message != "" {
 			fmt.Fprintln(options.Stderr, event.Message)
 		}
+		if event.Message == "askdo: a Telegram approval is required" {
+			return 1, true, event.State
+		}
 		if event.Feedback != nil {
 			printReviewFeedback(options.Stderr, *event.Feedback)
 		}
@@ -842,6 +1029,13 @@ func handleEvent(body []byte, requestID string, options Options) (int, bool, str
 			return 125, true, ""
 		}
 		fmt.Fprintln(options.Stderr, event.Message)
+		if (event.Code == "approval_required" || event.Code == "timestamp_disabled") && options.cancelHandleFile != "" {
+			// The broker cancelled the reservation; its handle is now dead.
+			_ = os.Remove(options.cancelHandleFile)
+		}
+		if event.Code == "approval_required" || event.Code == "timestamp_disabled" {
+			return 1, true, ""
+		}
 		return 125, true, ""
 	default:
 		return 125, true, ""

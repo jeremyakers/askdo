@@ -69,6 +69,34 @@ func TestReviewLogCLI(t *testing.T) {
 	}
 }
 
+func TestReviewLogOutcomeOnlyTarget(t *testing.T) {
+	oldPath, oldEUID := reviewLogPath, getEUID
+	t.Cleanup(func() { reviewLogPath, getEUID = oldPath, oldEUID })
+	getEUID = func() int { return 0 }
+	reviewLogPath = filepath.Join(t.TempDir(), "reviews.jsonl")
+	for _, tc := range []struct {
+		name string
+		uid  uint32
+		want string
+	}{
+		{"target", 1001, ` target="target"(1001)`},
+		{"", 1001, ` target=""(1001)`},
+		{"", 0, ""},
+	} {
+		encoded, _ := json.Marshal(reviewlog.Event{Version: 1, Event: "outcome", Time: time.Now(), JobID: "outcome-only", SubmitterUID: 1000, TargetUID: tc.uid, TargetName: tc.name, State: "failed"})
+		if err := os.WriteFile(reviewLogPath, append(encoded, '\n'), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var out, stderr bytes.Buffer
+		if code := runReview([]string{"log", "--since", "0"}, &out, &stderr); code != 0 {
+			t.Fatalf("code=%d err=%s", code, &stderr)
+		}
+		if tc.want != "" && !strings.Contains(out.String(), tc.want) || tc.want == "" && strings.Contains(out.String(), " target=") {
+			t.Errorf("target %d/%q absent or changed: %s", tc.uid, tc.name, &out)
+		}
+	}
+}
+
 func TestReviewLogSinceRejectsInvalidDurations(t *testing.T) {
 	// Given a root caller with a missing journal, so no history can hide a bad flag.
 	oldPath, oldEUID := reviewLogPath, getEUID
@@ -242,6 +270,42 @@ func TestReviewLogCompactShowsSignal(t *testing.T) {
 	// Then signal and result kind remain visible without an invented exit code.
 	if code != 0 || !strings.Contains(out.String(), `result="signal"`) || !strings.Contains(out.String(), "signal=15") || strings.Contains(out.String(), "exit=") {
 		t.Fatalf("code=%d out=%s err=%s", code, &out, &stderr)
+	}
+}
+
+func TestReviewLogCompactShowsExecutionTarget(t *testing.T) {
+	// Given one review journaled for a sudo-style target and one for root.
+	oldPath, oldEUID := reviewLogPath, getEUID
+	t.Cleanup(func() { reviewLogPath, getEUID = oldPath, oldEUID })
+	getEUID = func() int { return 0 }
+	reviewLogPath = filepath.Join(t.TempDir(), "reviews.jsonl")
+	target := `{"version":1,"event":"review","time":"2026-01-01T00:00:00Z","job_id":"one","host":"h","submitter_name":"alice","submitter_uid":1000,"target_uid":1001,"target_name":"tyme","argv":["/usr/bin/id"]}`
+	root := `{"version":1,"event":"review","time":"2026-01-01T00:00:00Z","job_id":"two","host":"h","submitter_name":"alice","submitter_uid":1000,"target_uid":0,"argv":["/usr/bin/id"]}`
+	if err := os.WriteFile(reviewLogPath, []byte(target+"\n"+root+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// When listing both.
+	var out, stderr bytes.Buffer
+	code := runReview([]string{"log", "--since", "0"}, &out, &stderr)
+	// Then the target job names its account and the root job line is unchanged.
+	if code != 0 {
+		t.Fatalf("code=%d err=%s", code, &stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var targetLine, rootLine string
+	for _, line := range lines {
+		switch {
+		case strings.Contains(line, `job="one"`):
+			targetLine = line
+		case strings.Contains(line, `job="two"`):
+			rootLine = line
+		}
+	}
+	if !strings.Contains(targetLine, ` submitter="alice"(1000) target="tyme"(1001) risk=`) {
+		t.Fatalf("target line=%q", targetLine)
+	}
+	if !strings.Contains(rootLine, ` submitter="alice"(1000) risk=`) || strings.Contains(rootLine, "target=") {
+		t.Fatalf("root line=%q", rootLine)
 	}
 }
 

@@ -219,8 +219,10 @@ func TestUpgradeRuntimeSortsAfterExistingDropIns(t *testing.T) {
 func TestUpgradeRuntimeOperationComesFromActivationStage(t *testing.T) {
 	// Given: helper routing owns the validated operation stage, not caller filenames.
 	host := &upgradeLocalHost{}
-	factory := func() upgrade.Helper { return upgrade.Helper{Host: host} }
 	stage := filepath.Join(t.TempDir(), cliUpgradeID)
+	factory := func(string) (upgrade.Helper, error) {
+		return upgrade.Helper{Host: host, ReceiptRoot: filepath.Dir(stage)}, nil
+	}
 	// When: the nonexistent stage is rejected before any system effect.
 	code := runUpgradeHelperWith(context.Background(), []string{"--activate", stage}, 0, factory, nil, io.Discard, io.Discard)
 	// Then: the production host's future runtime path is bound to this operation.

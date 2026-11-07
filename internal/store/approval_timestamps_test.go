@@ -4,11 +4,84 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCompleteTimestampValidationPreservesApprovalRecord(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id = "validation"
+	createTestJob(t, s, id, nil)
+	mustTransition(t, s, id, StateQueued, StateAwaitingHuman)
+	digest := strings.Repeat("a", 64)
+	if err := s.RecordManifest(ctx, testUID, id, "/manifest", digest); err != nil {
+		t.Fatal(err)
+	}
+	// These are existing recordApproval fields, including opaque signed fleet
+	// event bytes. Validation may add decision fields but must retain all of them.
+	binding := []byte(`{"card_id":41,"message_ids":[40,41],"digest":"` + digest + `","operator_user_id":101,"expiry_unix_ms":1900000000000,"channel_name":"ops","targets":[{"chat_id":11,"card_id":41,"operator_user_ids":[101]}],"fleet_events":["c2lnbmVkIGV2ZW50IHByb29m"]}`)
+	if err := s.RecordApproval(ctx, testUID, id, binding); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stamp := ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 12, TTYRdev: 34817, TTYInode: 789, BootID: "test-boot"}, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: strings.Repeat("b", 64)}
+	changed, err := s.CompleteTimestampValidation(ctx, id, digest, stamp, []byte(`{"kind":"human","decision":"approved","digest":"`+digest+`","operator_decision":{"action":"approve"}}`))
+	if err != nil || !changed {
+		t.Fatalf("complete=%t err=%v", changed, err)
+	}
+	job, err := s.GetJob(ctx, testUID, id)
+	if err != nil || job.State != StateFinished {
+		t.Fatalf("state=%s err=%v", job.State, err)
+	}
+	var before, after map[string]any
+	if err := json.Unmarshal(binding, &before); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(job.ApprovalJSON, &after); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range before {
+		if !reflect.DeepEqual(after[key], want) {
+			t.Errorf("validation discarded %s: got=%v want=%v", key, after[key], want)
+		}
+	}
+	if after["kind"] != "human" || after["decision"] != "approved" || after["operator_decision"] == nil {
+		t.Errorf("missing validation decision: %s", job.ApprovalJSON)
+	}
+}
+
+func TestClearApprovalTimestampsIncludesRoot(t *testing.T) {
+	// Given stored approval windows for root and for an ordinary user.
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	rootKey := ApprovalTimestampKey{UID: 0, TTYSession: 12, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	userKey := ApprovalTimestampKey{UID: testUID, TTYSession: 12, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	for _, key := range []ApprovalTimestampKey{rootKey, userKey} {
+		if err := s.UpsertApprovalTimestamp(ctx, ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour), AuthorityHash: strings.Repeat("a", 64)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// When askdo -K removes all timestamps for caller UID 0.
+	if err := s.ClearApprovalTimestamps(ctx, 0); err != nil {
+		t.Fatalf("clear root timestamps: %v", err)
+	}
+	// Then every root window is revoked and no other user's window moved.
+	for _, key := range []ApprovalTimestampKey{rootKey, userKey} {
+		stamp, err := s.GetApprovalTimestamp(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if remaining := !stamp.ApprovedAt.IsZero(); remaining != (key == userKey) {
+			t.Fatalf("key=%+v stamp=%+v, only the matching UID may survive", key, stamp)
+		}
+	}
+}
 
 func TestApprovalTimestampUpsertAndIdentity(t *testing.T) {
 	// Given an empty real store and a kernel-shaped terminal identity.
@@ -135,6 +208,37 @@ func TestApprovalTimestampCleanupRemovesExpiredRows(t *testing.T) {
 	}
 }
 
+func TestCompleteTimestampValidationReplacesFutureDatedRecord(t *testing.T) {
+	// Given a terminal whose stored window was approved in the future (a
+	// backward clock step): the broker rejects it, so the user keeps being
+	// prompted and a fresh -v validation must be able to repair the row.
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id = "clockstep"
+	createTestJob(t, s, id, nil)
+	mustTransition(t, s, id, StateQueued, StateAwaitingHuman)
+	digest := strings.Repeat("c", 64)
+	if err := s.RecordManifest(ctx, testUID, id, "/manifest", digest); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stored := ApprovalTimestamp{ApprovalTimestampKey: ApprovalTimestampKey{UID: testUID, TTYSession: 12, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}, ApprovedAt: now.Add(time.Hour), ExpiresAt: now.Add(2 * time.Hour), AuthorityHash: strings.Repeat("a", 64)}
+	if err := s.UpsertApprovalTimestamp(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	// When a fresh validation completes with its current ApprovedAt.
+	refreshed := ApprovalTimestamp{ApprovalTimestampKey: stored.ApprovalTimestampKey, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: strings.Repeat("b", 64)}
+	changed, err := s.CompleteTimestampValidation(ctx, id, digest, refreshed, []byte(`{"kind":"timestamp","decision":"approved","digest":"`+digest+`"}`))
+	if err != nil || !changed {
+		t.Fatalf("complete=%t err=%v", changed, err)
+	}
+	// Then the unusable future row is replaced and the window is refreshed.
+	got, err := s.PeekApprovalTimestamp(ctx, refreshed.ApprovalTimestampKey)
+	if err != nil || got.ApprovedAt != refreshed.ApprovedAt || got.ExpiresAt != refreshed.ExpiresAt || got.AuthorityHash != refreshed.AuthorityHash {
+		t.Fatalf("future record survived: %+v err=%v", got, err)
+	}
+}
+
 func TestApprovalTimestampRefreshIsMonotonic(t *testing.T) {
 	// Given a terminal with a newer approval already recorded.
 	s := openTestStore(t)
@@ -226,5 +330,27 @@ func TestForegroundAuthorizationConstraintMigrationPreservesGrants(t *testing.T)
 	}
 	if count != 2 {
 		t.Fatalf("grants=%d, want 2", count)
+	}
+}
+
+func TestUpsertApprovalTimestampReplacesFutureDatedRecord(t *testing.T) {
+	// Given a stored approval timestamp dated after the current wall clock.
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	key := ApprovalTimestampKey{UID: testUID, TTYSession: 77, TTYRdev: 34817, TTYInode: 456, BootID: "test-boot"}
+	future := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now.Add(time.Hour), ExpiresAt: now.Add(2 * time.Hour), AuthorityHash: strings.Repeat("a", 64)}
+	if err := s.UpsertApprovalTimestamp(ctx, future); err != nil {
+		t.Fatal(err)
+	}
+	// When a newly approved foreground dispatch writes the current time.
+	current := ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: strings.Repeat("b", 64)}
+	if err := s.UpsertApprovalTimestamp(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	// Then the unusable future row is replaced by the fresh approval.
+	got, err := s.PeekApprovalTimestamp(ctx, key)
+	if err != nil || got.ApprovedAt != current.ApprovedAt || got.ExpiresAt != current.ExpiresAt || got.AuthorityHash != current.AuthorityHash {
+		t.Fatalf("future record survived normal refresh: %+v err=%v", got, err)
 	}
 }

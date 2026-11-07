@@ -4,7 +4,7 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 if [ "${1:-}" != --inside ]; then
   case "$(docker info --format '{{json .SecurityOptions}}')" in *'"name=rootless"'*) ;; *) exit 1;; esac
-  C=$(docker create -w /src golang:1.27 sh /src/scripts/test-packaging.sh --inside)
+  C=$(docker create -e GOMAXPROCS -e GOFLAGS -w /src golang:1.27 sh /src/scripts/test-packaging.sh --inside)
   trap 'docker rm -f "$C" >/dev/null 2>&1 || :' EXIT
   git -C "$ROOT" ls-files -z | tar -C "$ROOT" --null -T - -cf - | docker cp - "$C:/src"
   docker cp "$ROOT/scripts" "$C:/src/"
@@ -25,6 +25,9 @@ exec sh -ec '
   fail() { printf "%s\n" "$*" >&2; exit 1; }
   sh /src/install.sh
   cmp /usr/local/bin/askdo /fixture/release/askdo-linux-amd64
+  test -L /usr/local/bin/askdo-config || fail "config multicall symlink missing"
+  test "$(readlink /usr/local/bin/askdo-config)" = askdo || fail "config multicall target differs"
+  test "$(stat -c %u:%g /usr/local/bin/askdo-config)" = 0:0 || fail "config symlink is not root-owned"
   cmp /usr/local/libexec/askdo-launch /fixture/release/askdo-launch-linux-amd64
   test ! -s /fixture/calls || fail "destination compiler invoked"
   test ! -e "$old" && ! getent group askdo-foreground || fail "fresh install created legacy grant/group"
@@ -59,6 +62,7 @@ exec sh -ec '
   chown 0:0 /var/lib/askdo-gateway
   sh /src/uninstall.sh --purge --yes
   test ! -e "$new"
+  test ! -L /usr/local/bin/askdo-config && test ! -e /usr/local/bin/askdo-config || fail "uninstall kept config entrypoint"
   test ! -e /etc/systemd/system/askdo-gateway.service || fail "recognized gateway unit retained"
   test ! -e /etc/askdo-gateway || fail "purge kept gateway server state"
   test ! -e /var/lib/askdo-gateway || fail "purge kept gateway database"

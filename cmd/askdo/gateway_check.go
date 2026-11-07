@@ -38,8 +38,7 @@ func gatewayLiveCheck(ctx context.Context, c *gateway.Config, out, stderr io.Wri
 
 func checkFleetHost(cfg *config.Config, live bool, out, stderr io.Writer) int {
 	if getEUID() != 0 {
-		fmt.Fprintln(stderr, "fleet config check requires root")
-		return 125
+		return rootRequired(stderr, "fleet config check requires root")
 	}
 	// Retained bundle provenance is hard inspection protection, not an active
 	// connection dependency; even a deleted source directory must not block TLS.

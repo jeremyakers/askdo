@@ -23,6 +23,10 @@ not an alternative install path.
   on the destination, falls back to source, or starts/stops services.
 - Manifest/hash binding relies on the owner's HTTPS release publication; it
   is not a signature or reproducible-build claim.
+- `/usr/local/bin/askdo-config` is a root-owned symlink to `askdo`, dispatching
+  the same binary by its invocation name. There is no extra release asset.
+  Installation creates or repairs the link and refuses an existing non-symlink;
+  uninstall removes the link without following its target.
 
 ## Synology DSM specifics
 
@@ -31,6 +35,13 @@ uses native Synology role operations instead of ordinary Linux steps.
 
 - DSM uses the vendor `/usr/bin/python3` and `synoacltool`. Ordinary Linux
   installation needs no Python.
+- Fresh DSM installs with a trusted `/volume1` set `upgrade_backup_dir` to
+  `/volume1/@askdo/upgrade-backups` and create that root-private directory on the
+  data volume, avoiding the small system partition. If `/volume1` is missing or
+  fails the trust/ACL checks, the installer prints a WARNING and leaves the field
+  unset, so backups stay in `/var/backups/askdo` until an administrator sets a
+  trusted data-volume directory. Existing configs and backups are not migrated;
+  set the field once (see [upgrade backup handling](upgrade.md#backup-location-and-retention)).
 - A checked canonical native `visudo` may be used when it matches the
   installed sudo version/grammar. Otherwise the verified release validator
   runs temporarily from root-controlled executable staging (never `/tmp`),

@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,11 +153,13 @@ func TestForegroundSudoContainer(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.Review.Mode, cfg.Review.Models = "approval_only", nil
+	cfg.Review.ApprovalTimestampUsers = map[string]int{"askdo-human": 600}
 	root := t.TempDir()
+	var approvals atomic.Int32
 	executor := &FakeExecutor{StartError: errors.New("foreground must never use broker executor")}
 	d, listener, err := newDaemon("", daemonOptions{
 		cfg: cfg, socketPath: "/run/askdo/request.sock", storePath: filepath.Join(root, "jobs.sqlite3"),
-		spoolRoot: filepath.Join(root, "spool"), worker: approvalProtocolWorker(t, "policy", nil, true),
+		spoolRoot: filepath.Join(root, "spool"), worker: timestampWorker(&approvals, "approve", nil),
 		executor: executor, peerUID: unixPeerUID, peerPID: unixPeerPID, ttyEvidence: foregroundTTYIdentity,
 	})
 	if err != nil {
@@ -203,13 +207,94 @@ func TestForegroundSudoContainer(t *testing.T) {
 	}
 	// script allocates a real controlling PTY; runuser retains the session and
 	// supplies actual unprivileged SO_PEERCRED to the broker.
-	good := "tty; id -u; set -- $(/bin/cat /proc/$$/stat); echo PGRP_SID_TTY=$5,$6,$7; /usr/local/bin/askdo --verbose --reason container-foreground -- /usr/bin/id -u; code=$?; echo ASKDO_EXIT=$code; exit $code"
+	good := "tty; id -u; set -- $(/bin/cat /proc/$$/stat); echo PGRP_SID_TTY=$5,$6,$7; /usr/local/bin/askdo --verbose --reason container-foreground -- /usr/bin/id -u; code=$?; /usr/local/bin/askdo --verbose --reason container-color -- /usr/bin/ls --color /usr/bin/ls; color=$?; /usr/local/bin/askdo --reason container-timestamp-reuse -- /usr/bin/id -u; reuse=$?; echo ASKDO_COLOR_EXIT=$color; echo ASKDO_REUSE_EXIT=$reuse; echo ASKDO_EXIT=$code; exit $code"
 	output, status := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+good+"'", "/dev/null")
 	t.Logf("original PTY / UID / root child / CLI exit: %q status=%d", output, status)
-	if status != 0 || !strings.Contains(output, "/dev/pts/") || !strings.Contains(output, "ASKDO_EXIT=0") || !strings.Contains(output, "\r\n0\r\n") || !strings.Contains(output, "\r\n1001\r\n") {
+	if status != 0 || !strings.Contains(output, "/dev/pts/") || !strings.Contains(output, "ASKDO_EXIT=0") || !strings.Contains(output, "ASKDO_COLOR_EXIT=0") || !strings.Contains(output, "ASKDO_REUSE_EXIT=0") || !strings.Contains(output, "\r\n0\r\n") || !strings.Contains(output, "\r\n1001\r\n") || !strings.Contains(output, "\x1b[01;32m/usr/bin/ls\x1b[0m\r\n") || strings.Contains(output, "check Telegram for the review card") {
 		t.Fatalf("real foreground path failed: status=%d output=%q", status, output)
 	}
+	if approvals.Load() != 1 {
+		t.Fatalf("three foreground commands required %d approvals, want 1", approvals.Load())
+	}
 	assertNoExecutor()
+	t.Run("sudo-timestamp-flags", func(t *testing.T) {
+		before := approvals.Load()
+		command := "/usr/local/bin/askdo -n /usr/bin/true; echo INITIAL_N=$?; /usr/local/bin/askdo -v; echo VALIDATE=$?; /usr/local/bin/askdo -n /usr/bin/true; echo REUSED_N=$?; /usr/local/bin/askdo -k; echo RESET=$?; /usr/local/bin/askdo -n /usr/bin/true; echo RESET_N=$?; /usr/local/bin/askdo -K; echo REMOVE=$?"
+		out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
+		for _, want := range []string{"INITIAL_N=1", "VALIDATE=0", "REUSED_N=0", "RESET=0", "RESET_N=1", "REMOVE=0", "askdo: a Telegram approval is required"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q: %s", want, out)
+			}
+		}
+		if code != 0 || approvals.Load() != before+1 {
+			t.Fatalf("sudo flag PTY result=%d approvals=%d (before %d): %s", code, approvals.Load(), before, out)
+		}
+		assertNoExecutor()
+	})
+	t.Run("sudo-shell-flags", func(t *testing.T) {
+		before := approvals.Load()
+		command := "/usr/local/bin/askdo -s -u askdo-target -- /usr/bin/id -u; echo SHELL_EXIT=$?; /usr/local/bin/askdo -i -u askdo-target -- /usr/bin/env; echo LOGIN_EXIT=$?; /usr/local/bin/askdo -i -- /usr/bin/env; echo ROOT_LOGIN_EXIT=$?; /usr/local/bin/askdo -l; echo LIST_EXIT=$?"
+		out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
+		for _, want := range []string{"\r\n1003\r\n", "SHELL_EXIT=0", "LOGIN_EXIT=0", "ROOT_LOGIN_EXIT=0", "HOME=/home/askdo-target", "USER=askdo-target", "LOGNAME=askdo-target", "PWD=/home/askdo-target", "HOME=/root", "USER=root", "LOGNAME=root", "PWD=/root", "askdo group membership: true", "LIST_EXIT=0"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q: %s", want, out)
+			}
+		}
+		if code != 0 || approvals.Load() != before+2 {
+			t.Fatalf("shell PTY result=%d approvals=%d (before %d): %s", code, approvals.Load(), before, out)
+		}
+		assertNoExecutor()
+	})
+	t.Run("config-approval", func(t *testing.T) {
+		// Use the installed multicall name, the real member UID/socket and
+		// helper/TTY handoff. Configuration stays private to this fixture.
+		path := filepath.Join(root, "config.json")
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, verb := range []string{"timestamp_timeout", "timestamp"} {
+			before := approvals.Load()
+			command := "/usr/local/bin/askdo-config review " + verb + " list --config " + path + "; echo CONFIG_EXIT=$?"
+			out, code := run(45*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+command+"'", "/dev/null")
+			t.Logf("config %s approval/output: %q status=%d", verb, out, code)
+			wantValue := `"askdo-human": 10 minutes`
+			if verb == "timestamp" {
+				wantValue = `"askdo-human": 600 seconds`
+			}
+			if code != 0 || !strings.Contains(out, "CONFIG_EXIT=0") || !strings.Contains(out, wantValue) || strings.Contains(out, "'review' moved") || approvals.Load() != before+1 {
+				t.Fatalf("config approval failed: %q approvals=%d (before %d)", out, approvals.Load(), before)
+			}
+			if verb == "timestamp" && strings.Count(out, "'review timestamp' moved") != 1 {
+				t.Fatalf("expected one alias notice through approval: %q", out)
+			}
+		}
+		p := startContainerPTY(t)
+		p.until(t, "ASKDO_PROMPT> ")
+		p.send(t, "/usr/local/bin/askdo-config reviewer add --config "+path+" --provider ollama-local --base-url http://127.0.0.1:11434 --model fixture --boundary local --timeout 1m; echo CONFIG_WIZARD_EXIT=$?\n")
+		p.until(t, "Reviewer name")
+		p.send(t, "config-pty-reviewer\n")
+		p.until(t, "CONFIG_WIZARD_EXIT=0\r\n")
+		t.Logf("config interactive wizard: %q", p.snapshot())
+		// A real operation failure is returned through the foreground job.
+		p.send(t, "/usr/local/bin/askdo-config review timestamp_timeout clear askdo-outsider --config "+path+"; echo CONFIG_FAILURE_EXIT=$?\n")
+		p.until(t, "has no timestamp policy")
+		p.until(t, "CONFIG_FAILURE_EXIT=1\r\n")
+		// Quiet client mode deliberately reports a generic socket connection
+		// error. Compare the real ordinary client rather than inventing a new
+		// permission-error format for askdo-config.
+		before := approvals.Load()
+		want, wantCode := run(10*time.Second, "runuser", "-u", "askdo-outsider", "--", "/usr/local/bin/askdo", "/usr/bin/true")
+		out, code := run(10*time.Second, "runuser", "-u", "askdo-outsider", "--", "/usr/local/bin/askdo-config", "review", "timestamp_timeout", "list", "--config", path)
+		t.Logf("nonmember config socket error: %q status=%d; ordinary client: %q status=%d", out, code, want, wantCode)
+		if code != 125 || code != wantCode || out != want || !strings.Contains(out, "connection failed") || approvals.Load() != before {
+			t.Fatalf("nonmember did not get normal socket error: status=%d %q", code, out)
+		}
+		assertNoExecutor()
+	})
 	// Interactive shell job control is essential: the user's original terminal
 	// receives VINTR/VSUSP; no signal is injected into a simulated helper.
 	t.Run("ctrl-c", func(t *testing.T) {
@@ -373,4 +458,151 @@ func TestForegroundSudoContainer(t *testing.T) {
 	assertNoExecutor()
 	// A handoff may be Unknown after disconnect; lack of a completion frame
 	// alone is not evidence that an approved child did not execute.
+}
+
+// recordingExecutor delegates to the real privileged executor while
+// recording every launch, so the target test can prove that detached jobs
+// run through it as the resolved account and foreground jobs never do.
+type recordingExecutor struct {
+	inner Executor
+	mu    sync.Mutex
+	ops   []Operation
+}
+
+func (r *recordingExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, error) {
+	r.mu.Lock()
+	r.ops = append(r.ops, cloneOperation(op))
+	r.mu.Unlock()
+	return r.inner.Start(op, stdout, stderr)
+}
+
+func (r *recordingExecutor) snapshot() []Operation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Operation(nil), r.ops...)
+}
+
+// TestForegroundTargetUserSudoContainer proves sudo-style -u end to end in
+// the disposable container: the real askdo-launch helper drops to the target
+// on the original PTY, the real SystemExecutor drops to it for --detach, and
+// an unknown account is refused before anything runs. The runner provisions
+// askdo-target (a member of askdo-extra) next to the existing accounts.
+func TestForegroundTargetUserSudoContainer(t *testing.T) {
+	if os.Getenv("ASKDO_FOREGROUND_CONTAINER_TEST") != "1" || os.Geteuid() != 0 {
+		t.Skip("requires opt-in disposable root container")
+	}
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		t.Skip("requires Docker container marker; never run against host sudoers")
+	}
+	target, err := user.Lookup("askdo-target")
+	if err != nil {
+		t.Fatalf("container setup missing askdo-target: %v", err)
+	}
+	extra, err := user.LookupGroup("askdo-extra")
+	if err != nil {
+		t.Fatalf("container setup missing askdo-extra: %v", err)
+	}
+	cfg := testConfig()
+	cfg.Review.Mode, cfg.Review.Models = "approval_only", nil
+	cfg.Review.ApprovalTimestampUsers = map[string]int{"askdo-human": 600}
+	cfg.Limits.MaxInspectedBytes = 8 << 20
+	root := t.TempDir()
+	var approvals atomic.Int32
+	executor := &recordingExecutor{inner: SystemExecutor{}}
+	d, listener, err := newDaemon("", daemonOptions{
+		cfg: cfg, socketPath: "/run/askdo/request.sock", storePath: filepath.Join(root, "jobs.sqlite3"),
+		spoolRoot: filepath.Join(root, "spool"), worker: timestampWorker(&approvals, "approve", nil),
+		executor: executor, peerUID: unixPeerUID, peerPID: unixPeerPID, ttyEvidence: foregroundTTYIdentity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.serve(ctx, listener) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("broker did not stop")
+		}
+		d.close()
+	})
+	run := func(timeout time.Duration, command string, args ...string) (string, int) {
+		t.Helper()
+		ctx, stop := context.WithTimeout(context.Background(), timeout)
+		defer stop()
+		cmd := exec.CommandContext(ctx, command, args...)
+		cmd.Env = append(os.Environ(), "TERM=xterm", "XDG_STATE_HOME=/home/askdo-human/.local/state")
+		output, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("timeout: %s %v: %s", command, args, output)
+		}
+		if err == nil {
+			return string(output), 0
+		}
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("%s %v: %v: %s", command, args, err, output)
+		}
+		return string(output), exit.ExitCode()
+	}
+	identity := "uid=" + target.Uid + "(askdo-target) gid=" + target.Gid + "(askdo-target) groups="
+	// Foreground on the real PTY: the helper drops to the account by name and
+	// by #UID, with its groups, HOME, USER and LOGNAME. All three commands
+	// resolve to the same target UID and share one approval window; the unknown
+	// account is refused with a clear reason and no approval.
+	foreground := "/usr/local/bin/askdo --verbose -u askdo-target --reason container-target -- /usr/bin/id -u; code=$?; " +
+		"/usr/local/bin/askdo --user \"#" + target.Uid + "\" --reason container-target-identity -- /usr/bin/id; idcode=$?; " +
+		"/usr/local/bin/askdo -u askdo-target --reason container-target-env -- /usr/bin/env; envcode=$?; " +
+		"/usr/local/bin/askdo -u askdo-nobody-here --reason container-unknown -- /usr/bin/id -u; unknown=$?; " +
+		"echo ASKDO_ID_EXIT=$idcode; echo ASKDO_ENV_EXIT=$envcode; echo ASKDO_UNKNOWN_EXIT=$unknown; echo ASKDO_EXIT=$code; exit $code"
+	output, status := run(60*time.Second, "/usr/bin/script", "-q", "-e", "-c", "runuser -u askdo-human -- /bin/sh -c '"+foreground+"'", "/dev/null")
+	t.Logf("foreground target PTY: %q status=%d", output, status)
+	for _, want := range []string{"\r\n" + target.Uid + "\r\n", identity, extra.Gid + "(askdo-extra)", "HOME=" + target.HomeDir + "\r\n", "USER=askdo-target\r\n", "LOGNAME=askdo-target\r\n", "unknown user", "ASKDO_ID_EXIT=0", "ASKDO_ENV_EXIT=0", "ASKDO_UNKNOWN_EXIT=125", "ASKDO_EXIT=0"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("foreground target path lacks %q: status=%d output=%q", want, status, output)
+		}
+	}
+	if status != 0 || strings.Contains(output, "\r\n0\r\n") || strings.Contains(output, "HOME=/root") || strings.Contains(output, "uid=0(") {
+		t.Fatalf("foreground target path ran as root: status=%d output=%q", status, output)
+	}
+	if approvals.Load() != 1 {
+		t.Fatalf("three foreground commands for the same resolved target UID required %d approvals, want 1 (per-target timestamp reuse)", approvals.Load())
+	}
+	if n := len(executor.snapshot()); n != 0 {
+		t.Fatalf("foreground used the broker executor %d times", n)
+	}
+	// Detached through the real SystemExecutor: the same account, groups and
+	// environment, streamed back to the unprivileged submitter.
+	output, status = run(45*time.Second, "/usr/sbin/runuser", "-u", "askdo-human", "--", "/usr/local/bin/askdo", "--detach", "-u", "askdo-target", "--reason", "container-detached", "--", "/usr/bin/id", "-u")
+	t.Logf("detached target: %q status=%d", output, status)
+	if status != 0 || !strings.Contains(output, "\n"+target.Uid+"\n") || strings.Contains(output, "\n0\n") {
+		t.Fatalf("detached target did not run as %s: status=%d output=%q", target.Uid, status, output)
+	}
+	output, status = run(45*time.Second, "/usr/sbin/runuser", "-u", "askdo-human", "--", "/usr/local/bin/askdo", "--detach", "--user", "#"+target.Uid, "--reason", "container-detached-env", "--", "/bin/sh", "-c", "/usr/bin/id; /usr/bin/env")
+	t.Logf("detached target identity: %q status=%d", output, status)
+	for _, want := range []string{identity, extra.Gid + "(askdo-extra)", "HOME=" + target.HomeDir + "\n", "USER=askdo-target\n", "LOGNAME=askdo-target\n"} {
+		if status != 0 || !strings.Contains(output, want) {
+			t.Fatalf("detached target identity lacks %q: status=%d output=%q", want, status, output)
+		}
+	}
+	output, status = run(30*time.Second, "/usr/sbin/runuser", "-u", "askdo-human", "--", "/usr/local/bin/askdo", "--detach", "-u", "askdo-nobody-here", "--reason", "container-detached-unknown", "--", "/usr/bin/id", "-u")
+	t.Logf("detached unknown target: %q status=%d", output, status)
+	if status != 125 || !strings.Contains(output, "unknown user") || strings.Contains(output, "\n0\n") {
+		t.Fatalf("unknown detached target was not refused: status=%d output=%q", status, output)
+	}
+	ops := executor.snapshot()
+	if len(ops) != 2 || approvals.Load() != 3 {
+		t.Fatalf("detached launches=%d approvals=%d, want 2 launches and 3 approvals", len(ops), approvals.Load())
+	}
+	for _, op := range ops {
+		if strconv.FormatUint(uint64(op.Target.UID), 10) != target.Uid || strconv.FormatUint(uint64(op.Target.GID), 10) != target.Gid || op.Target.Name != "askdo-target" || !strings.Contains(strings.Join(op.Env, "\n"), "USER=askdo-target") {
+			t.Fatalf("detached operation target=%+v env=%v", op.Target, op.Env)
+		}
+	}
 }

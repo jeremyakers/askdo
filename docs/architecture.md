@@ -30,8 +30,9 @@ and loss of helper tracking after commit is `unknown`, not a retry signal.
 
 ### Daemon / broker (root, trusted)
 
-`askdo daemon` requires effective UID 0 (anything else exits 125). It is
-the only writer of job state and the only authority that commits a privileged
+`askdo-config daemon` requires effective UID 0 (anything else exits 125). It is
+also available as `askdo daemon`, the unchanged notice-free systemd entrypoint.
+The daemon is the only writer of job state and the only authority that commits a privileged
 dispatch. Detached children launch through its executor; the foreground
 helper launches only after claiming a broker-authenticated one-use grant.
 At startup it:
@@ -46,7 +47,7 @@ At startup it:
    mount IDs. Only feature absence (`ENOSYS`) selects the fallback;
    permission and resource errors fail closed on either path, there is no
    uname-based guessing, and every filesystem is still checked per object.
-   `askdo config check` displays which backend the same probe selected.
+   `askdo-config config check` displays which backend the same probe selected.
 3. Creates `/run/askdo/` (root:askdo 0750), the request socket
     `request.sock` (root:askdo 0660) and a separate root-only `launch.sock`.
 4. Opens the durable store (`/var/lib/askdo/jobs.sqlite3`) and calls
@@ -194,8 +195,9 @@ payloads. Neither adapter is a general execution or zero-side-effect boundary.
 *Implemented in source; not in the `v1.0.0-rc.1` release binaries.*
 
 A host may instead belong to a fleet (`config_version: 5`). The separate
-`askdo gateway serve` process owns shared model provider endpoints, the one
-Codex OAuth login/refresh path, Telegram bot tokens and approval cards. It
+`askdo-config gateway serve` process owns shared model provider endpoints, the one
+Codex OAuth login/refresh path, Telegram bot tokens and approval cards. The
+notice-free `askdo gateway serve` alias is retained for the unchanged unit. It
 never executes commands, never connects to hosts, and stores only enrollment
 records and ticket/delivery bookkeeping — no host job databases or raw model
 conversations. In fleet mode the reviewer worker receives **no** enrollment,
@@ -222,6 +224,7 @@ from trusting the worker or the network peer. See
    approved original-TTY foreground: client ──sudo -n (narrow rule)──▶ askdo-launch
                            helper ──root-only launch.sock, one-use grant──▶ BROKER
   approved detached: BROKER ──SystemExecutor──▶ root process (no TTY)
+                                                (or the -u target account)
 ```
 
 - The submitting agent and everything it sends (argv, bundle bytes, reasons)
@@ -242,7 +245,8 @@ from trusting the worker or the network peer. See
 - The broker trusts: the host, the installed binary, the configuration, the
   reviewer code, and the operator's Telegram account.
 - askdo is an approval gate, not confinement: an approved program runs
-  as root and can make persistent changes to the host.
+  as root — or, with `-u USER` (`sudo -u` style), as that resolved host
+  account — and can make persistent changes to the host.
 
 ## Job state machine
 
@@ -391,9 +395,34 @@ One pass through the pipeline per job (`internal/broker/job.go`):
       is not full regular-sudo parity. A confirmed launch marks
      `starting` → `running`; output drains into bounded per-stream logs from
      launch, independent of any subscriber. Foreground uses the same frozen
-    argv/environment and bound CWD but inherits the verified original human
-    TTY through `askdo-launch`; it is not captured into the daemon's detached
+    argv and bound CWD, adds the validated caller `TERM` to the explicit
+    environment, and inherits the verified original human TTY through
+    `askdo-launch`; it is not captured into the daemon's detached
     stdout/stderr spool.
+
+**Execution identity.** Every job runs as root unless the submit carried
+`target_user` (CLI `-u USER`/`--user USER`, a login name or `#UID`, like
+`sudo -u`). The broker resolves that specification against the execution
+host's account database at admission, before the reservation becomes a job:
+an unknown account is a submission error with no spool, no job and no
+approval; `root`/`#0` is the plain root launch; bundle mode with a non-root
+target is refused at the same point because the staged bundle is
+root-private (captured stdin is the supported way to run a script as the
+target). The resolved uid, primary gid,
+supplementary groups, name and home directory are fixed for the job and bound
+into the frozen manifest (`target_uid`, `target_user` and the launch
+environment), the reviewer bootstrap (`target_uid`, `target_name`), the review
+journal and every approval card (`submitter → tyme (uid 1001)`; fleet tickets
+carry the same identity so a gateway approver sees it too). A non-root target
+keeps the same environment allowlist with `HOME` set to the account's home and
+`USER`/`LOGNAME` naming it. The detached executor installs the identity in the
+forked child before chdir/exec — setgroups(2), setgid(2), setuid(2) in that
+order, each checked, so a failed drop is a launch failure and nothing runs —
+and `askdo-launch` does the same after taking the terminal foreground. The
+submitter's bound cwd is reached through the held descriptor; if the target
+cannot search it the launch fails rather than running somewhere else.
+Timestamp reuse, forced review, auto-approval policy and the self-upgrade
+bootstrap (always root) are unchanged.
 
 The client obtains `cwd` from its current working directory. Both argv and
 bundle operations execute there; the broker holds and rechecks the submitted

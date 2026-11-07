@@ -159,6 +159,11 @@ dsm_paths() {
       dsm_acl "$P" 0 "$EXECUTABLE" || return 1
     fi
   done
+  if [ "${DSM_BACKUP_VOLUME:-0}" = 1 ]; then
+    for P in /volume1 /volume1/@askdo /volume1/@askdo/upgrade-backups; do
+      if [ -e "$P" ] || [ -L "$P" ]; then dsm_acl "$P" || return 1; fi
+    done
+  fi
   if [ -n "${REVIEW_UID:-}" ] && { [ -e /var/lib/askdo-review ] || [ -L /var/lib/askdo-review ]; }; then
     dsm_acl /var/lib/askdo-review "$REVIEW_UID" || return 1
   fi
@@ -686,6 +691,16 @@ policy_check -c || die 'existing effective sudoers validation failed'
 
 # Preserve the running installation before any binary changes. Never back up
 # a symlink, non-root binary or unexpectedly writable executable.
+CONFIG_BIN=/usr/local/bin/askdo-config
+OLD_CONFIG_LINK=
+OLD_CONFIG_OWNER=
+CONFIG_LINK_UPDATED=
+if [ -L "$CONFIG_BIN" ]; then
+  OLD_CONFIG_LINK=$(readlink "$CONFIG_BIN")
+  OLD_CONFIG_OWNER=$(stat -c %u:%g "$CONFIG_BIN")
+elif [ -e "$CONFIG_BIN" ]; then
+  die "refusing to replace non-symlink $CONFIG_BIN"
+fi
 for NAME in askdo askdo-launch; do
   case "$NAME" in askdo) DEST=/usr/local/bin/askdo ;; *) DEST=/usr/local/libexec/askdo-launch ;; esac
   [ ! -L "$DEST" ] || die "existing $NAME binary is a symlink"
@@ -737,6 +752,13 @@ rollback_policy() {
 }
 rollback_binaries() {
   [ "$ROLLBACK_BINARIES" = 1 ] || return 0
+  if [ "$CONFIG_LINK_UPDATED" = 1 ]; then
+    [ -L "$CONFIG_BIN" ] && [ "$(readlink "$CONFIG_BIN")" = askdo ] || return 1
+    rm -f "$CONFIG_BIN" || return 1
+    if [ -n "$OLD_CONFIG_LINK" ]; then
+      ln -s "$OLD_CONFIG_LINK" "$CONFIG_BIN" && chown -h "$OLD_CONFIG_OWNER" "$CONFIG_BIN" || return 1
+    fi
+  fi
   for NAME in askdo askdo-launch; do
     case "$NAME" in askdo) DEST=/usr/local/bin/askdo ;; *) DEST=/usr/local/libexec/askdo-launch ;; esac
     [ ! -L "$DEST" ] || return 1
@@ -877,6 +899,24 @@ install -m 0755 -o root -g root "$TMP/$HELPER" /usr/local/libexec/askdo-launch
 make_dir 755 0 0 /etc/askdo
 if [ ! -e /etc/askdo/config.json ]; then
   DSM_CONFIG_NEW=1
+  if [ "$DSM" = 1 ]; then
+    # DSM's system partition is small. Existing configs are not migrated.
+    if [ -d /volume1 ] && dsm_acl /volume1; then
+      DSM_BACKUP_VOLUME=1
+      for P in /volume1/@askdo /volume1/@askdo/upgrade-backups; do
+        if [ -e "$P" ] || [ -L "$P" ]; then
+          [ -d "$P" ] && dsm_acl "$P" || die 'untrusted DSM upgrade backup directory'
+        else
+          make_dir 700 0 0 "$P"
+        fi
+      done
+      sed '/"config_version":/a\
+  "upgrade_backup_dir": "/volume1/@askdo/upgrade-backups",' "$TMP/askdo-config.example.json" > "$TMP/dsm-config.json"
+      mv "$TMP/dsm-config.json" "$TMP/askdo-config.example.json"
+    else
+      printf '%s\n' 'WARNING: keeping /var/backups/askdo; set upgrade_backup_dir to a trusted data-volume directory to avoid filling the DSM system partition.' >&2
+    fi
+  fi
   install -m 0600 -o root -g root "$TMP/askdo-config.example.json" /etc/askdo/config.json
 fi
 make_dir 750 0 "$REVIEW_GID" /etc/askdo/credentials
@@ -941,6 +981,11 @@ if [ "$DSM" = 1 ]; then dsm_paths && dsm_identity_guard || die 'DSM final instal
 if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || :; fi
 VALIDATOR_PARENT_NEW=0 # The successfully installed helper now owns this parent.
 cleanup_validator || die 'validator cleanup incomplete; staging retained'
+# This is a multicall name, not a separately downloaded release asset.
+[ ! -e "$CONFIG_BIN" ] || [ -L "$CONFIG_BIN" ] || die "refusing to replace non-symlink $CONFIG_BIN"
+ln -sfn askdo "$CONFIG_BIN"
+CONFIG_LINK_UPDATED=1
+chown -h root:root "$CONFIG_BIN"
 INSTALL_DONE=1
 if [ "$MIGRATING" = 1 ] && [ "$DSM" = 1 ]; then
   printf 'WARNING: retaining DSM askdo-foreground group; no full NSS enumeration or native ownership proof; legacy grant removed\n' >&2

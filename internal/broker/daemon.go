@@ -647,6 +647,7 @@ func (d *daemon) reserveAdmission() *connectionAdmission {
 }
 
 func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) {
+	receivedAt := time.Now()
 	defer conn.Close()
 	admission.wait()
 	defer admission.release()
@@ -674,6 +675,13 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 		return
 	}
 	switch discriminator.Op {
+	case "timestamp":
+		var request proto.TimestampRequest
+		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid timestamp request"})
+			return
+		}
+		d.handleTimestamp(conn, uid, request)
 	case "reserve":
 		if fenced, _ := admissionFence(d.fencePath, d.fenceOwner); fenced {
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "migration_in_progress", Message: "reservations are temporarily unavailable"})
@@ -699,7 +707,7 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "upgrade_required", Message: "submit requires protocol version 4, 5, or 6 and a reserved job ID"})
 			return
 		}
-		d.handleSubmit(conn, uid, body, request, admission.release)
+		d.handleSubmit(conn, uid, body, request, admission.release, receivedAt)
 	case "status":
 		var request proto.StatusRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
@@ -805,7 +813,38 @@ func (d *daemon) handleReserve(conn *net.UnixConn, uid uint32, request proto.Res
 	_ = writeClient(conn, proto.ReservedEvent{Op: "reserved", RequestID: id, CancelCapability: bearer})
 }
 
-func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func()) {
+// cancelRejectedReservation marks a reservation cancelled when admission
+// definitively rejects the submission before SubmitReservedJob, so status
+// reports it as cancelled instead of a live reservation.
+func (d *daemon) cancelRejectedReservation(uid uint32, requestID string) {
+	// Bounded: this runs while the handler still owns serialized admission.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := d.store.CancelReservation(ctx, uid, requestID); err != nil {
+		slog.Warn("cancel rejected reservation", "request_id", requestID, "error", err)
+	}
+}
+
+func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, request proto.SubmitRequest, release func(), admitted time.Time) {
+	// The client's --timeout is a maximum measured from submission, so every
+	// stage of admission must end inside it. The fleet timestamp check below
+	// makes a synchronous gateway catalogue lookup: on context.Background()
+	// it ignored the caller's budget entirely, hung until its own frame
+	// deadline, and could reuse a window (or report approval_required) long
+	// after the client stopped waiting. Bounding admission by the request's
+	// remaining deadline makes the exchange answer at the deadline, and a
+	// lookup that cannot finish in time resolves to no usable authority —
+	// which yields approval_required, never a post-budget grant.
+	admissionCtx := context.Background()
+	if request.WaitTimeoutMS != nil {
+		budget := time.Duration(*request.WaitTimeoutMS) * time.Millisecond
+		if budget < 0 {
+			budget = 0
+		}
+		var cancelAdmission context.CancelFunc
+		admissionCtx, cancelAdmission = context.WithDeadline(context.Background(), admitted.Add(budget))
+		defer cancelAdmission()
+	}
 	draining, finishAdmission := d.drain.Track()
 	defer finishAdmission()
 	d.mu.Lock()
@@ -850,6 +889,71 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "draining", Message: "new work is paused for upgrade"})
 		return
 	}
+	// Resolve the sudo-style target on this host before anything durable
+	// exists: an unknown account is a clear submission error with no spool, no
+	// job and no execution, and the resolved identity is fixed for the job.
+	target, err := resolveExecutionTargetContext(admissionCtx, request.TargetUser)
+	if err != nil && admissionCtx.Err() != nil {
+		// The request budget expired during the account lookup: classify it
+		// as a timeout and retire the reservation, not an invalid request.
+		d.cancelRejectedReservation(uid, request.RequestID)
+		_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		return
+	}
+	if err != nil {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
+		return
+	}
+	// Login mode binds the account name and home, including root's passwd
+	// entry, before the working directory descriptor and approval manifest are
+	// constructed. -i really places that name in USER/LOGNAME, the manifest,
+	// bootstrap and audit for UID 0 too, so it must be the one identity
+	// resolveExecutionTarget already validated: re-querying NSS here would
+	// both bypass displayableAccountName for root and let an account change
+	// between the two answers redirect the launch.
+	if request.LoginShell {
+		spec := request.TargetUser
+		if spec == "" {
+			// The bare -i default target skips the account database for the
+			// normal root launch; login mode uses that account's entry, so
+			// resolve it through the same path a named target takes.
+			spec = "root"
+			target, err = resolveExecutionTargetContext(admissionCtx, spec)
+			if err != nil && admissionCtx.Err() != nil {
+				d.cancelRejectedReservation(uid, request.RequestID)
+				_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+				return
+			}
+			if err != nil {
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + err.Error()})
+				return
+			}
+		}
+		name, home, identityErr := target.loginIdentity(spec)
+		if identityErr != nil {
+			// loginIdentity enforces the full working-directory contract on
+			// the broker-resolved home (nonempty, NUL-free UTF-8, clean
+			// absolute, size-bounded) before anything is bound or persisted:
+			// the account database can answer differently than the client's
+			// earlier getent lookup (an entry change between the two must not
+			// silently redirect the launch), and replacing an already
+			// validated request CWD requires the replacement to be validated
+			// by the same contract. The single validated (name, home) pair
+			// becomes the CWD, HOME and USER/LOGNAME identity together.
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "target user: " + identityErr.Error()})
+			return
+		}
+		target.Name, target.Home = name, home
+		request.CWD = home
+	}
+	// Bundles (--bundle, --script) are staged in the root-private spool
+	// (0700 root), which a non-root target cannot traverse: the approved
+	// launch would always fail opening its entry. Refuse before approval
+	// instead; captured stdin reaches the target as an inherited descriptor.
+	if !target.root() && request.Mode == "bundle" {
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: proto.TargetUserBundleRefusal(target.Name)})
+		return
+	}
 	identity := resolveSubmitterIdentity(uid)
 	var foreground *foregroundPeer
 	if request.Lifecycle == proto.LifecycleForeground {
@@ -873,6 +977,53 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	policy, fleet := d.policy, d.fleet
+	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 {
+		d.cancelRejectedReservation(uid, request.RequestID)
+		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
+		return
+	}
+	// A stored fleet window hashes the signed catalogue route (the job's
+	// prepareFleet-selected j.route), so the exact check needs that route;
+	// with no window stored the local hash cannot match anything and no
+	// gateway call is made. The check runs under admissionCtx: the lookup
+	// must end at the request's own budget, not at the broker's internal
+	// frame deadline.
+	if request.NonInteractive {
+		var valid bool
+		if (request.ValidateTimestamp || !cfg.Review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && cfg.Review.TimestampTimeout(uid) > 0 {
+			key := d.terminalTimestampKey(uid, foreground.tty)
+			stamp, stampErr := d.store.GetApprovalTimestamp(admissionCtx, key)
+			if stampErr != nil {
+				// A missing window is a nil error with a zero stamp; any
+				// error is an unreadable store or an expired request budget,
+				// never proof that authorization is absent.
+				d.cancelRejectedReservation(uid, request.RequestID)
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "approval timestamp unavailable"})
+				return
+			}
+			// Resolve Fleet authority only for a window that is still live
+			// by its locally stored expiry; an expired row needs no lookup.
+			if stamp.ExpiresAt.After(time.Now()) {
+				authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
+				valid = timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
+			}
+		}
+		canAuto := false
+		if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && cfg.Review.MaxAutoRisk(uid) > 0 {
+			threshold, preferenceErr := d.store.GetAutoApprovalThreshold(admissionCtx, uid)
+			if preferenceErr != nil {
+				d.cancelRejectedReservation(uid, request.RequestID)
+				_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
+				return
+			}
+			canAuto = threshold >= 2
+		}
+		if !valid && !canAuto {
+			d.cancelRejectedReservation(uid, request.RequestID)
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
+			return
+		}
+	}
 	var releaseResources func()
 	if d.reloadConfig {
 		policy, err = inspection.NewPolicy(cfg.Inspection, append(cfg.CredentialPaths(), d.configPath)...)
@@ -902,7 +1053,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			}
 		}
 	}
-	if cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) {
+	if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) {
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "review_unavailable", Message: "AI review required but no review models are configured"})
 		return
 	}
@@ -935,10 +1086,26 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: err.Error()})
 		return
 	}
-	operation, _ := json.Marshal(request)
+	if admissionCtx.Err() != nil {
+		// The anchored request budget elapsed during admission work: retire
+		// the reservation instead of persisting an already-expired job.
+		cwd.close()
+		d.queue.release()
+		_ = os.RemoveAll(spool.dir)
+		d.cancelRejectedReservation(uid, request.RequestID)
+		_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		return
+	}
+	operation := durableOperation(request, target)
+	// The wait budget the client sent is the remainder of --timeout measured
+	// when the submit frame left the client. Anchoring the durable deadline
+	// at admission start (not at job creation, which happens after the
+	// synchronous fleet authority lookup) accounts for the admission time
+	// inside the budget: a slow gateway round trip shortens the durable wait
+	// instead of buying the job extra life past the caller's maximum.
 	var deadline *time.Time
 	if request.WaitTimeoutMS != nil {
-		value := time.Now().UTC().Add(time.Duration(*request.WaitTimeoutMS) * time.Millisecond)
+		value := admitted.Add(time.Duration(*request.WaitTimeoutMS) * time.Millisecond)
 		deadline = &value
 	}
 	created, err := d.store.SubmitReservedJob(context.Background(), store.Job{UID: uid, RequestID: request.RequestID, SubmitBody: body, OperationJSON: operation, Reason: request.Reason, Mode: request.Mode, DeadlineAt: deadline, SpoolDir: spool.dir, AttemptsJSON: []byte("[]")})
@@ -958,6 +1125,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	job := newJobRuntime(d, uid, request, spool, identity, cwd, resolveSubmitterName(uid))
+	job.target = target
 	if d.reloadConfig {
 		job.cfg, job.policy, job.fleetClient = cfg, policy, fleet
 		job.route = cfg.Telegram.RouteForUID(uid)
@@ -1275,6 +1443,14 @@ func unixPeerPID(conn *net.UnixConn) (int64, error) {
 	return int64(credential.Pid), nil
 }
 
+// errNoControllingTerminal is the single terminal-evidence result that is a
+// genuine absence rather than a collection failure. Callers that must decide
+// between "there is no window to reset" and "I could not look" keep the
+// sentinel distinguishable with errors.Is; every other error (unreadable
+// /proc, closed fd scan, identity race) means the evidence was unavailable,
+// never that the terminal was missing.
+var errNoControllingTerminal = errors.New("no controlling terminal")
+
 // foregroundTTYIdentity reads the original process, not the broker's TTY.
 // A live open fd for the controlling device is required; stat is sampled
 // again afterwards to detect PID reuse or a changed session/terminal.
@@ -1295,8 +1471,11 @@ func foregroundTTYIdentity(pid int64) (ttyIdentity, error) {
 		session, e1 := strconv.ParseInt(fields[3], 10, 64)
 		tty, e2 := strconv.ParseInt(fields[4], 10, 32)
 		start, e3 := strconv.ParseInt(fields[19], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || session <= 0 || tty == 0 || start <= 0 {
-			return 0, 0, 0, errors.New("no controlling terminal or invalid process stat")
+		if e1 != nil || e2 != nil || e3 != nil || start <= 0 {
+			return 0, 0, 0, errors.New("invalid process stat")
+		}
+		if session <= 0 || tty == 0 {
+			return 0, 0, 0, errNoControllingTerminal
 		}
 		return start, session, uint32(int32(tty)), nil
 	}

@@ -39,7 +39,7 @@ func TestUpgradeTopologyRejectsStandaloneGatewayBeforeSchedulingEffects(t *testi
 			managerCalls := 0
 			helper := upgrade.Helper{BackupRoot: filepath.Join(root, "backups"), ReceiptRoot: filepath.Join(root, "receipts"), Preflight: func(context.Context) error {
 				return preflightUpgradeTopology(layout.Config, layout.GatewayConfig)
-			}, Manager: upgradeScheduleManagerFunc(func(context.Context, string, string) error { managerCalls++; return nil }), TrustDirectory: func(path string, create bool) error {
+			}, Manager: upgradeScheduleManagerFunc(func(context.Context, string, string, string) error { managerCalls++; return nil }), TrustDirectory: func(path string, create bool) error {
 				if create {
 					return os.MkdirAll(path, 0o755)
 				}
@@ -48,7 +48,7 @@ func TestUpgradeTopologyRejectsStandaloneGatewayBeforeSchedulingEffects(t *testi
 			}}
 			var stderr bytes.Buffer
 			// When
-			code := runUpgradeHelperWith(t.Context(), []string{"--operation", cliUpgradeID, "--source", source}, 0, func() upgrade.Helper { return helper }, bytes.NewReader(captured), io.Discard, &stderr)
+			code := runUpgradeHelperWith(t.Context(), []string{"--operation", cliUpgradeID, "--source", source}, 0, func(string) (upgrade.Helper, error) { return helper, nil }, bytes.NewReader(captured), io.Discard, &stderr)
 			// Then: unsupported topology creates no stage, receipt, manager, stop or install effects.
 			if !enrolled {
 				if code != 1 || managerCalls != 0 || !strings.Contains(stderr.String(), "local fleet enrollment") {

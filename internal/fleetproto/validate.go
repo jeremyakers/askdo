@@ -154,6 +154,21 @@ func display(d Display) error {
 	if !text(d.Operation, 16384, true) || !text(d.Identity.Hostname, 256, true) || !text(d.Identity.Username, 256, true) || d.SummaryParts < 0 || d.SummaryParts > 64 || d.Withholding == nil || len(d.Withholding) > 64 || d.ModelHistory == nil || len(d.ModelHistory) > MaxProfiles || !text(d.UnreviewedReason, 4096, false) {
 		return ErrProtocol
 	}
+	// A non-root target is always named. Root is normally unnamed; its one
+	// named shape is the UID-0 login alias marked by TargetLogin, so an
+	// older or buggy peer cannot slip an unmarked aliased ticket past
+	// validation and every alias-carrying display binds its name.
+	if !text(d.Identity.TargetUser, 256, false) {
+		return ErrProtocol
+	}
+	switch {
+	case d.Identity.TargetLogin && (d.Identity.TargetUID != 0 || d.Identity.TargetUser == "" || d.Identity.TargetUser == "root"):
+		return ErrProtocol
+	case d.Identity.TargetUID == 0 && !d.Identity.TargetLogin && d.Identity.TargetUser != "":
+		return ErrProtocol
+	case d.Identity.TargetUID != 0 && d.Identity.TargetUser == "":
+		return ErrProtocol
+	}
 	for _, s := range d.Withholding {
 		if !text(s, 4096, true) {
 			return ErrProtocol

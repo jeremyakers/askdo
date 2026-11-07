@@ -7,10 +7,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,11 +30,21 @@ import (
 )
 
 func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
+	for _, lostRevealReply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lost reveal reply=%t", lostRevealReply), func(t *testing.T) {
+			testFleetJoinGatewayExchange(t, lostRevealReply)
+		})
+	}
+}
+
+func testFleetJoinGatewayExchange(t *testing.T, lostRevealReply bool) {
+	t.Helper()
 	// Given a real gateway/database/TLS identity and host CLI. Only filesystem
 	// ownership/publication, Telegram, and group/service actions are faked.
 	// The fixture-tag gateway opener permits a private current-UID database;
 	// normal builds expose neither it nor the Telegram endpoint override.
 	hostPath := fleetJoinHostFixture(t, localJoinConfig)
+	stubFleetJoinTTY(t, "y\n")
 	dir := filepath.Dir(hostPath)
 	credential := filepath.Join(dir, "codex-fixture.json")
 	if err := os.WriteFile(credential, []byte("unused synthetic provider credential"), 0600); err != nil {
@@ -51,7 +63,21 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 	}
 	defer store.Close()
 	var serving atomic.Pointer[gateway.Server]
-	wire := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { serving.Load().Handler().ServeHTTP(w, r) }))
+	var lost atomic.Bool
+	wire := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if lostRevealReply && strings.HasSuffix(r.URL.Path, "/reveal") && !lost.Swap(true) {
+			response := httptest.NewRecorder()
+			serving.Load().Handler().ServeHTTP(response, r)
+			w.Header().Set("Content-Length", fmt.Sprint(response.Body.Len()+1))
+			w.WriteHeader(response.Code)
+			_, _ = w.Write(response.Body.Bytes())
+			return
+		}
+		serving.Load().Handler().ServeHTTP(w, r)
+	}))
+	identity, _ := fleetJoinTLSIdentity(t, false, "")
+	wire.TLS = &tls.Config{Certificates: []tls.Certificate{identity}}
+	wire.StartTLS()
 	defer wire.Close()
 	certPath, keyPath, signingPath := filepath.Join(dir, "gateway.pem"), filepath.Join(dir, "gateway.key"), filepath.Join(dir, "signing.seed")
 	keyDER, err := x509.MarshalPKCS8PrivateKey(wire.TLS.Certificates[0].PrivateKey)
@@ -92,7 +118,7 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 	var out, stderr bytes.Buffer
 
 	// When the CLI joins and the operator taps the dedicated enrollment card.
-	if err := runFleetJoin(ctx, []string{wire.URL, "--ca-file", cfg.TLSCertFile}, hostPath, runner, &out, &stderr); err != nil {
+	if err := runFleetJoin(ctx, []string{wire.URL}, hostPath, runner, &out, &stderr); err != nil {
 		t.Fatalf("join: %v\n%s\n%s", err, out.String(), stderr.String())
 	}
 
@@ -101,6 +127,9 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 	host, err := config.Load(hostPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if fileContent(t, host.Fleet.CAFile) != string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: wire.Certificate().Raw})) {
+		t.Fatal("first-connection leaf was not persisted")
 	}
 	client, err := fleetclient.New(*host.Fleet)
 	if err != nil {
@@ -137,11 +166,19 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 		t.Fatal("automatic host setup was not invoked")
 	}
 	var joins int
+	_, codeLine, found := strings.Cut(out.String(), "Fleet enrollment request code: ")
+	if !found {
+		t.Fatal("terminal did not show the authentication string")
+	}
+	code := strings.Fields(codeLine)[0]
 	for _, card := range bot.Sent() {
 		if strings.Contains(card.Text, "fleet enrollment request") {
 			joins++
 			if len(card.Buttons) != 2 || strings.Contains(card.Text, "Runs:") {
 				t.Fatal("enrollment reused a command card")
+			}
+			if !strings.Contains(card.Text, "<code>"+code+"</code>") {
+				t.Fatal("gateway card and host terminal codes differ", card.Text, out.String())
 			}
 		}
 	}
@@ -152,5 +189,8 @@ func TestFleetJoinRealGatewayCLIAndAuthenticatedJob(t *testing.T) {
 	data, _ := json.Marshal(host)
 	if strings.Contains(string(data), "enrollment_bundle_files") {
 		t.Fatal("join invented a bundle")
+	}
+	if lostRevealReply && !lost.Load() {
+		t.Fatal("reveal loss was not exercised")
 	}
 }

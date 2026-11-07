@@ -39,7 +39,7 @@ import (
 // token inside the credentials directory.
 const telegramTokenFile = "telegram.token"
 
-const channelUsage = "usage: askdo channel add telegram [NAME] [flags] | list | route set LOGIN CHANNEL"
+const channelUsage = "usage: askdo-config channel add telegram [NAME] [flags] | list | route set LOGIN CHANNEL"
 
 // runChannel routes `askdo channel <subcommand>`.
 func runChannel(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
@@ -89,7 +89,7 @@ func channelAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
 	// positional[0] is "telegram"; an optional positional[1] is a channel NAME
 	// that selects the named multi-bot form instead of the legacy flat section.
 	if len(positional) < 1 || len(positional) > 2 || positional[0] != "telegram" {
-		fmt.Fprintln(stderr, "usage: askdo channel add telegram [NAME] [flags]")
+		fmt.Fprintln(stderr, "usage: askdo-config channel add telegram [NAME] [flags]")
 		return 125
 	}
 	name := ""
@@ -116,7 +116,7 @@ func channelAdd(args []string, r prompt.Reader, stdout, stderr io.Writer) int {
 func channelAddLegacy(store *operator.ConfigStore, configPath, credDir, tokenFile string, operatorUserID, chatID int64, yes bool, r prompt.Reader, stdout, stderr io.Writer) int {
 	cfg := store.Config()
 	if telegramIsNamed(cfg.Telegram) {
-		fmt.Fprintln(stderr, "channel add telegram: this config uses the named channels form; add another bot with `askdo channel add telegram NAME` (edit the named section for the default/routing)")
+		fmt.Fprintln(stderr, "channel add telegram: this config uses the named channels form; add another bot with `askdo-config channel add telegram NAME` (edit the named section for the default/routing)")
 		return 1
 	}
 	tokenPath := filepath.Join(credDir, telegramTokenFile)
@@ -360,7 +360,7 @@ func channelAddNamed(name string, store *operator.ConfigStore, configPath, credD
 	if tokenData != nil {
 		tokenState = "written"
 	}
-	fmt.Fprintf(stdout, "telegram channel %q configured: token file %s (%s), chat_id %d, %d operator user(s); default channel %q (routes are managed with `askdo channel route set LOGIN CHANNEL` or by editing %s)\n",
+	fmt.Fprintf(stdout, "telegram channel %q configured: token file %s (%s), chat_id %d, %d operator user(s); default channel %q (routes are managed with `askdo-config channel route set LOGIN CHANNEL` or by editing %s)\n",
 		name, tokenPath, tokenState, chat, len(operators), tg.DefaultChannel, configPath)
 	return 0
 }
@@ -459,7 +459,7 @@ func channelRouteSet(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) != 2 {
-		fmt.Fprintln(stderr, "usage: askdo channel route set LOGIN CHANNEL [--config PATH]")
+		fmt.Fprintln(stderr, "usage: askdo-config channel route set LOGIN CHANNEL [--config PATH]")
 		return 125
 	}
 	login, channel := positional[0], positional[1]
@@ -500,7 +500,7 @@ func channelRouteSet(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	if !known {
-		fmt.Fprintf(stderr, "channel route set: %q names an unknown channel (add it with `askdo channel add telegram %s` first)\n(the config was not written)\n", channel, channel)
+		fmt.Fprintf(stderr, "channel route set: %q names an unknown channel (add it with `askdo-config channel add telegram %s` first)\n(the config was not written)\n", channel, channel)
 		return 1
 	}
 	if tg.Routes == nil {
@@ -574,11 +574,16 @@ func channelList(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) != 0 {
-		fmt.Fprintln(stderr, "usage: askdo channel list")
+		fmt.Fprintln(stderr, "usage: askdo-config channel list")
 		return 125
 	}
 	store, err := operator.LoadForMutation(*configPath)
 	if err != nil {
+		// `channel list` is read-only: a permission denial on the root-private
+		// installed config routes through approval like `config check`.
+		if requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintln(stderr, "channel list:", err)
 		return 1
 	}
@@ -587,7 +592,7 @@ func channelList(args []string, stdout, stderr io.Writer) int {
 		return channelListNamed(tg, stdout)
 	}
 	if tg.TokenFile == "" {
-		fmt.Fprintln(stdout, "no notification channels configured (use `askdo channel add telegram`)")
+		fmt.Fprintln(stdout, "no notification channels configured (use `askdo-config channel add telegram`)")
 		return 0
 	}
 	state := "present"

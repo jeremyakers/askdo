@@ -9,10 +9,10 @@ reject approvals, execution, terminal transitions, or daemon startup.
 Read it locally as root:
 
 ```sh
-askdo review log                         # jobs active in the last 24 hours
-askdo review log --since 7d               # equivalently, --since 168h
-askdo review log --job '2026-10-22_#1' --since 0
-askdo review log --since 0 --json         # all original JSONL records
+askdo-config review log                         # jobs active in the last 24 hours
+askdo-config review log --since 7d               # equivalently, --since 168h
+askdo-config review log --job '2026-10-22_#1' --since 0
+askdo-config review log --since 0 --json         # all original JSONL records
 ```
 
 The compact view joins by (`job_id`, `submitter_uid`), sorts newest activity first
@@ -35,7 +35,8 @@ retains all history; `--job` limits retention to that ID.
 Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
 
 * `review`: emitted once after the AI approval manifest successfully freezes.
-  Contains host, submitter UID/name, target UID, mode, approval-display `argv`
+  Contains host, submitter UID/name, target UID (plus `target_name` for a
+  `-u` account; the compact view then shows `target="tyme"(1001)`), mode, approval-display `argv`
   (or bundle `entry` plus `args`), cwd, reason, captured-file path/size/SHA-256/
   masked metadata, model names/outcomes, successful model, the structured report
   (risk, summary, effects, warnings, missing context, optional suggestions, reversibility, intent

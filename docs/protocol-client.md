@@ -62,6 +62,45 @@ remains pre-dispatch-only; disconnect is never authority to kill a running job.
 
 ### Client → daemon requests
 
+**`timestamp`** — a single, unreserved exchange, scoped exclusively to the
+kernel peer UID. `{"op":"timestamp","action":"reset"}` deletes that caller's
+current kernel-authenticated TTY session/device/inode/boot window for any target
+(no terminal means nothing to invalidate). `action:"remove"` deletes all of the
+caller's windows across terminals. Both need no approval and return
+`{"op":"timestamp_status",...}`. They accept no target or command.
+
+`{"op":"timestamp","action":"list","target_user":"tyme"}` is read-only;
+`target_user` is optional (root by default). Its `timestamp_status` response has
+`askdo_group` (boolean), `review_mode` (string), `review_required` (boolean),
+`timestamp_timeout_seconds`, `remaining_seconds` (zero if expired, wrong target
+or no terminal), `auto_approval_max_risk`, `auto_approval_threshold`
+and `auto_approval_effective` (integers). Reset/remove return these fields at
+their zero values. No request accepts a UID, PID or TTY identity from the client.
+
+Four optional boolean fields extend v4+ `submit`; false fields are omitted,
+preserving the existing wire when unused. Older strict brokers reject them:
+
+- `reset_timestamp`: ignore timestamp reuse, without deleting or refreshing the
+  saved window on command handoff (`-k COMMAND`).
+- `non_interactive`: allow only timestamp reuse or policy auto-approval. The
+  broker rejects known human-only requests at admission with error code
+  `approval_required`; if automated review is necessary, its final gate rejects
+  before sending a frozen manifest to any notifier. No human card is created.
+  Both paths display `askdo: a Telegram approval is required` and the CLI exits 1.
+- `validate_timestamp`: only foreground argv `[/bin/true]`, without captured
+  input or login mode. The broker requires a configured timeout (otherwise
+  `timestamp_disabled`), freezes a clearly labeled no-op validation, and reuses
+  a timestamp or requests approval. It completes the job and refreshes the
+  timestamp atomically, with exit code 0, **without** a helper grant or execution.
+- `login_shell`: target home is resolved by the broker and becomes the CWD;
+  target HOME/USER/LOGNAME are installed even for root. The CLI resolves the
+  target's passwd shell into ordinary argv (with `-l` and optional `-c` command).
+  `-s` likewise submits the resolved shell argv but needs no extra wire field.
+
+These extensions require no database schema change. Revocation/list operations
+use the existing approval timestamp store; identity and authority matching are
+the same as foreground timestamp reuse.
+
 All request bodies carry an `op` discriminator. New job IDs are canonical
 `YYYY-MM-DD_#N` strings (real calendar day, positive unpadded int64 sequence)
 allocated globally by the daemon. They are the **same** ID in the CLI,
@@ -92,8 +131,8 @@ inherited permissions left an earlier directory world-writable; no pre-creation
 or manual `chmod` is needed. It contains only the bearer, job ID, absolute
 socket path and informative host name. The bearer is never printed. Detached
 submissions print `JOB_ID=...` and `CANCEL_HANDLE_FILE=/...`; interactive
-foreground success instead shows one review prompt and the command output.
-`--verbose` restores those identity and lifecycle lines. If the private file cannot be saved, nothing is submitted. The receipt
+foreground success instead shows the command output, plus a review prompt only
+when notification is required. `--verbose` restores those identity and lifecycle lines. If the private file cannot be saved, nothing is submitted. The receipt
 survives interruption, timeout, disconnect and client exit. Automatic removal
 requires an observed terminal result on that submitting/cancelling client;
 otherwise keep it, or explicitly remove it yourself after checking status.
@@ -135,6 +174,36 @@ fields or secrets. No optional cancellation feature gates daemon startup.
 | `sensitive_inclusions` | string array | optional; see below |
 | `lifecycle` | string | required in v4–v6: `"foreground"` or `"detached"` |
 | `terminal_type` | string | required only for foreground; validated TERM token (1–128 ASCII-safe bytes), forbidden for detached. Hint only, not authenticated identity |
+| `target_user` | string | optional (v4–v6); CLI `-u USER` / `--user USER`. A login name or `#UID` (decimal, fits uint32), at most 256 bytes of printable non-space UTF-8. Absent means root and the wire is byte-identical to a pre-target client. See below |
+
+**Target user (`-u`, like `sudo -u`).** `askdo -u tyme ls -l` and
+`askdo --user tyme ls` submit `"target_user":"tyme"`. The broker resolves
+the name or `#UID` against the execution host's account database **before
+anything durable exists**: an unknown account (including a `#UID` with no
+account entry) fails the submit with
+`{"op":"error","code":"invalid_request","message":"target user: unknown user \"tyme\""}`,
+creating no job, spool or approval. `root` and `#0` are the unchanged root
+launch. Bundle mode (`--bundle`, `--script`) with a non-root target is refused
+the same way (`target user: bundles and --script run as root only …`): the
+staged bundle lives in the root-private spool, so the approved launch could
+only fail; captured stdin (`askdo -u tyme bash < script`) reaches the
+target as an inherited descriptor and is the supported form. The resolved
+uid, primary gid, supplementary groups, name and home
+directory are fixed for the job: the manifest binds `target_uid` and
+`target_user` (so the digest changes with the target), the reviewer bootstrap
+carries `target_uid`/`target_name`, the review journal records both, and every
+Telegram card shows `submitter → tyme (uid 1001)` instead of `→ root`. A
+non-root target runs with the same explicit environment allowlist plus
+`HOME=<target home>`, `USER` and `LOGNAME`; detached launches install the
+credential in the forked child (setgroups, setgid, setuid, each checked) and
+foreground launches have `askdo-launch` do the same before exec. The
+submitter's bound cwd is used as for root; if the target cannot search it the
+launch fails rather than running elsewhere. Approval-timestamp reuse, forced
+review, auto-approval policy and fleet tickets are unchanged; a fleet ticket's
+display identity carries `target_uid`/`target_user` so a gateway approver sees
+the same line. An older broker's strict decoder rejects the field (the CLI
+reports the error and runs nothing), an older gateway rejects a targeted ticket,
+and the self-upgrade bootstrap never sends it.
 
 The CLI chooses foreground when the caller has a controlling `/dev/tty`,
 and detached automatically when it does not (for example a sandboxed
@@ -166,11 +235,20 @@ chooses to read it through its path tools during review.
   "argv":["/usr/bin/apt-get","install","-y","jq"]}
 ```
 
+The same request for `askdo --detach -u tyme --reason 'List as tyme' ls -l`
+adds only `"target_user":"tyme"`:
+
+```json
+{"op":"submit","protocol_version":6,"lifecycle":"detached","request_id":"2026-09-27_#4",
+  "reason":"List as tyme","mode":"argv","cwd":"/work/project",
+  "argv":["ls","-l"],"target_user":"tyme"}
+```
+
 For a forced review without a controlling TTY, the CLI form is
-`askdo --review=yes --reason 'Check this' -- /usr/bin/id -u`. Captured-stdin
+`askdo --review=yes --reason 'Check this' /usr/bin/id -u`. Captured-stdin
 requests look like
-`curl -fsSL URL | askdo --review=yes -- bash` or
-`askdo --review=yes -- bash < installer.sh`.
+`curl -fsSL URL | askdo --review=yes bash` or
+`askdo --review=yes bash < installer.sh`.
 With no configured model the broker refuses a review-required submit before
 creating a job. If all configured providers fail with typed availability
 errors, `force_review: true` fails closed; without it the human can receive a
@@ -453,13 +531,14 @@ and cleanup does not take another terminal job's foreground or modes.
 
 `stage` and `detail` are free-form within protocol bounds; stages seen in
 practice include `reviewing`, `fallback`, `notifying`, `awaiting-human`,
-`awaiting-handoff`, `starting`, `running`, `output`, `expired`, `failed`. The CLI
-prints
-`stage: detail` to stderr.
-On a matching `accepted` event with state `queued`, the CLI also prints
+`awaiting-handoff`, `starting`, `running`, `output`, `expired`, `failed`. Detached
+and `--verbose` clients print `stage: detail` to stderr. On a matching `accepted`
+event with state `queued`, they also print
 `queued: broker accepted; review/notification pending`. That receipt does not
 claim a Telegram card was sent; notification follows review, which may still
-be waiting for the broker's review slot.
+be waiting for the broker's review slot. A quiet original foreground client
+instead prints its review prompt only on `awaiting-human` progress, so timestamp
+reuse remains silent.
 
 **`stdout` / `stderr`** — detached command output, base64:
 

@@ -63,6 +63,9 @@ func run(args []string) int {
 // runWithClient keeps command routing testable without allowing a test's
 // fallback command to reach the installed broker's request socket.
 func runWithClient(args []string, runClient func(context.Context, []string, client.Options) int) int {
+	if filepath.Base(os.Args[0]) == "askdo-config" {
+		return runConfigCLI(args, runClient)
+	}
 	if topHelpRequested(args) {
 		writeTopHelp(os.Stdout)
 		return 0
@@ -70,22 +73,18 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 	if len(args) == 0 {
 		return runClient(context.Background(), args, client.Options{})
 	}
+	// The broker launches the internal worker as bare `askdo reviewer`; that
+	// invocation is not an operator command, so it gets no moved notice (it
+	// would land in every reviewer-stderr.log). Operator `reviewer <verb>`
+	// forms keep the notice.
+	if isOperatorCommand(args[0]) && args[0] != "daemon" &&
+		!(args[0] == "gateway" && len(args) > 1 && args[1] == "serve") &&
+		!(args[0] == "reviewer" && len(args) == 1) {
+		fmt.Fprintf(os.Stderr, "askdo: '%s' moved to askdo-config; this form will be removed in a future release\n", args[0])
+	}
 	switch args[0] {
 	case "daemon":
-		if os.Geteuid() != 0 {
-			fmt.Fprintln(os.Stderr, "daemon mode requires root")
-			return 125
-		}
-		flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
-		configPath := flags.String("config", defaultConfigPath, "configuration file")
-		if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
-			return 125
-		}
-		if err := broker.Run(context.Background(), *configPath); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 125
-		}
-		return 0
+		return runDaemon(args[1:])
 	case "reviewer":
 		// Dispatch rule (Wave 9): bare `askdo reviewer` is the
 		// broker-launched worker mode, unchanged; any subcommand is the
@@ -100,28 +99,10 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 		// projected models the bootstrap validation fails cleanly before any
 		// provider is constructed.
 		return reviewer.MainWithFactory(context.Background(), args, os.Stdin, os.Stdout, os.Stderr, providers.ModelFactory())
-	case "channel":
-		return runChannel(args[1:], prompt.NewTerminalReader(os.Stdin), os.Stdout, os.Stderr)
-	case "review":
-		return runReview(args[1:], os.Stdout, os.Stderr)
-	case "config":
-		return runConfig(args[1:], os.Stdout, os.Stderr)
-	case "gateway":
-		return runGateway(args[1:], os.Stdout, os.Stderr)
-	case "fleet":
-		return runFleet(args[1:], os.Stdout, os.Stderr)
-	case "inspection":
-		return runInspection(args[1:], os.Stdout, os.Stderr)
-	case "auth":
-		return runAuth(args[1:], os.Stdout, os.Stderr)
 	case "upgrade":
 		return runUpgrade(args[1:], runClient, os.Stdout, os.Stderr)
-	case "upgrade-helper":
-		return runUpgradeHelper(args[1:], os.Stdin, os.Stdout, os.Stderr)
-	case "logs":
-		// Root-only operator command; must dispatch before the client
-		// fallback so the job ID is never forwarded over the loopback socket.
-		return runLogs(args[1:], os.Stdout, os.Stderr)
+	case "channel", "review", "config", "gateway", "fleet", "inspection", "auth", "upgrade-helper", "logs":
+		return runOperatorCommand(args, os.Stderr)
 	case "status", "attach", "cancel", "auto-approve":
 		return runClient(context.Background(), args, client.Options{})
 	default:
@@ -129,9 +110,26 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 	}
 }
 
+func runDaemon(args []string) int {
+	if getEUID() != 0 {
+		fmt.Fprintln(os.Stderr, "daemon mode requires root")
+		return 125
+	}
+	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	configPath := flags.String("config", defaultConfigPath, "configuration file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 {
+		return 125
+	}
+	if err := broker.Run(context.Background(), *configPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 125
+	}
+	return 0
+}
+
 func runConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || (args[0] != "check" && args[0] != "install") {
-		fmt.Fprintln(stderr, "usage: askdo config check [--config PATH] [--live] | config install FILE [--config PATH] [--force]")
+		fmt.Fprintln(stderr, "usage: askdo-config config check [--config PATH] [--live] | config install FILE [--config PATH] [--force]")
 		return 125
 	}
 	if args[0] == "install" {
@@ -146,13 +144,18 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
+		// A protected config (notably a root-private fleet config) cannot
+		// be decoded far enough to reach its conditional root gate. Readable
+		// standalone configs remain read-only, with no approval request.
+		if requestRootForPermission(stderr, err) {
+			return 125
+		}
 		fmt.Fprintln(stderr, err)
 		return 125
 	}
 	if cfg.Fleet != nil {
 		if getEUID() != 0 {
-			fmt.Fprintln(stderr, "fleet config check requires root")
-			return 125
+			return rootRequired(stderr, "fleet config check requires root")
 		}
 		if _, err := operator.ReadRootPrivate(*configPath, 1<<20); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -189,7 +192,7 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	// discloses possible quota use, and never sends host files. Run network
 	// checks with the reviewer's privileges: when started as root, drop to
 	// the askdo-review account before touching credential files.
-	fmt.Fprintf(stderr, "askdo config check --live: probing %d configured model endpoint(s) with a synthetic two-turn tool fixture; this may consume provider quota. No host files are sent.\n", len(cfg.Review.Models))
+	fmt.Fprintf(stderr, "askdo-config config check --live: probing %d configured model endpoint(s) with a synthetic two-turn tool fixture; this may consume provider quota. No host files are sent.\n", len(cfg.Review.Models))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Review.TotalTimeout))
 	defer cancel()
 	// Resolve before even broker-only Codex refresh activity, but retain root
@@ -258,7 +261,7 @@ func runConfigInstall(args []string, stdout, stderr io.Writer) int {
 		return 125
 	}
 	if len(positional) != 1 {
-		fmt.Fprintln(stderr, "usage: askdo config install FILE [--config PATH] [--force]")
+		fmt.Fprintln(stderr, "usage: askdo-config config install FILE [--config PATH] [--force]")
 		return 125
 	}
 	if !requireRoot("config install", stderr) {

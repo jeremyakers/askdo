@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +25,7 @@ type Server struct {
 	cfg           Config
 	store         *EnrollmentStore
 	key           ed25519.PrivateKey
+	certificate   tls.Certificate
 	botIDs        map[string]int64
 	mux           *http.ServeMux
 	mu            sync.Mutex
@@ -58,7 +60,11 @@ func NewServer(cfg Config, store *EnrollmentStore) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newServer(cfg, store, key, ids, 256)
+	certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, errors.New("invalid gateway TLS key pair")
+	}
+	return newServer(cfg, store, key, ids, 256, dispatcherOptions{certificate: certificate})
 }
 
 func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids map[string]int64, capacity int, options ...dispatcherOptions) (*Server, error) {
@@ -109,6 +115,7 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	if len(options) > 0 {
 		option = options[0]
 	}
+	s.certificate = option.certificate
 	s.dispatcher, err = newDispatcher(ctx, s.tickets, cfg, ids, option)
 	if err != nil {
 		return fail(err)
@@ -120,6 +127,7 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	s.mux.HandleFunc("GET /v1/tickets/{job}/events", s.handleEvents)
 	s.mux.HandleFunc("POST /v1/join", s.handleJoinPost)
 	s.mux.HandleFunc("GET /v1/join/{host}", s.handleJoinGet)
+	s.mux.HandleFunc("POST /v1/join/{host}/reveal", s.handleJoinGet)
 	s.dispatcher.start()
 	go s.reap()
 	return s, nil
@@ -256,7 +264,7 @@ func (s *Server) handleModelTurn(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Serve(ctx context.Context) error {
 	stopDrain := s.drain.Listen(ctx, admission.Path(s.store.path))
 	defer stopDrain()
-	server := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), TLSConfig: &tls.Config{Certificates: []tls.Certificate{s.certificate}}, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -273,7 +281,9 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		s.Close()
 	}()
-	err := server.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
+	// Serve exactly the leaf used by enrollment cards, even if the files change
+	// after startup. Certificate changes take effect on the next server start.
+	err := server.ListenAndServeTLS("", "")
 	close(done)
 	s.Close()
 	if errors.Is(err, http.ErrServerClosed) {

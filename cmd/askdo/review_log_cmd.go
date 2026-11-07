@@ -23,8 +23,7 @@ var reviewLogRetainedJobs func(int)
 
 func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	if getEUID() != 0 {
-		fmt.Fprintln(stderr, "askdo review log requires root: the review journal is root-only (re-run with sudo)")
-		return 125
+		return rootRequired(stderr, "askdo review log requires root: the review journal is root-only (re-run with sudo)")
 	}
 	fs := flag.NewFlagSet("review log", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -54,7 +53,7 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 	raw := fs.Bool("json", false, "emit original JSONL records rather than joined summaries")
 	positional, err := parseInterleaved(fs, args)
 	if err != nil || len(positional) != 0 {
-		fmt.Fprintln(stderr, "usage: askdo review log [--since DURATION] [--job ID] [--json]")
+		fmt.Fprintln(stderr, "usage: askdo-config review log [--since DURATION] [--job ID] [--json]")
 		return 125
 	}
 	file, err := os.Open(reviewLogPath)
@@ -185,9 +184,16 @@ func runReviewLog(args []string, stdout, stderr io.Writer) int {
 			for i, arg := range command {
 				quoted[i] = fmt.Sprintf("%q", arg)
 			}
-			fmt.Fprintf(out, " host=%q submitter=%q(%d) risk=%q command=%s", r.Host, r.SubmitterName, r.SubmitterUID, risk, strings.Join(quoted, " "))
+			fmt.Fprintf(out, " host=%q submitter=%q(%d)", r.Host, r.SubmitterName, r.SubmitterUID)
+			if r.TargetUID != 0 {
+				fmt.Fprintf(out, " target=%q(%d)", r.TargetName, r.TargetUID)
+			}
+			fmt.Fprintf(out, " risk=%q command=%s", risk, strings.Join(quoted, " "))
 		}
 		if o := j.outcome; o != nil {
+			if j.review == nil && o.TargetUID != 0 {
+				fmt.Fprintf(out, " target=%q(%d)", o.TargetName, o.TargetUID)
+			}
 			fmt.Fprintf(out, " state=%q decision=%q approval=%q", o.State, o.Decision, o.ApprovalKind)
 			if o.ResultKind != "" {
 				fmt.Fprintf(out, " result=%q", o.ResultKind)

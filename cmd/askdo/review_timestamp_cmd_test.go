@@ -41,7 +41,7 @@ func TestReviewTimestampPolicyCommands(t *testing.T) {
 			getEUID = func() int { return 0 }
 			withPolicy := fileContent(t, path)
 			code, out, errOut := reviewCLI("timestamp", "list", "--config", path)
-			if code != 0 || !strings.Contains(out, current.Username) || !strings.Contains(out, "3600") || strings.Contains(out+errOut, "/private/") || fileContent(t, path) != withPolicy {
+			if code != 0 || !strings.HasPrefix(out, "approval timestamps") || !strings.Contains(out, current.Username) || !strings.Contains(out, "3600 seconds") || strings.Contains(out, "minutes") || strings.Contains(out+errOut, "/private/") || fileContent(t, path) != withPolicy {
 				t.Fatalf("list: %d %q %q", code, out, errOut)
 			}
 			getEUID = func() int { return 0 }
@@ -72,6 +72,51 @@ func TestReviewTimestampPolicyCommands(t *testing.T) {
 				t.Fatalf("cleared entry remained: %d %q", code, out)
 			}
 		})
+	}
+}
+
+func TestReviewTimestampTimeoutUnitsAndLegacyAlias(t *testing.T) {
+	stubRoot(t)
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := reviewPolicyFixture(t)
+	if code, _, stderr := reviewCLI("mode", "approval-only", "--config", path); code != 0 {
+		t.Fatalf("mode: %d %s", code, stderr)
+	}
+	for _, tc := range []struct {
+		verb, value string
+		seconds     int
+	}{
+		{"timestamp_timeout", "10", 600}, {"timestamp_timeout", "2.5", 150},
+		{"timestamp_timeout", "90s", 90}, {"timestamp_timeout", "10m", 600}, {"timestamp_timeout", "1h", 3600},
+		{"timestamp_timeout", "0.5", 30}, {"timestamp_timeout", "60", 3600},
+		{"timestamp", "300", 300},
+	} {
+		code, _, stderr := reviewCLI(tc.verb, "set", current.Username, tc.value, "--config", path)
+		if code != 0 {
+			t.Fatalf("%s %s: %d %s", tc.verb, tc.value, code, stderr)
+		}
+		cfg, err := config.DecodeForMutation([]byte(fileContent(t, path)))
+		if err != nil || cfg.Review.ApprovalTimestampUsers[current.Username] != tc.seconds {
+			t.Fatalf("%s %s: %+v %v", tc.verb, tc.value, cfg, err)
+		}
+		if tc.verb == "timestamp" && !strings.Contains(stderr, "'review timestamp' moved to askdo-config review timestamp_timeout; this form will be removed in a future release") {
+			t.Fatalf("missing alias notice: %q", stderr)
+		}
+	}
+	for _, value := range []string{"0", "0.49", "61", "29s", "3601s", "-1", "NaN", "+Inf", "nonsense"} {
+		before := fileContent(t, path)
+		if code, _, _ := reviewCLI("timestamp_timeout", "set", current.Username, value, "--config", path); code == 0 || fileContent(t, path) != before {
+			t.Fatalf("accepted %q", value)
+		}
+	}
+	if code, out, stderr := reviewCLI("timestamp_timeout", "list", "--config", path); code != 0 || !strings.Contains(out, current.Username) || stderr != "" {
+		t.Fatalf("list: %d %q %q", code, out, stderr)
+	}
+	if code, _, stderr := reviewCLI("timestamp_timeout", "clear", current.Username, "--config", path); code != 0 {
+		t.Fatalf("clear: %d %s", code, stderr)
 	}
 }
 

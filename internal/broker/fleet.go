@@ -65,6 +65,24 @@ type fleetManifest struct {
 	Route       fleetproto.RouteSnapshot     `json:"route"`
 }
 
+// fleetTelegramRoute adapts the signed gateway catalogue route to the
+// existing authenticated named-recipient gate projection. It is the single
+// source of the fleet approval route: a job's j.route and the daemon's
+// timestamp-authority checks must build it identically, or a fleet-created
+// window can never be recognized. No Telegram credential is projected.
+func fleetTelegramRoute(fleet *config.FleetConfig, snapshot fleetproto.RouteSnapshot) config.TelegramRoute {
+	route := config.TelegramRoute{ChannelName: string(snapshot.ChannelID)}
+	if fleet != nil {
+		route.ApprovalTTL = config.Duration(min(fleet.ApprovalDuration(), time.Duration(snapshot.TTLSeconds)*time.Second))
+	} else {
+		route.ApprovalTTL = config.Duration(time.Duration(snapshot.TTLSeconds) * time.Second)
+	}
+	for _, recipient := range snapshot.Recipients {
+		route.Recipients = append(route.Recipients, config.TelegramRecipient{ChatID: recipient.ChatID, OperatorUserIDs: append([]int64(nil), recipient.OperatorUserIDs...)})
+	}
+	return route
+}
+
 func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]proto.ProjectedModel, error) {
 	deadline := time.Now().Add(j.configuration().Review.TotalTimeout.Value())
 	if d := j.deadline(); !d.IsZero() && d.Before(deadline) {
@@ -93,10 +111,7 @@ func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]pro
 	// The signed route, not worker-supplied peer numbers, is adapted to existing
 	// authenticated named-recipient gates. No Telegram credential is projected.
 	j.namedTelegram = true
-	j.route = config.TelegramRoute{ChannelName: string(catalog.Route.ChannelID), ApprovalTTL: config.Duration(min(j.configuration().Fleet.ApprovalDuration(), time.Duration(catalog.Route.TTLSeconds)*time.Second))}
-	for _, r := range catalog.Route.Recipients {
-		j.route.Recipients = append(j.route.Recipients, config.TelegramRecipient{ChatID: r.ChatID, OperatorUserIDs: append([]int64(nil), r.OperatorUserIDs...)})
-	}
+	j.route = fleetTelegramRoute(j.configuration().Fleet, catalog.Route)
 	models := []proto.ProjectedModel{}
 	for _, p := range selection.Profiles {
 		// Accepted gateway v1 has exactly one effective upstream per profile.
@@ -367,7 +382,22 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 		withholding = append(withholding, fmt.Sprintf("%d credential-like paths withheld", count))
 		withholding = append(withholding, refs...)
 	}
-	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
+	targetName := j.target.Name
+	targetLogin := false
+	if j.target.root() {
+		// Fleet uses an absent name for UID 0, including login shells, with
+		// one exception: a login shell (-i) whose account database resolved
+		// a real alias (for example toor). That alias — not "root" — is what
+		// USER/LOGNAME, the reviewer bootstrap, the manifest and the audit
+		// carry for the job, so the display preserves it and the marker
+		// makes the aliased ticket a distinct validated contract. The
+		// canonical spelling stays the unchanged plain-root identity.
+		targetLogin = j.req.LoginShell && targetName != "" && targetName != "root"
+		if !targetLogin {
+			targetName = ""
+		}
+	}
+	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: targetName, TargetLogin: targetLogin}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
 	display.CapturedStdinKind = j.capturedKind()
 	profilesHash, err := fleetproto.HashProfiles(f.selection.Profiles)
 	if err != nil {

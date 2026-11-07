@@ -22,7 +22,7 @@ The broker launches the worker as
   `config check --live` resolves the same identity before provider preparation,
   then clears supplementary groups and drops GID before UID for live checks. The
   reviewer binary refuses to run as root (exit 1). Bare `askdo reviewer` is
-  worker mode; subcommands such as `askdo reviewer add` are operator CLI, not
+  worker mode; subcommands such as `askdo-config reviewer add` are operator CLI, not
   worker invocations.
 - **Environment:** exactly `PATH=/usr/bin:/bin`,
   `HOME=/var/lib/askdo-review`, `LANG=C.UTF-8`. Nothing is inherited
@@ -82,7 +82,9 @@ The immutable job bootstrap; the first and only message of its kind.
 |---|---|
 | `type` | `"bootstrap"` |
 | `host` | string ≤ 256 (trusted daemon hostname for the Telegram card) |
-| `target_uid` | uint32 (execution identity of the dispatched process) |
+| `target_uid` | uint32 (execution identity of the dispatched process; 0 is root) |
+| `target_name` | optional string ≤ 256: the broker-resolved target account name (`askdo -u`); absent for root except in login-shell mode |
+| `login_shell` | optional boolean, omitted when false: login-shell mode installs target HOME/USER/LOGNAME even for root; requires `target_name` |
 | `submitter_uid` | uint32 (kernel-authenticated submitting peer UID) |
 | `submitter_name` | string ≤ 256 (host account name looked up from that UID; display only) |
 | `container` | string ≤ 128 (best-effort container label observed by the daemon; empty when unavailable) |
@@ -134,8 +136,16 @@ no gateway upgrade is required for these fields.
 
 The bootstrap also carries `execution_environment`: exactly the non-secret
 `PATH=/usr/bin:/bin`, `HOME=/root`, `LANG=C.UTF-8`, and `PWD=<operation.cwd>`
-entries for reviewed jobs. The broker derives them from the actual launch
+entries for reviewed jobs. For a non-root `target_uid`, `HOME` is instead the
+target account's home directory and, when `target_name` is present, exactly
+`USER=<target_name>` and `LOGNAME=<target_name>` are added; any other value or
+variable is rejected. The broker derives them from the actual launch
 environment. Private `ASKDO_BUNDLE` staging paths are not projected.
+
+For `login_shell:true`, root also gets the resolved account's home, USER and
+LOGNAME rather than the historical `/root`-only environment. No new environment
+variables are allowed. This optional extension is rejected by old strict workers;
+ordinary bootstraps remain byte-identical when login-shell mode is unused.
 
 The bootstrap carries no raw capture contents. For captured stdin it carries
 only the logical path, byte size, SHA-256 digest and the selected delivery
@@ -508,7 +518,7 @@ submitter's result carries only the generic broker-authored explanation
 and malformed pipe frames may contain provider text, including echoed
 credentials, so they stay in the root-owned spool log and are never forwarded
 to the submitter. An operator reads that log with the root-only
-`askdo logs JOB_ID` command. A job with no model report is never labeled
+`askdo-config logs JOB_ID` command. A job with no model report is never labeled
 reviewed.
 
 ### `approval_only_frozen` (B→W)

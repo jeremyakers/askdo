@@ -1,12 +1,14 @@
 package upgrade
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 var (
@@ -16,7 +18,7 @@ var (
 	testRelease      = "v1.0.0-rc.21"
 	testStage        = "download"
 	testDetail       = "resolved release v1.0.0-rc.21"
-	validTimestamp   = int64(1735689600000)
+	validTimestamp   = time.Now().UnixMilli()
 )
 
 func receiptPermissions(t *testing.T, path string) os.FileMode {
@@ -82,6 +84,36 @@ func TestNewOperationWritesScheduledReceipt(t *testing.T) {
 		t.Fatalf("Lstat root: %v", err)
 	} else if info.Mode().Perm()|0o755 != 0o755 {
 		t.Errorf("root mode = %o, want at least 755", info.Mode().Perm())
+	}
+}
+
+func TestNewOperationAcceptsPrivateBootstrapWithoutHidingReceipts(t *testing.T) {
+	// Given: the pinned candidate is still executing under the receipt parent.
+	root := t.TempDir()
+	bootstrap := filepath.Join(root, "bootstrap-"+testOpID)
+	if err := os.Mkdir(bootstrap, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(bootstrap, "candidate")
+	if err := os.WriteFile(candidate, []byte("pinned candidate"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// When
+	unlock, err := NewOperation(root, testOpID, testRelease, testSourceCommit, testStage)
+	// Then: scheduling permits only the recognized bootstrap namespace, without
+	// touching it or overlooking an active receipt beside it.
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if data, err := os.ReadFile(candidate); err != nil || string(data) != "pinned candidate" {
+		t.Fatalf("bootstrap changed: %q, %v", data, err)
+	}
+	if unlock, err := NewOperation(root, testOpID2, testRelease, testSourceCommit, testStage); err == nil {
+		unlock()
+		t.Fatal("bootstrap hid an active receipt")
+	} else if !strings.Contains(err.Error(), "active operation "+testOpID) {
+		t.Fatalf("did not inspect active receipt: %v", err)
 	}
 }
 
@@ -292,6 +324,80 @@ func TestActiveDifferentIDBlocksAndTerminalDifferentIDPermits(t *testing.T) {
 	}
 }
 
+func TestNewOperationReconcilesOnlyExpiredScheduledReceipts(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name, state, record string
+		updated             time.Time
+		expired             bool
+	}{
+		{"expired scheduled", stateScheduled, fmt.Sprintf(`{"version":1,"deadline_unix_ms":%d}`, now.Add(-time.Minute).UnixMilli()), now, true},
+		{"unexpired scheduled despite old receipt", stateScheduled, fmt.Sprintf(`{"version":1,"deadline_unix_ms":%d}`, now.Add(time.Minute).UnixMilli()), now.Add(-2 * OperationTimeout), false},
+		{"missing record recent", stateScheduled, "", now, false},
+		{"missing record old", stateScheduled, "", now.Add(-OperationTimeout - time.Minute), true},
+		{"unreadable record recent", stateScheduled, "directory", now, false},
+		{"unreadable record old", stateScheduled, "directory", now.Add(-OperationTimeout - time.Minute), true},
+		{"invalid record recent", stateScheduled, `{"version":1,"deadline_unix_ms":0}`, now, false},
+		{"invalid record old", stateScheduled, `not json`, now.Add(-OperationTimeout - time.Minute), true},
+		{"waiting", stateWaiting, `{"version":1,"deadline_unix_ms":1}`, now.Add(-2 * OperationTimeout), false},
+		{"activating", stateActivating, `{"version":1,"deadline_unix_ms":1}`, now.Add(-2 * OperationTimeout), false},
+		{"verifying", stateVerifying, `{"version":1,"deadline_unix_ms":1}`, now.Add(-2 * OperationTimeout), false},
+		{"unknown", stateUnknown, `{"version":1,"deadline_unix_ms":1}`, now.Add(-2 * OperationTimeout), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, stage := t.TempDir(), filepath.Join(t.TempDir(), testOpID)
+			if err := os.Mkdir(stage, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			activation := filepath.Join(stage, "activation.json")
+			switch tc.record {
+			case "":
+			case "directory":
+				if err := os.Mkdir(activation, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := os.WriteFile(activation, []byte(tc.record), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := Receipt{Version: 1, ID: testOpID, Release: testRelease, SourceCommit: testSourceCommit, State: tc.state, Stage: stage, Detail: "original", UpdatedAtUnixMS: tc.updated.UnixMilli()}
+			if err := writeReceipt(root, before); err != nil {
+				t.Fatal(err)
+			}
+			unlock, err := NewOperation(root, testOpID2, testRelease, testSourceCommit, "new stage")
+			if err == nil {
+				unlock()
+			}
+			if (err == nil) != tc.expired {
+				t.Fatalf("admission err=%v, expired=%v", err, tc.expired)
+			}
+			after, err := ReadReceipt(root, testOpID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.expired {
+				if after != before {
+					t.Fatalf("blocked admission changed receipt: before=%+v after=%+v", before, after)
+				}
+				if _, err := ReadReceipt(root, testOpID2); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("blocked admission created a new receipt: %v", err)
+				}
+				return
+			}
+			if after.State != stateFailed || after.Detail != "activation never started before its deadline; no live changes" || after.UpdatedAtUnixMS < now.UnixMilli() {
+				t.Fatalf("expired scheduled receipt was not reconciled: %+v", after)
+			}
+			if after.ID != before.ID || after.Stage != before.Stage || after.Release != before.Release || after.SourceCommit != before.SourceCommit {
+				t.Fatalf("reconciliation lost operation identity: %+v", after)
+			}
+			if next, err := ReadReceipt(root, testOpID2); err != nil || next.State != stateScheduled {
+				t.Fatalf("new operation not scheduled: %+v err=%v", next, err)
+			}
+		})
+	}
+}
+
 // Given a malformed receipt, a foreign-named .json, or any unexpected file in
 // the root, When NewOperation runs, Then it fails closed instead of
 // ignoring the file. Staging temp artifacts (dotfiles) do not block.
@@ -316,6 +422,30 @@ func TestMalformedOtherReceiptRefuses(t *testing.T) {
 		},
 		"unexpected non-json file": func(t *testing.T, root string) {
 			if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("hi"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"bootstrap-named file": func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "bootstrap-"+testOpID), []byte("foreign"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"malformed bootstrap directory": func(t *testing.T, root string) {
+			if err := os.Mkdir(filepath.Join(root, "bootstrap-up_bad"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"public bootstrap directory": func(t *testing.T, root string) {
+			path := filepath.Join(root, "bootstrap-"+testOpID)
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"bootstrap directory symlink": func(t *testing.T, root string) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(root, "bootstrap-"+testOpID)); err != nil {
 				t.Fatal(err)
 			}
 		},
@@ -481,21 +611,22 @@ func TestUpdateReceiptRejectsInvalidInput(t *testing.T) {
 func TestReadReceiptRejectsMalformedAndTampered(t *testing.T) {
 	good := receiptText(testOpID, testRelease, testSourceCommit, stateScheduled)
 	variants := map[string]string{
-		"not json":       `not json`,
-		"empty":          ``,
-		"bad version":    strings.Replace(good, `"version":1`, `"version":2`, 1),
-		"id mismatch":    strings.Replace(good, testOpID, testOpID2, 1),
-		"bad state":      strings.Replace(good, `"state":"scheduled"`, `"state":"running"`, 1),
-		"forbidden tag":  strings.Replace(good, `"release":"`+testRelease+`"`, `"release":"latest"`, 1),
-		"short source":   strings.Replace(good, testSourceCommit, strings.Repeat("a", 39), 1),
-		"upper source":   strings.Replace(good, testSourceCommit, strings.Repeat("A", 40), 1),
-		"zero timestamp": strings.Replace(good, `1735689600000`, `0`, 1),
-		"unknown field":  good[:len(good)-2] + `,"extra":1}` + "\n",
-		"trailing data":  good + `{}` + "\n",
-		"truncated":      good[:len(good)/2],
-		"oversized":      strings.Repeat("x", receiptJSONMax+1),
-		"long stage":     strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"`+strings.Repeat("s", manifestLineMax+1)+`"`, 1),
-		"control stage":  strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"st\tage"`, 1),
+		"not json":        `not json`,
+		"empty":           ``,
+		"bad version":     strings.Replace(good, `"version":1`, `"version":2`, 1),
+		"id mismatch":     strings.Replace(good, testOpID, testOpID2, 1),
+		"bad state":       strings.Replace(good, `"state":"scheduled"`, `"state":"running"`, 1),
+		"forbidden tag":   strings.Replace(good, `"release":"`+testRelease+`"`, `"release":"latest"`, 1),
+		"short source":    strings.Replace(good, testSourceCommit, strings.Repeat("a", 39), 1),
+		"upper source":    strings.Replace(good, testSourceCommit, strings.Repeat("A", 40), 1),
+		"zero timestamp":  strings.Replace(good, fmt.Sprint(validTimestamp), `0`, 1),
+		"unknown field":   good[:len(good)-2] + `,"extra":1}` + "\n",
+		"bad plan digest": good[:len(good)-2] + `,"plan_digest":"not-a-sha256"}` + "\n",
+		"trailing data":   good + `{}` + "\n",
+		"truncated":       good[:len(good)/2],
+		"oversized":       strings.Repeat("x", receiptJSONMax+1),
+		"long stage":      strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"`+strings.Repeat("s", manifestLineMax+1)+`"`, 1),
+		"control stage":   strings.Replace(good, `"stage":"`+testStage+`"`, `"stage":"st\tage"`, 1),
 	}
 
 	root := t.TempDir()

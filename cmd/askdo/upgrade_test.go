@@ -119,12 +119,12 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 					t.Fatal(err)
 				}
 				argv := flags.Args()
-				if len(argv) != 6 || !*detach {
-					t.Fatalf("not a detached fixed helper invocation: %q", args)
+				if len(argv) != 4 || !*detach {
+					t.Fatalf("not a detached captured bootstrap invocation: %q", args)
 				}
-				operation, source = argv[3], argv[5]
-				if want := []string{"/usr/local/bin/askdo", "upgrade-helper", "--operation", cliUpgradeID, "--source", source}; !reflect.DeepEqual(argv, want) {
-					t.Fatalf("helper argv=%q want=%q", argv, want)
+				operation, source = argv[2], argv[3]
+				if want := []string{"/bin/sh", "-s", cliUpgradeID, source}; !reflect.DeepEqual(argv, want) {
+					t.Fatalf("bootstrap argv=%q want=%q", argv, want)
 				}
 				info, err := os.Stat(source)
 				if err != nil || info.Mode().Perm() != 0o700 {
@@ -159,22 +159,25 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 					t.Fatal(err)
 				}
 				captured, err := io.ReadAll(options.Stdin)
-				wantCaptured, _ := json.Marshal(plan)
-				if err != nil || !bytes.Equal(captured, wantCaptured) {
-					t.Fatalf("stdin is not the marshaled approved plan: %s %v", captured, err)
+				capturedPlan, _ := json.Marshal(plan)
+				if err != nil || !bytes.Contains(captured, capturedPlan) || !bytes.Contains(captured, []byte(plan.CLIDigest)) || !bytes.Contains(captured, []byte("/usr/bin/sha256sum")) || !bytes.Contains(captured, []byte("upgrade-helper")) {
+					t.Fatalf("stdin is not the pinned bootstrap and approved plan: %s %v", captured, err)
+				}
+				if bytes.Contains(captured, []byte("/var/backups/askdo")) || !bytes.Contains(captured, []byte("/var/lib/askdo-upgrade/bootstrap-"+operation)) {
+					t.Fatalf("client bootstrap depends on backup storage: %s", captured)
 				}
 				// Model broker-frozen delivery through the real helper entry point.
 				// Manager acceptance is fake; no candidate or system tool runs.
-				factory := func() upgrade.Helper {
+				factory := func(string) (upgrade.Helper, error) {
 					return upgrade.Helper{BackupRoot: filepath.Join(temps, "root-stages"), ReceiptRoot: root, TrustDirectory: func(path string, create bool) error {
 						if create {
 							return os.MkdirAll(path, 0o755)
 						}
 						_, err := os.Stat(path)
 						return err
-					}, Manager: upgradeScheduleManagerFunc(func(_ context.Context, id, stage string) error {
+					}, Manager: upgradeScheduleManagerFunc(func(_ context.Context, id, stage string, _ string) error {
 						staged, err := os.ReadFile(filepath.Join(stage, upgrade.PlanFileName))
-						if err != nil || !bytes.Equal(staged, captured) {
+						if err != nil || !bytes.Equal(staged, capturedPlan) {
 							return fmt.Errorf("root stage differs from captured plan: %v", err)
 						}
 						receipt, err := upgrade.ReadReceipt(root, id)
@@ -182,9 +185,9 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 							return fmt.Errorf("root used mutable source plan: %+v %v", receipt, err)
 						}
 						return nil
-					})}
+					})}, nil
 				}
-				if code := runUpgradeHelperWith(ctx, argv[2:], 0, factory, bytes.NewReader(captured), io.Discard, io.Discard); code != 0 {
+				if code := runUpgradeHelperWith(ctx, []string{"--operation", operation, "--source", source}, 0, factory, bytes.NewReader(capturedPlan), io.Discard, io.Discard); code != 0 {
 					t.Fatalf("captured helper scheduling code=%d", code)
 				}
 				if err := upgrade.UpdateReceipt(root, operation, "succeeded", filepath.Join(temps, "root-stages", operation), "fake activation verified"); err != nil {

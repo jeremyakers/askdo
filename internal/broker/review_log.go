@@ -11,7 +11,7 @@ import (
 func (j *jobRuntime) reviewLogEvent(context manifestContext, operation manifestOperation, captures []captureRecord, inspection *manifestInspectionEvidence, digest string) reviewlog.Event {
 	e := reviewlog.Event{Version: 1, Event: "review", Time: time.Now().UTC(), JobID: j.req.RequestID,
 		Host: context.Host, SubmitterUID: context.SubmitterUID, SubmitterName: context.SubmitterName,
-		TargetUID: 0, Mode: operation.Mode, CWD: operation.CWD, Reason: j.req.Reason, ManifestDigest: digest}
+		TargetUID: j.target.UID, TargetName: j.target.Name, Mode: operation.Mode, CWD: operation.CWD, Reason: j.req.Reason, ManifestDigest: digest}
 	// Match the approval display, not the bundle's internal staging argv.
 	if j.req.Mode == "bundle" {
 		e.Entry = j.req.Entry

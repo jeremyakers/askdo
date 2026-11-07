@@ -31,6 +31,9 @@ type Operation struct {
 	CWD   string
 	CWDFd *os.File
 	Stdin *os.File // broker-verified captured input, or nil for /dev/null
+	// Target is the resolved execution identity; its zero value launches as
+	// root exactly as before target selection existed.
+	Target ExecutionTarget
 }
 
 // Execution is one launched operation. Wait must be called exactly once.
@@ -56,11 +59,17 @@ type Executor interface {
 //     chdirs before renumbering ExtraFiles to fd 3. The child lands in the exact
 //     directory the broker bound at submission even if its path was renamed
 //     or replaced after approval (verified by a real launch test);
-//   - exactly the operation's explicit environment (PATH/HOME/LANG/PWD and,
-//     for bundles, ASKDO_BUNDLE). cmd.Env REPLACES the environment —
+//   - exactly the operation's explicit environment (PATH/HOME/LANG/PWD, the
+//     target's USER/LOGNAME for a non-root target and, for bundles,
+//     ASKDO_BUNDLE). cmd.Env REPLACES the environment —
 //     the daemon's and the original client's environments are never
 //     consulted, so SSH_AUTH_SOCK, BASH_ENV, PYTHONPATH, LD_PRELOAD and
 //     credentials cannot leak into the privileged child;
+//   - the frozen target identity: a non-root target is installed in the
+//     forked child by setgroups(2), setgid(2), setuid(2) in that order, each
+//     checked, before chdir and exec (syscall.Credential); any failure aborts
+//     the child, so nothing ever runs with a partially dropped identity. A
+//     root target keeps the daemon's credentials unchanged;
 //   - no stdin (devnull) and no TTY;
 //   - no client-derived context: process lifetime is broker-owned, so a client
 //     timeout or disconnect ends observation only, never execution.
@@ -147,7 +156,7 @@ func (SystemExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, 
 		}
 	}
 	cmd.ExtraFiles = []*os.File{heldDir}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: targetCredential(op.Target)}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("launch %q: %w", op.Argv[0], err)
 	}
@@ -170,6 +179,16 @@ type executionOutputPipe struct {
 
 func duplicateCWD(dir *os.File) (int, error) {
 	return unix.FcntlInt(dir.Fd(), unix.F_DUPFD_CLOEXEC, 4)
+}
+
+// targetCredential returns the child credential for a non-root target, or
+// nil so a root target keeps today's unchanged launch. The explicit group
+// list always replaces the daemon's supplementary groups (never NoSetGroups).
+func targetCredential(target ExecutionTarget) *syscall.Credential {
+	if target.root() {
+		return nil
+	}
+	return &syscall.Credential{Uid: target.UID, Gid: target.GID, Groups: append([]uint32(nil), target.Groups...)}
 }
 
 // validateOperation enforces the launch-gate invariants before any spawn.
@@ -343,6 +362,7 @@ func (e *fakeExecution) Wait() store.Result {
 func cloneOperation(op Operation) Operation {
 	op.Argv = append([]string(nil), op.Argv...)
 	op.Env = append([]string(nil), op.Env...)
+	op.Target.Groups = append([]uint32(nil), op.Target.Groups...)
 	// CWDFd is an immutable *os.File handle; the clone shares it (the broker
 	// owns the descriptor's lifetime and closes it at job terminal state).
 	return op

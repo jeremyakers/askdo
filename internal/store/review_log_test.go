@@ -431,6 +431,73 @@ func TestReviewLogConsumedDecisionForUnknownJobIsNotTracked(t *testing.T) {
 	}
 }
 
+func TestReviewLogOutcomeNamesExecutionTarget(t *testing.T) {
+	for _, pathway := range []string{"transition", "restart"} {
+		t.Run(pathway, func(t *testing.T) {
+			// Given a job whose durable operation record binds a sudo-style
+			// target next to a root job with the pre-target record shape.
+			s := openTestStore(t)
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "reviews.jsonl")
+			s.SetReviewLogPath(path)
+			targeted := testJob("targeted", nil)
+			targeted.OperationJSON = []byte(`{"argv":["/usr/bin/id"],"target_user":"#1001","target_uid":1001,"target_name":"tyme"}`)
+			seedLegacyJob(t, s, targeted)
+			root := testJob("root", nil)
+			root.OperationJSON = []byte(`{"argv":["/usr/bin/id"],"target_user":"root"}`)
+			seedLegacyJob(t, s, root)
+			// When a terminal mutation that never sees the broker runtime commits.
+			switch pathway {
+			case "transition":
+				mustTransition(t, s, "targeted", StateQueued, StateFinished)
+				mustTransition(t, s, "root", StateQueued, StateFinished)
+			case "restart":
+				mustTransition(t, s, "targeted", StateQueued, StateRunning)
+				mustTransition(t, s, "root", StateQueued, StateRunning)
+				if count, err := s.MarkRestartAmbiguous(ctx); err != nil || count != 2 {
+					t.Fatalf("restart %d %v", count, err)
+				}
+			}
+			// Then the targeted outcome names the resolved account from the
+			// durable row, and the root outcome keeps today's exact shape.
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var targetedLine, rootLine string
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				switch {
+				case strings.Contains(line, `"job_id":"targeted"`):
+					targetedLine = line
+				case strings.Contains(line, `"job_id":"root"`):
+					rootLine = line
+				}
+			}
+			if !strings.Contains(targetedLine, `"target_uid":1001,"target_name":"tyme",`) {
+				t.Fatalf("targeted outcome lacks its target: %s", targetedLine)
+			}
+			if !strings.Contains(rootLine, `"target_uid":0,`) || strings.Contains(rootLine, "target_name") || strings.Contains(rootLine, "target_user") {
+				t.Fatalf("root outcome changed: %s", rootLine)
+			}
+		})
+	}
+}
+
+func TestOutcomeForJobDecodesTargetLeniently(t *testing.T) {
+	// Given rows with no operation record, a compacted one and a malformed one.
+	for name, operation := range map[string][]byte{"absent": nil, "empty": {}, "malformed": []byte(`{"target_uid":`)} {
+		t.Run(name, func(t *testing.T) {
+			job := Job{UID: 1001, RequestID: "legacy", State: StateFinished, OperationJSON: operation, ApprovalJSON: []byte(`{"kind":"human","decision":"approved"}`)}
+			// When deriving the outcome journal.
+			event := outcomeForJob(job, "")
+			// Then the outcome is still journaled as root, never dropped.
+			if event.TargetUID != 0 || event.TargetName != "" || event.ApprovalKind != "human" || event.Decision != "approved" {
+				t.Fatalf("outcome=%+v", event)
+			}
+		})
+	}
+}
+
 func TestOutcomeForJobTimestampApproval(t *testing.T) {
 	// Given a timestamp-authorized approval record.
 	job := Job{UID: 1001, RequestID: "timestamp-job", State: StateFinished,

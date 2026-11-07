@@ -4,7 +4,7 @@ This records the direction considered before the `askdo` foreground
 implementation. It is **not** a proposed command syntax, a host install
 instruction, or approval for a cutover. With a controlling TTY, the current
 default is foreground on the caller's original terminal. Without one (the
-normal sandboxed-agent case), `askdo --reason ... -- /absolute/command`
+normal sandboxed-agent case), `askdo --reason ... /absolute/command`
 selects detached execution automatically while the CLI waits synchronously and
 relays captured stdout/stderr. `--detach` is an optional override for a TTY
 caller, not a mandatory agent flag. Ordinary detached jobs use `/dev/null` for

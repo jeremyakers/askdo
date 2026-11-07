@@ -1,0 +1,108 @@
+package broker
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net"
+	"os/user"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/jeremyakers/askdo/internal/client"
+	"github.com/jeremyakers/askdo/internal/store"
+)
+
+func TestTimestampListNSSFailureIsBrokerError(t *testing.T) {
+	// Given an NSS database that cannot answer group membership.
+	cfg, _ := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	restore := setAskdoGroupLookupForTest(func(uint32) (bool, error) { return false, errors.New("NSS unavailable") })
+	t.Cleanup(restore)
+	var stdout, stderr bytes.Buffer
+	// When list is requested.
+	code := client.Run(context.Background(), []string{"-l"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})
+	// Then the caller gets an infrastructure error, not a false non-membership result.
+	if code != 125 {
+		t.Fatalf("list exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestTimestampListNSSLookupDoesNotBlockAdmission(t *testing.T) {
+	// Given an NSS lookup that stalls after the client disconnects.
+	cfg, uid := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	restore := setAskdoGroupLookupForTest(func(uint32) (bool, error) { time.Sleep(5 * time.Second); return true, nil })
+	t.Cleanup(restore)
+	var stdout, stderr bytes.Buffer
+	// When the list client deadline expires and closes the connection.
+	code := client.Run(context.Background(), []string{"--timeout", "50ms", "-l"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})
+	if code != 124 {
+		t.Fatalf("list exit=%d stderr=%q", code, stderr.String())
+	}
+	// Then a new reservation is admitted without waiting for the stale lookup.
+	started := time.Now()
+	_ = reserveForTest(t, h.socket, uid)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("stale NSS lookup blocked admission for %s", elapsed)
+	}
+}
+
+func TestTimestampListTargetNSSLookupDoesNotBlockAdmission(t *testing.T) {
+	// Given a selected-target NSS lookup that stalls after the list client leaves.
+	cfg, uid := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	restore := setLookupTargetAccountForTest(func(string) (*user.User, error) {
+		time.Sleep(5 * time.Second)
+		return &user.User{Uid: "1000", Gid: "1000", Username: "tyme", HomeDir: "/home/tyme"}, nil
+	})
+	t.Cleanup(restore)
+	var stdout, stderr bytes.Buffer
+	// When the selected-target list request times out and disconnects.
+	code := client.Run(context.Background(), []string{"--timeout", "50ms", "-l", "-u", "tyme"}, client.Options{SocketPath: h.socket, Stdout: &stdout, Stderr: &stderr})
+	if code != 124 {
+		t.Fatalf("selected-target list exit=%d stderr=%q", code, stderr.String())
+	}
+	// Then the next reservation is not held behind the abandoned NSS lookup.
+	started := time.Now()
+	_ = reserveForTest(t, h.socket, uid)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("selected-target NSS lookup blocked admission for %s", elapsed)
+	}
+}
+
+func TestSubmitTargetLookupDeadlineIsTimeout(t *testing.T) {
+	// Given a target-account lookup that outlasts the request budget.
+	cfg, _ := timestampConfig(t)
+	var approvals atomic.Int32
+	h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+	restore := setLookupTargetAccountForTest(func(string) (*user.User, error) {
+		time.Sleep(2 * time.Second)
+		return &user.User{Uid: "1000", Gid: "1000", Username: "tyme", HomeDir: "/home/tyme"}, nil
+	})
+	t.Cleanup(restore)
+	req := newReservedRequest(t, h, "slow target")
+	req.TargetUser = "tyme"
+	ms := int64(100)
+	req.WaitTimeoutMS = &ms
+	// When the request is submitted.
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sendFrame(t, conn, req)
+	body := readFrame(t, conn)
+	// Then it is a timeout outcome and the reservation is retired.
+	if !strings.Contains(string(body), `"op":"wait_timeout"`) {
+		t.Fatalf("lookup deadline response=%s", body)
+	}
+	if state, err := h.daemon.store.GetReservation(context.Background(), h.peerUID.Load(), req.RequestID); err != nil || state != store.ReservationCancelled {
+		t.Fatalf("reservation state=%v err=%v", state, err)
+	}
+}

@@ -17,10 +17,19 @@ It downloads and verifies the release, shows its operation, source commit and
 manifest digest, and asks for Telegram approval. Approval is mandatory for every
 upgrade; automatic approval is not used for this operation.
 
-After approval, askdo stages the verified files, drains new work while existing
-jobs finish, backs up the broker and gateway data, installs the release, and
-verifies the restarted services and gateway catalog. The result is not called
-successful until those checks pass.
+After approval, a captured root bootstrap verifies a root-owned candidate copy
+and executes it through a pinned file descriptor with the frozen plan, so path
+replacement cannot change the verified inode. The new helper stages and verifies the
+release again before activation. It drains new work while existing jobs finish,
+backs up the broker and gateway data,
+installs the release, and verifies the restarted services and gateway catalog.
+After installing the binaries, activation creates or repairs the root-owned
+`/usr/local/bin/askdo-config -> askdo` multicall symlink on existing hosts. It
+refuses to replace a non-symlink at that path; a foreign file is never opened,
+followed or overwritten.
+On hosts without `systemd-run`, a detached activation starts a new session and
+moves to the root of each cgroup hierarchy before stopping the broker. The
+result is not called successful until those checks pass.
 
 ## Supported topology and timing
 
@@ -48,13 +57,63 @@ askdo upgrade --operation up_0123456789abcdef0123456789abcdef
 Receipts in `/var/lib/askdo-upgrade` contain only the operation, release, source
 commit, state, stage and timestamps. They contain no credentials.
 
+## Backup location and retention
+
+When scheduling, the root helper reads the optional top-level `upgrade_backup_dir` from
+`/etc/askdo/config.json` (direct v4 or fleet v5). It defaults to
+`/var/backups/askdo`. Each operation stages its release at
+`<upgrade_backup_dir>/up_<32 hex digits>` and, before installation, preserves
+the old binaries, configuration and stopped database snapshots in that stage's
+`backup/` subdirectory. The directory and its ancestors must be trusted,
+root-owned, nonsymlink paths without group/other write access; a missing backup
+directory is created `0700` by root.
+
+The backup root must be outside `/var/lib/askdo-upgrade` and all its descendants,
+which are reserved for receipts and bootstraps. Activation and failure
+reconciliation use the recorded stage's parent directory, not a later config
+value, so a config edit cannot strand an already-scheduled operation.
+
+On Synology DSM, use a data volume rather than the small system partition:
+set `"upgrade_backup_dir": "/volume1/@askdo/upgrade-backups"` in the root config.
+Fresh DSM installations write this setting and create root-private directories
+on `/volume1` when it is present and trusted; otherwise they print a WARNING and
+keep the `/var/backups/askdo` default, which an administrator should change. Existing installations are **not** rewritten, and existing backups
+are not moved: an administrator must set the value once. A different data-volume
+location is fine if it meets the same trust checks. Keep the data volume mounted
+and allow space for staged binaries and database snapshots.
+
+The unprivileged client never needs to read this setting. Its captured shell uses
+the fixed, transient `/var/lib/askdo-upgrade/bootstrap-<operation>` directory for
+the pinned candidate, with exclusive `0700` creation, parent trust checks,
+descriptor pinning, digest verification and EXIT-trap cleanup. A missing parent
+is created `0700` by root. This executable-filesystem location deliberately avoids
+`/run` and `/tmp`, which may be mounted `noexec`. The receipt scanner recognizes
+only private, nonsymlink `bootstrap-up_<32 lowercase hex digits>` directories as
+bootstrap artifacts; other unexpected entries still block scheduling.
+
+When a failure is known to have made no live changes (including manager rejection,
+scheduling cancellation before manager acceptance, or a pre-activation failure),
+the helper removes its stage and records `stage removed` in the receipt detail.
+Failed operations after a stop/install, interrupted manager acceptance, unknown
+outcomes, or incomplete admission recovery retain their stages for inspection.
+After successful activation, the helper keeps the newest **two successful stages**,
+ordered by successful receipt timestamps, and removes older successful stages.
+It only removes trusted `up_<32 lowercase hex digits>` directories whose matching
+receipts identify them as successful stages under this backup root. Other entries,
+including legacy `rc22-nas.*` maintenance backups, are left untouched. Receipts
+remain available even after a stage is removed; historical failed stages are not
+retroactively swept.
+
 ## Failure and recovery
 
 - Denial or an expired approval does not schedule activation.
 - A duplicate active operation is refused; a completed release can be upgraded
   again later with a new operation ID.
-- Failed or uncertain results include the stage and backup path. No automatic
-  rollback is attempted. Inspect the backup before restoring compatible
+- Failed or uncertain results include the stage and backup path. If the receipt
+  says `stage removed`, no recovery backup was needed. Otherwise, use the receipt's
+  actual `stage` path, not an assumed `/var/backups/askdo` location. No automatic
+  rollback is attempted. On detached hosts, inspect `<stage>/activation.log` for
+  retained activation errors. Inspect `<stage>/backup/` before restoring compatible
   binaries and databases together.
 - The backup directory is root-private. Use normal administrator access to
   inspect it; public receipts never expose its contents.
@@ -68,3 +127,6 @@ commit, state, stage and timestamps. They contain no credentials.
 Do not resubmit an operation whose activation state is uncertain. Read its
 receipt and backup first. Future upgrades can resume observation only; they do
 not replay an ambiguous activation.
+
+For manual recovery, run a downloaded `askdo` from a home directory, not `/tmp`,
+because `/tmp` is often mounted `noexec`.
