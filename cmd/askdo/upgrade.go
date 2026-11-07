@@ -168,7 +168,8 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	}
 	// The root operation's activation budget starts only after scheduling, not
 	// while the user is downloading, reviewing or waiting for human approval.
-	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+2*time.Minute)
+	// It can end in a rollback, which has its own allowance after the deadline.
+	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute)
 	defer cancel()
 	lastState := ""
 	for {
@@ -196,9 +197,9 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			fmt.Fprintf(stdout, "askdo %s is installed and verified.\n", receipt.Release)
 			return 0
 		case "failed", "unknown":
+			// The detail says what was restored, or that recovery is manual.
 			fmt.Fprintf(stderr, "%s\nStage: %s\nBackup: %s\n", receipt.Detail, receipt.Stage, filepath.Join(receipt.Stage, "backup"))
 			if receipt.State == "failed" {
-				fmt.Fprintln(stderr, "No automatic rollback was attempted.")
 				return 1
 			}
 			fmt.Fprintln(stderr, "Recovery: inspect the stage and compatible binary/DB backups before manual recovery; do not resubmit or automatically roll back.")
