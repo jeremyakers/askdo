@@ -125,6 +125,7 @@ func TestUpgradeBootstrapStatesVerifiableProvenance(t *testing.T) {
 		"https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.32/install-manifest.v1",
 		"https://github.com/jeremyakers/askdo/blob/051adadd4f526ad23c37dfb22021003531a25b32/docs/upgrade.md",
 		"#   " + plan.CLIDigest,
+		"automatically restores the backed-up binaries",
 	} {
 		if !strings.Contains(string(script), want) {
 			t.Errorf("bootstrap script lacks %q", want)

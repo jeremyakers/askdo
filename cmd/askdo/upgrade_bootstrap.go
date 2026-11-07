@@ -60,7 +60,9 @@ func upgradeBootstrapScript(plan upgrade.Plan, capturedPlan []byte, bootstrapRoo
 # The verified binary's upgrade-helper only schedules the upgrade. After this
 # job ends it re-verifies all staged assets, drains askdo admission, backs up the
 # broker and gateway databases and binaries, installs the release and verifies
-# the restarted services; see
+# the restarted services. If activation fails after any service stop, it
+# automatically restores the backed-up binaries, config and databases, restarts
+# the previous release and verifies it; see
 #   https://github.com/%[3]s/blob/%[2]s/docs/upgrade.md
 `, plan.Release, plan.SourceCommit, upgradeRepository, plan.CLIAsset, plan.CLIDigest)
 	script := header + fmt.Sprintf(`set -eu
