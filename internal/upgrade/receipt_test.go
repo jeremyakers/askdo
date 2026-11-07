@@ -391,6 +391,9 @@ func TestNewOperationReconcilesOnlyExpiredScheduledReceipts(t *testing.T) {
 			if after.ID != before.ID || after.Stage != before.Stage || after.Release != before.Release || after.SourceCommit != before.SourceCommit {
 				t.Fatalf("reconciliation lost operation identity: %+v", after)
 			}
+			if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("never-started stage was left behind: %v", err)
+			}
 			if next, err := ReadReceipt(root, testOpID2); err != nil || next.State != stateScheduled {
 				t.Fatalf("new operation not scheduled: %+v err=%v", next, err)
 			}
@@ -752,5 +755,17 @@ func TestAtomicWriteLeavesNoTempFiles(t *testing.T) {
 	want := []string{receiptLockFileName, testOpID + ".json"}
 	if len(names) != 2 || names[0] != want[0] || names[1] != want[1] {
 		t.Errorf("receipt root contains %v, want exactly lock and receipt (sorted)", names)
+	}
+}
+
+func TestRequireMountedDataVolumeRefusesUnmountedDSMVolume(t *testing.T) {
+	// Given a DSM-style backup root whose /volumeN does not exist here.
+	// Then creating it is refused instead of synthesizing it on the root filesystem.
+	if err := requireMountedDataVolume("/volume987654/@askdo/upgrade-backups"); err == nil {
+		t.Fatal("unavailable DSM volume accepted")
+	}
+	// Non-DSM paths are unaffected.
+	if err := requireMountedDataVolume("/var/backups/askdo"); err != nil {
+		t.Fatal(err)
 	}
 }

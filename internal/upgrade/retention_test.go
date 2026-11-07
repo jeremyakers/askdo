@@ -93,8 +93,11 @@ func TestHelperSuccessfulActivationRetainsOnlyTwoNewestSuccessfulStages(t *testi
 		if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("old successful stage retained: %s: %v", stage, err)
 		}
-		if _, err := ReadReceipt(f.helper.ReceiptRoot, filepath.Base(stage)); err != nil {
+		pruned, err := ReadReceipt(f.helper.ReceiptRoot, filepath.Base(stage))
+		if err != nil {
 			t.Errorf("retention removed public receipt: %v", err)
+		} else if !strings.Contains(pruned.Detail, "stage removed by retention") {
+			t.Errorf("pruned receipt still implies a retained backup: %+v", pruned)
 		}
 	}
 	for _, stage := range keep {

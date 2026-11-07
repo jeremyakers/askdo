@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -214,6 +215,12 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 		}
 		if root == h.BackupRoot {
 			if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+				// Never synthesize a DSM data-volume backup root beneath an
+				// unmounted /volumeN: that would stage onto the small system
+				// partition this setting exists to protect.
+				if err := requireMountedDataVolume(root); err != nil {
+					return "", err
+				}
 				if err := h.trust(filepath.Dir(root), true); err != nil {
 					return "", err
 				}
@@ -1063,4 +1070,28 @@ func syncDirectory(path string) error {
 	}
 	defer f.Close()
 	return f.Sync()
+}
+
+// dsmVolumePattern matches a Synology data-volume mount point such as /volume1.
+var dsmVolumePattern = regexp.MustCompile(`^volume[0-9]+$`)
+
+// requireMountedDataVolume refuses a backup root under /volumeN unless that
+// volume is a mount point distinct from the root filesystem.
+func requireMountedDataVolume(path string) error {
+	parts := strings.Split(strings.TrimPrefix(filepath.Clean(path), "/"), "/")
+	if len(parts) == 0 || !dsmVolumePattern.MatchString(parts[0]) {
+		return nil
+	}
+	volume := "/" + parts[0]
+	var volumeStat, rootStat syscall.Stat_t
+	if err := syscall.Stat(volume, &volumeStat); err != nil {
+		return fmt.Errorf("upgrade backup volume %s is unavailable: %w", volume, err)
+	}
+	if err := syscall.Stat("/", &rootStat); err != nil {
+		return err
+	}
+	if volumeStat.Dev == rootStat.Dev {
+		return fmt.Errorf("upgrade backup volume %s is not mounted; refusing to create %s on the system partition", volume, path)
+	}
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // failUnchanged is called under the receipt lock only when no live effects were
@@ -76,6 +77,14 @@ func (h Helper) pruneSuccessfulStages(current string) error {
 	for i := 1; i < len(successes); i++ {
 		if err := h.removeStage(successes[i].Stage); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove old successful stage %s: %w", successes[i].Stage, err))
+			continue
+		}
+		// Record the removal only after it succeeded, so the receipt never
+		// points at a backup that retention deleted.
+		pruned := successes[i]
+		pruned.Detail = strings.TrimSpace(pruned.Detail + " (stage removed by retention; backup no longer available)")
+		if err := writeReceipt(h.ReceiptRoot, pruned); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("record pruned stage %s: %w", pruned.ID, err))
 		}
 	}
 	return cleanupErr

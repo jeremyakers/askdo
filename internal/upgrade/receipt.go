@@ -323,6 +323,11 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 			if err := writeReceipt(root, existing); err != nil {
 				return failure(fmt.Errorf("reconcile expired operation %s: %w", otherID, err))
 			}
+			// Nothing live changed, and failed stages are never pruned later:
+			// remove the never-activated stage now so it cannot pile up.
+			if existing.Stage != "" && filepath.IsAbs(existing.Stage) && filepath.Base(existing.Stage) == otherID {
+				_ = os.RemoveAll(existing.Stage)
+			}
 		}
 		if isActiveReceiptState(existing.State) {
 			return failure(fmt.Errorf("active operation %s exists in state %s", otherID, existing.State))

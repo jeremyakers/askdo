@@ -67,11 +67,13 @@ func TestFleetTimestampAdmissionHonorsWaitDeadline(t *testing.T) {
 			Code string `json:"code"`
 		}
 		_ = json.Unmarshal(body, &event)
-		if event.Op != "error" {
-			t.Fatalf("admission answered %s after the gateway stalled past the budget: an expired budget must refuse, never admit", body)
+		// A lookup that consumed the budget is a timeout (exit 124), never
+		// approval_required (exit 1) and never an admission.
+		if event.Op != "wait_timeout" {
+			t.Fatalf("admission answered %s after the gateway stalled past the budget: want wait_timeout", body)
 		}
-		if event.Code != "approval_required" {
-			t.Fatalf("expired fleet window answered %s", body)
+		if state, err := h.daemon.store.GetReservation(context.Background(), uid, req.RequestID); err != nil || state != store.ReservationCancelled {
+			t.Fatalf("timed-out admission left reservation state=%v err=%v", state, err)
 		}
 		if elapsed := time.Since(started); elapsed < budget/2 {
 			t.Fatalf("admission answered in %s, long before the gateway round trip or its deadline could end: the lookup bypassed the request budget", elapsed)

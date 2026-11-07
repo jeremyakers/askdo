@@ -1005,6 +1005,13 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			// by its locally stored expiry; an expired row needs no lookup.
 			if stamp.ExpiresAt.After(time.Now()) {
 				authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
+				if admissionCtx.Err() != nil {
+					// The Fleet lookup ran out the request budget: that is a
+					// timeout, not proof that approval is required.
+					d.cancelRejectedReservation(uid, request.RequestID)
+					_ = writeClient(conn, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+					return
+				}
 				valid = timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
 			}
 		}
