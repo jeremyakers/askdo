@@ -35,6 +35,12 @@ const (
 	defaultUpgradeReceiptRoot = config.UpgradeReceiptRoot
 )
 
+// The oneshot unit may run for the whole operation deadline and then a full
+// rollback, which the deadline expiring can itself trigger; the extra minute
+// covers process start and receipt writes. A shorter systemd timeout would kill
+// the helper mid-rollback.
+var upgradeUnitTimeout = strconv.Itoa(int((upgrade.OperationTimeout + upgrade.RollbackTimeout + time.Minute) / time.Second))
+
 // Hidden root entry point. Main command routing is deliberately separate from
 // the helper so an ordinary user can never select its privileged dependencies.
 var upgradeReadConfig = operator.ReadRootPrivate
@@ -180,7 +186,7 @@ func (m upgradeSystemdManager) Start(ctx context.Context, id, stage, cliDigest s
 	}
 	// --no-block is essential for Type=oneshot: wait-for-completion would
 	// deadlock against the scheduling job's own terminal/quietness gate.
-	args := append([]string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--"}, command...)
+	args := append([]string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=" + upgradeUnitTimeout, "--"}, command...)
 	_, err = m.tools.Run(ctx, upgradeSystemdRun, args...)
 	return err
 }
@@ -816,6 +822,18 @@ func (h *upgradeLocalHost) resumeFailedLegacyStop(ctx context.Context, expected 
 		case <-timer.C:
 		}
 	}
+}
+
+// Halt is only for rollback, on services of the release being abandoned. Stop
+// is bound to a drained process identity and refuses anything else; a crash-looping
+// release has no such process, only a pending restart or a failed state, and a
+// failed unit that hit its start limit would otherwise refuse to start again.
+func (h upgradeLocalHost) Halt(ctx context.Context, name string) error {
+	if _, err := h.tools.Run(ctx, fleetSystemctlTool, "stop", name); err != nil {
+		return err
+	}
+	_, err := h.tools.Run(ctx, fleetSystemctlTool, "reset-failed", name)
+	return err
 }
 
 func (h upgradeLocalHost) Start(ctx context.Context, name string) error {
