@@ -335,7 +335,9 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 			}
 			if removable {
 				existing.Detail = detail + "; stage removed"
-				if err := os.RemoveAll(existing.Stage); err != nil {
+				// Persist the parent directory entry before recording removal,
+				// as removeStage does, so the stage cannot reappear after a crash.
+				if err := os.RemoveAll(existing.Stage); err != nil || syncDirectory(filepath.Dir(existing.Stage)) != nil {
 					existing.Detail = detail + "; stage cleanup failed; inspect stage"
 				}
 				if err := writeReceipt(root, existing); err != nil {
