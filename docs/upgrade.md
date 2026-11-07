@@ -14,10 +14,15 @@ askdo upgrade --release v1.0.0-rc.21
 ```
 
 It downloads and verifies the release, shows its operation, source commit and
-manifest digest, and asks for Telegram approval. Approval is mandatory for every
-upgrade; automatic approval is not used for this operation.
+manifest digest, and submits a small root bootstrap script as a one-file bundle.
+That request follows the host's normal approval policy: AI review (when
+required) and Telegram approval, or risk-based auto-approval at the level you
+have enabled. The script begins with a provenance header naming the release,
+source commit, the official published checksum URL for the exact binary it will
+run, and this document at that commit, so the reviewer can check those facts
+independently (with `webfetch` enabled) instead of trusting the request.
 
-After approval, a captured root bootstrap verifies a root-owned candidate copy
+After approval, the root bootstrap verifies a root-owned candidate copy
 and executes it through a pinned file descriptor with the frozen plan, so path
 replacement cannot change the verified inode. The new helper stages and verifies the
 release again before activation. It drains new work while existing jobs finish,

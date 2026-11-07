@@ -115,16 +115,17 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				flags := flag.NewFlagSet("fake client", flag.ContinueOnError)
 				detach := flags.Bool("detach", false, "")
 				reason := flags.String("reason", "", "")
+				script := flags.String("script", "", "")
 				if err := flags.Parse(args); err != nil {
 					t.Fatal(err)
 				}
 				argv := flags.Args()
-				if len(argv) != 4 || !*detach {
-					t.Fatalf("not a detached captured bootstrap invocation: %q", args)
+				if len(argv) != 2 || !*detach || *script == "" {
+					t.Fatalf("not a detached bootstrap bundle invocation: %q", args)
 				}
-				operation, source = argv[2], argv[3]
-				if want := []string{"/bin/sh", "-s", cliUpgradeID, source}; !reflect.DeepEqual(argv, want) {
-					t.Fatalf("bootstrap argv=%q want=%q", argv, want)
+				operation, source = argv[0], argv[1]
+				if want := []string{cliUpgradeID, source}; !reflect.DeepEqual(argv, want) || *script != filepath.Join(source, upgradeBootstrapFile) {
+					t.Fatalf("bootstrap argv=%q script=%q", argv, *script)
 				}
 				info, err := os.Stat(source)
 				if err != nil || info.Mode().Perm() != 0o700 {
@@ -148,8 +149,8 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 						t.Fatalf("plan digest for %s: %s", name, digest)
 					}
 				}
-				if options.Stdin == nil || options.Interrupt == nil {
-					t.Fatal("upgrade must supply captured plan stdin and stay detached")
+				if options.Stdin != nil || options.Interrupt == nil {
+					t.Fatal("upgrade must submit the bootstrap as a bundle, not captured stdin")
 				}
 				// A user can replace the local artifact before the broker captures
 				// stdin; it must not change the in-memory plan submitted for approval.
@@ -158,7 +159,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				if err := upgrade.WritePlan(source, replacement); err != nil {
 					t.Fatal(err)
 				}
-				captured, err := io.ReadAll(options.Stdin)
+				captured, err := os.ReadFile(*script)
 				capturedPlan, _ := json.Marshal(plan)
 				if err != nil || !bytes.Contains(captured, capturedPlan) || !bytes.Contains(captured, []byte(plan.CLIDigest)) || !bytes.Contains(captured, []byte("/usr/bin/sha256sum")) || !bytes.Contains(captured, []byte("upgrade-helper")) {
 					t.Fatalf("stdin is not the pinned bootstrap and approved plan: %s %v", captured, err)
