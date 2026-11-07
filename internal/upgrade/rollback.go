@@ -31,13 +31,17 @@ type preserved struct {
 	// binary; empty for configuration and databases. Only a binary that still
 	// matches it, or the original, is ever replaced by a rollback.
 	installed string
-	// database marks a SQLite snapshot. Restoring one also removes the WAL and
-	// journal files of the database it replaces: they belong to its content, and
-	// replaying them over an older image would corrupt it.
+	// database marks a SQLite snapshot. Restoring one also moves aside the WAL,
+	// shared-memory and journal files of the database it replaces: they belong
+	// to its content, and replaying them over an older image would corrupt it.
 	database bool
 	mode     os.FileMode
 	uid, gid uint32
 }
+
+// sqliteSidecars are the files SQLite keeps beside a database that belong to
+// its content rather than to its path.
+var sqliteSidecars = []string{"-wal", "-shm", "-journal"}
 
 // linkState is the askdo-config path before activation repaired the multicall
 // link, so a rollback can put back what was there, including nothing.
@@ -231,7 +235,7 @@ func (h Helper) rollback(ctx context.Context, undo *undoLog) error {
 		return err
 	}
 	if undo.installing {
-		if err := restoreInstalled(undo, replace); err != nil {
+		if err := h.restoreInstalled(undo, replace); err != nil {
 			return err
 		}
 	}
@@ -352,9 +356,9 @@ func (h Helper) planRestore(undo *undoLog) ([]preserved, error) {
 
 // restoreInstalled replaces the planned files in order, then the multicall
 // link, which depends on the binaries, last.
-func restoreInstalled(undo *undoLog, replace []preserved) error {
+func (h Helper) restoreInstalled(undo *undoLog, replace []preserved) error {
 	for _, item := range replace {
-		if err := replaceFromSaved(item); err != nil {
+		if err := h.replaceFromSaved(item); err != nil {
 			return &rollbackError{"restore " + filepath.Base(item.saved), err}
 		}
 	}
@@ -398,21 +402,78 @@ func needsRestore(item preserved) (bool, error) {
 	return false, errors.New("changed since this activation installed it; not overwritten")
 }
 
-// replaceFromSaved atomically puts the captured bytes back at item.live. The
-// temporary file is made beside its destination, so the rename never crosses a
-// filesystem, and it is hashed as it is written: a damaged backup replaces
-// nothing.
-func replaceFromSaved(item preserved) error {
+// movedFile is a file renamed out of a restore's way; to is where it is kept.
+type movedFile struct{ from, to string }
+
+// displaced is the set of files moved out of a restore's way into dir. They can
+// be put back until the restore commits, and are discarded with dir after it.
+// Any that cannot be put back exist only in dir, which must then be kept.
+type displaced struct {
+	dir    string
+	rename func(oldpath, newpath string) error
+	moved  []movedFile
+}
+
+// move renames path into dir. A path that does not exist is not an error.
+func (d *displaced) move(path string) error {
+	to := filepath.Join(d.dir, filepath.Base(path))
+	if err := d.rename(path, to); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	d.moved = append(d.moved, movedFile{path, to})
+	return nil
+}
+
+// putBack returns the moved files to where they were, last moved first. A file
+// it cannot return stays recorded, and its error says where it remains.
+func (d *displaced) putBack() error {
+	var err error
+	var stranded []movedFile
+	for i := len(d.moved) - 1; i >= 0; i-- {
+		file := d.moved[i]
+		if putErr := d.rename(file.to, file.from); putErr != nil {
+			stranded = append(stranded, file)
+			err = errors.Join(err, fmt.Errorf("%s was not put back and remains at %s: %w", file.from, file.to, putErr))
+		}
+	}
+	d.moved = stranded
+	return err
+}
+
+func (d *displaced) stranded() bool { return len(d.moved) != 0 }
+
+// discard gives up the moved files: the restore has committed.
+func (d *displaced) discard() { d.moved = nil }
+
+// replaceFromSaved atomically puts the captured bytes and metadata back at
+// item.live. The temporary file is made beside its destination, so the rename
+// never crosses a filesystem, and it is hashed as it is written: a damaged
+// backup replaces nothing. Restoring a database also moves its SQLite sidecars
+// out of the way, because replaying them over the older image would corrupt it,
+// but the move is reversible: they are deleted only after the snapshot is in
+// place, and a restore that fails puts them back, so the database and the
+// committed transactions in its write-ahead log are exactly as they were.
+func (h Helper) replaceFromSaved(item preserved) error {
 	src, err := openRegular(item.saved)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	staging, err := os.MkdirTemp(filepath.Dir(item.live), ".askdo-rollback-*")
+	dir := filepath.Dir(item.live)
+	staging, err := os.MkdirTemp(dir, ".askdo-rollback-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging)
+	aside := displaced{dir: staging, rename: h.rename}
+	defer func() {
+		// A file that could not be put back exists only in staging.
+		if !aside.stranded() {
+			os.RemoveAll(staging)
+		}
+	}()
 	temp := filepath.Join(staging, "restored")
 	sum := sha256.New()
 	if err := copyFrom(io.TeeReader(src, sum), temp, 0); err != nil {
@@ -433,16 +494,18 @@ func replaceFromSaved(item preserved) error {
 		return err
 	}
 	if item.database {
-		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-			if err := os.Remove(item.live + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
+		for _, suffix := range sqliteSidecars {
+			if err := aside.move(item.live + suffix); err != nil {
+				return errors.Join(err, aside.putBack())
 			}
 		}
 	}
-	if err := os.Rename(temp, item.live); err != nil {
-		return err
+	if err := h.rename(temp, item.live); err != nil {
+		return errors.Join(err, aside.putBack())
 	}
-	return syncDirectory(filepath.Dir(item.live))
+	// The snapshot is live. The sidecars belonged to the content it replaced.
+	aside.discard()
+	return syncDirectory(dir)
 }
 
 // linkRestoration reports whether the askdo-config path differs from its

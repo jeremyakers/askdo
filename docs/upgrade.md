@@ -166,15 +166,21 @@ stage's `backup/`, in the same process and under the same operation lock:
 3. **Restore, atomically and in this order.** Each file is written to a hashed
    temporary file beside its destination and renamed into place. First the data,
    but only if a service of the new release was started: the databases, and any
-   configuration file that differs from the backup. Restoring a database also
-   removes its `-wal`, `-shm` and `-journal` files, which belong to the content
-   it replaces. Then `askdo` and `askdo-launch`, with their original permissions
-   and ownership. Last, the `askdo-config` link as it was found: absent, or its
-   previous target.
+   configuration file that differs from the backup. Then `askdo` and
+   `askdo-launch`, with their original permissions and ownership. Last, the
+   `askdo-config` link as it was found: absent, or its previous target.
 4. **Start and verify.** The services that were running are started in their
    original order and verified as a successful activation verifies a release:
    each runs the restored executable (by hash), the broker and gateway answer
    their probes, and every service is observed again afterward.
+
+Restoring a database moves its `-wal`, `-shm` and `-journal` files aside instead
+of deleting them, because replaying them over the older image would corrupt it.
+They are deleted only after the snapshot is in place. If the snapshot cannot be
+put in place they are moved back, leaving the database and the committed
+transactions in its write-ahead log as they were. One that cannot be moved back is
+kept in a `.askdo-rollback-*` directory beside the database, and the activation
+log says where.
 
 Never restored: anything the backup did not capture; a binary that is neither
 the original nor the one the upgrade installed, and a foreign file at

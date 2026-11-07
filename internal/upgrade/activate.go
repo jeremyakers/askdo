@@ -137,6 +137,9 @@ type Helper struct {
 	CheckDirectoryACL func(string) error
 	Now               func() time.Time
 	Wait              func(context.Context) error
+	// Tests substitute Rename to fail the steps that commit or undo a rollback's
+	// restore of a file.
+	Rename func(oldpath, newpath string) error
 }
 
 type activationRecord struct {
@@ -174,6 +177,13 @@ func (h Helper) now() time.Time {
 		return h.Now()
 	}
 	return time.Now()
+}
+
+func (h Helper) rename(oldpath, newpath string) error {
+	if h.Rename != nil {
+		return h.Rename(oldpath, newpath)
+	}
+	return os.Rename(oldpath, newpath)
 }
 
 func (h Helper) wait(ctx context.Context) error {

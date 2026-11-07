@@ -15,6 +15,11 @@ import (
 const (
 	rolledBackDetail     = "; rolled back to previous release; services verified; backup retained at stage/backup"
 	manualRecoveryDetail = "; manual recovery required; backup retained at stage/backup"
+
+	// What the new release leaves beside the jobs database it migrated.
+	migratedJobs = "jobs database migrated by the new release"
+	migratedWAL  = "write-ahead log holding the new release's latest commits"
+	migratedSHM  = "shared-memory index of that write-ahead log"
 )
 
 // newReleaseLive reports whether the live askdo is the release being installed.
@@ -49,9 +54,9 @@ func (f *activationFixture) migrateState(t *testing.T) {
 	}
 	layout := f.host.layout
 	replaceFile(t, layout.Config, "configuration migrated by the new release")
-	replaceFile(t, layout.JobsDB, "jobs database migrated by the new release")
-	for _, sidecar := range []string{layout.JobsDB + "-wal", layout.JobsDB + "-shm"} {
-		if err := os.WriteFile(sidecar, []byte("unmerged write-ahead state of the migrated database"), 0o600); err != nil {
+	replaceFile(t, layout.JobsDB, migratedJobs)
+	for sidecar, content := range map[string]string{layout.JobsDB + "-wal": migratedWAL, layout.JobsDB + "-shm": migratedSHM} {
+		if err := os.WriteFile(sidecar, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -79,10 +84,41 @@ func (f *activationFixture) newReleaseIsUnresponsive(t *testing.T) error {
 	return unresponsive
 }
 
+// rollbackLeftovers lists the restore staging directories found beside any of
+// the files a rollback replaces. A restore that succeeds, or fails with nothing
+// stranded, removes its own.
+func rollbackLeftovers(t *testing.T, f *activationFixture) []string {
+	t.Helper()
+	layout := f.host.layout
+	dirs := map[string]bool{}
+	for _, path := range []string{layout.CLI, layout.Launch, layout.Config, layout.JobsDB, layout.GatewayConfig, layout.GatewayDB} {
+		if path != "" {
+			dirs[filepath.Dir(path)] = true
+		}
+	}
+	var found []string
+	for dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".askdo-rollback-") {
+				found = append(found, filepath.Join(dir, entry.Name()))
+			}
+		}
+	}
+	return found
+}
+
 // assertPreUpgradeState checks the files, the absence of the new release's
-// write-ahead files, and that every service is running.
+// write-ahead files and of any restore staging, and that every service is
+// running.
 func assertPreUpgradeState(t *testing.T, f *activationFixture) {
 	t.Helper()
+	if left := rollbackLeftovers(t, f); len(left) != 0 {
+		t.Fatalf("restore staging left behind: %v", left)
+	}
 	layout := f.host.layout
 	want := map[string]string{layout.CLI: "old cli", layout.Launch: "old helper", layout.Config: "preserved configuration", layout.JobsDB: "old jobs database"}
 	if layout.GatewayConfig != "" {
@@ -621,5 +657,97 @@ func TestHelperActivateInterruptedRollbackIsNotReplayed(t *testing.T) {
 	// Then: nothing is replayed or rolled back from disk.
 	if err == nil || activationReceipt(t, f).State != "unknown" || len(f.host.events) != 0 {
 		t.Fatalf("interrupted rollback: %v receipt=%+v effects=%v", err, activationReceipt(t, f), f.host.events)
+	}
+}
+
+// assertNoStartAfterHalt checks that a rollback which gave up did so after it
+// stopped the failed release and did not start anything afterward.
+func assertNoStartAfterHalt(t *testing.T, f *activationFixture) {
+	t.Helper()
+	halted := false
+	for _, event := range f.host.events {
+		halted = halted || strings.HasPrefix(event, "halt:")
+		if halted && strings.HasPrefix(event, "start:") {
+			t.Fatalf("a service was started after the rollback gave up: %v", f.host.events)
+		}
+	}
+	if !halted {
+		t.Fatalf("the failed release was never stopped: %v", f.host.events)
+	}
+}
+
+func TestHelperActivateRollbackFailedSnapshotRenameLeavesDatabaseAndSidecarsIntact(t *testing.T) {
+	// Given: the new release migrated the jobs database, and its latest commits
+	// exist only in the write-ahead log beside it. Renaming the restored
+	// snapshot into place then fails.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+	f.host.beforeStart = func() { f.migrateState(t) }
+	f.newReleaseIsUnresponsive(t)
+	layout := f.host.layout
+	injected := errors.New("rename failed")
+	f.helper.Rename = func(oldpath, newpath string) error {
+		if newpath == layout.JobsDB {
+			return injected
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	// When
+	err := f.helper.Activate(t.Context(), f.stage)
+	// Then: the rollback reports the failure, and the database is exactly as the
+	// new release left it, every committed transaction still beside it.
+	r := activationReceipt(t, f)
+	if !errors.Is(err, injected) || r.State != "failed" || r.Detail != "verify responsiveness failed; rollback failed: restore jobs.sqlite3"+manualRecoveryDetail {
+		t.Fatalf("snapshot rename failure: %v receipt=%+v", err, r)
+	}
+	for path, want := range map[string]string{layout.JobsDB: migratedJobs, layout.JobsDB + "-wal": migratedWAL, layout.JobsDB + "-shm": migratedSHM} {
+		if data, readErr := os.ReadFile(path); readErr != nil || string(data) != want {
+			t.Fatalf("%s = %q, %v; want %q", path, data, readErr, want)
+		}
+	}
+	if left := rollbackLeftovers(t, f); len(left) != 0 {
+		t.Fatalf("restore staging left behind: %v", left)
+	}
+	assertNoStartAfterHalt(t, f)
+}
+
+func TestHelperActivateRollbackKeepsSidecarsThatCannotBePutBack(t *testing.T) {
+	// Given: the snapshot cannot be renamed into place and, as well, the
+	// write-ahead log cannot be moved back to where it was.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+	f.host.beforeStart = func() { f.migrateState(t) }
+	f.newReleaseIsUnresponsive(t)
+	layout := f.host.layout
+	injected := errors.New("rename failed")
+	f.helper.Rename = func(oldpath, newpath string) error {
+		if newpath == layout.JobsDB || newpath == layout.JobsDB+"-wal" {
+			return injected
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	// When
+	err := f.helper.Activate(t.Context(), f.stage)
+	// Then: the only copy of the log is neither deleted nor lost track of: it is
+	// kept with its bytes and the error says where.
+	left := rollbackLeftovers(t, f)
+	if err == nil || len(left) != 1 {
+		t.Fatalf("stranded log: err=%v staging=%v", err, left)
+	}
+	kept := filepath.Join(left[0], filepath.Base(layout.JobsDB)+"-wal")
+	if data, readErr := os.ReadFile(kept); readErr != nil || string(data) != migratedWAL {
+		t.Fatalf("stranded log %s = %q, %v", kept, data, readErr)
+	}
+	if !strings.Contains(err.Error(), kept) {
+		t.Fatalf("error does not say where the log remains (%s): %v", kept, err)
+	}
+	// What could be put back was, and the database itself was never replaced.
+	for path, want := range map[string]string{layout.JobsDB: migratedJobs, layout.JobsDB + "-shm": migratedSHM} {
+		if data, readErr := os.ReadFile(path); readErr != nil || string(data) != want {
+			t.Fatalf("%s = %q, %v; want %q", path, data, readErr, want)
+		}
+	}
+	if r := activationReceipt(t, f); r.Detail != "verify responsiveness failed; rollback failed: restore jobs.sqlite3"+manualRecoveryDetail {
+		t.Fatalf("receipt: %+v", r)
 	}
 }
