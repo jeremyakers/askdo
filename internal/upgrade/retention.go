@@ -75,14 +75,21 @@ func (h Helper) pruneSuccessfulStages(current string) error {
 	// The just-activated stage is always kept (it is excluded above), whatever
 	// the clock says; timestamps only choose the one other success to retain.
 	for i := 1; i < len(successes); i++ {
-		if err := h.removeStage(successes[i].Stage); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove old successful stage %s: %w", successes[i].Stage, err))
+		// Commit "removal pending" before deleting, so an interrupted prune
+		// never leaves a receipt pointing at a silently deleted backup.
+		pruned := successes[i]
+		original := strings.TrimSpace(pruned.Detail)
+		pruned.Detail = strings.TrimSpace(original + "; stage removal by retention pending")
+		if err := writeReceipt(h.ReceiptRoot, pruned); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("record pruning of %s: %w", pruned.ID, err))
 			continue
 		}
-		// Record the removal only after it succeeded, so the receipt never
-		// points at a backup that retention deleted.
-		pruned := successes[i]
-		pruned.Detail = strings.TrimSpace(pruned.Detail + " (stage removed by retention; backup no longer available)")
+		removeErr := h.removeStage(pruned.Stage)
+		pruned.Detail = strings.TrimSpace(original + "; stage removed by retention; backup no longer available")
+		if removeErr != nil {
+			pruned.Detail = strings.TrimSpace(original + "; stage removal by retention failed; inspect stage")
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove old successful stage %s: %w", pruned.Stage, removeErr))
+		}
 		if err := writeReceipt(h.ReceiptRoot, pruned); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("record pruned stage %s: %w", pruned.ID, err))
 		}

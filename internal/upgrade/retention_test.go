@@ -96,7 +96,7 @@ func TestHelperSuccessfulActivationRetainsOnlyTwoNewestSuccessfulStages(t *testi
 		pruned, err := ReadReceipt(f.helper.ReceiptRoot, filepath.Base(stage))
 		if err != nil {
 			t.Errorf("retention removed public receipt: %v", err)
-		} else if !strings.Contains(pruned.Detail, "stage removed by retention") {
+		} else if !strings.Contains(pruned.Detail, "stage removed by retention") || strings.Contains(pruned.Detail, "pending") {
 			t.Errorf("pruned receipt still implies a retained backup: %+v", pruned)
 		}
 	}

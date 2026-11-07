@@ -385,7 +385,7 @@ func TestNewOperationReconcilesOnlyExpiredScheduledReceipts(t *testing.T) {
 				}
 				return
 			}
-			if after.State != stateFailed || after.Detail != "activation never started before its deadline; no live changes" || after.UpdatedAtUnixMS < now.UnixMilli() {
+			if after.State != stateFailed || after.Detail != "activation never started before its deadline; no live changes; stage removed" || after.UpdatedAtUnixMS < now.UnixMilli() {
 				t.Fatalf("expired scheduled receipt was not reconciled: %+v", after)
 			}
 			if after.ID != before.ID || after.Stage != before.Stage || after.Release != before.Release || after.SourceCommit != before.SourceCommit {

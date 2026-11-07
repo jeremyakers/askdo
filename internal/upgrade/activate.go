@@ -214,13 +214,13 @@ func (h Helper) Schedule(ctx context.Context, id, source string, capturedPlan []
 			return "", errors.New("upgrade roots must be clean absolute paths")
 		}
 		if root == h.BackupRoot {
+			// Never use a DSM data-volume backup root beneath an unmounted
+			// /volumeN, whether or not the directory already exists there:
+			// that would stage onto the small system partition.
+			if err := requireMountedDataVolume(root); err != nil {
+				return "", err
+			}
 			if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
-				// Never synthesize a DSM data-volume backup root beneath an
-				// unmounted /volumeN: that would stage onto the small system
-				// partition this setting exists to protect.
-				if err := requireMountedDataVolume(root); err != nil {
-					return "", err
-				}
 				if err := h.trust(filepath.Dir(root), true); err != nil {
 					return "", err
 				}

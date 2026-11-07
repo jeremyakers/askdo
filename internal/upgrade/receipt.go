@@ -318,15 +318,27 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 		}
 		if existing.State == stateScheduled && scheduledReceiptExpired(existing, now) {
 			existing.State = stateFailed
-			existing.Detail = "activation never started before its deadline; no live changes"
+			const detail = "activation never started before its deadline; no live changes"
+			existing.Detail = detail
 			existing.UpdatedAtUnixMS = now.UnixMilli()
+			// Nothing live changed, and failed stages are never pruned later:
+			// remove the never-activated stage now so it cannot pile up. As in
+			// failUnchanged, commit "cleanup pending" first, then the outcome.
+			removable := existing.Stage != "" && filepath.IsAbs(existing.Stage) && filepath.Base(existing.Stage) == otherID
+			if removable {
+				existing.Detail = detail + "; stage cleanup pending"
+			}
 			if err := writeReceipt(root, existing); err != nil {
 				return failure(fmt.Errorf("reconcile expired operation %s: %w", otherID, err))
 			}
-			// Nothing live changed, and failed stages are never pruned later:
-			// remove the never-activated stage now so it cannot pile up.
-			if existing.Stage != "" && filepath.IsAbs(existing.Stage) && filepath.Base(existing.Stage) == otherID {
-				_ = os.RemoveAll(existing.Stage)
+			if removable {
+				existing.Detail = detail + "; stage removed"
+				if err := os.RemoveAll(existing.Stage); err != nil {
+					existing.Detail = detail + "; stage cleanup failed; inspect stage"
+				}
+				if err := writeReceipt(root, existing); err != nil {
+					return failure(fmt.Errorf("record expired operation %s cleanup: %w", otherID, err))
+				}
 			}
 		}
 		if isActiveReceiptState(existing.State) {
