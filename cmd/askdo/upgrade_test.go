@@ -29,7 +29,12 @@ const cliUpgradeID = "up_12121212121212121212121212121212"
 
 func writeCLIReceipt(t *testing.T, root, id, release, state string) {
 	t.Helper()
-	r := upgrade.Receipt{Version: 1, ID: id, Release: release, SourceCommit: strings.Repeat("ab", 20), State: state, Stage: "/var/backups/askdo/" + id, Detail: "fixture recovery detail", UpdatedAtUnixMS: time.Now().UnixMilli()}
+	writeCLIReceiptDetail(t, root, id, release, state, "fixture recovery detail")
+}
+
+func writeCLIReceiptDetail(t *testing.T, root, id, release, state, detail string) {
+	t.Helper()
+	r := upgrade.Receipt{Version: 1, ID: id, Release: release, SourceCommit: strings.Repeat("ab", 20), State: state, Stage: "/var/backups/askdo/" + id, Detail: detail, UpdatedAtUnixMS: time.Now().UnixMilli()}
 	data, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
@@ -293,6 +298,27 @@ func TestUpgradeCLIReceiptOutcomesAndMissingReceipt(t *testing.T) {
 	}
 }
 
+func TestUpgradeCLIFailedReceiptReportsRollbackOutcomeWithoutDenyingIt(t *testing.T) {
+	for _, detail := range []string{
+		"start askdo.service failed; rolled back to previous release; services verified; backup retained at stage/backup",
+		"install failed; rollback failed: restore askdo; manual recovery required; backup retained at stage/backup",
+	} {
+		t.Run(detail, func(t *testing.T) {
+			// Given: a failed operation whose receipt says what the rollback did.
+			root := t.TempDir()
+			writeCLIReceiptDetail(t, root, cliUpgradeID, "v3.2.1", "failed", detail)
+			var stdout, stderr bytes.Buffer
+			// When
+			code := runUpgradeWith(t.Context(), []string{"--operation", cliUpgradeID}, upgradeCLIOptions{receiptRoot: root}, &stdout, &stderr)
+			// Then: the receipt's own words are shown, with the backup location,
+			// and the client does not claim that no rollback was attempted.
+			if code != 1 || !strings.Contains(stderr.String(), detail) || !strings.Contains(stderr.String(), "/var/backups/askdo/"+cliUpgradeID+"/backup") || strings.Contains(stderr.String(), "No automatic rollback") {
+				t.Fatalf("failed receipt code=%d stderr=%s", code, &stderr)
+			}
+		})
+	}
+}
+
 func TestUpgradeCLINoReceiptPreservesClientFailureCode(t *testing.T) {
 	for _, clientCode := range []int{1, 125, 126} {
 		t.Run(fmt.Sprint(clientCode), func(t *testing.T) {
@@ -397,8 +423,9 @@ func TestUpgradeCLIOperationWatchIsBounded(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		// When
 		code := runUpgradeWith(t.Context(), []string{"--operation", cliUpgradeID}, upgradeCLIOptions{receiptRoot: root}, &stdout, &stderr)
-		// Then: no real twelve-minute wait or background watcher remains.
-		if code != 125 || time.Since(started) != upgrade.OperationTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+		// Then: no real seventeen-minute wait or background watcher remains. The
+		// watch outlasts the deadline by a full rollback and two minutes.
+		if code != 125 || time.Since(started) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
 			t.Fatalf("watch code=%d elapsed=%s stderr=%s", code, time.Since(started), &stderr)
 		}
 	})
@@ -466,7 +493,7 @@ func TestUpgradeCLISlowApprovalPrecedesObservationDeadline(t *testing.T) {
 		// When: activation itself remains scheduled and never reaches a terminal receipt.
 		code := runUpgradeWith(t.Context(), nil, deps, &stdout, &stderr)
 		// Then: pre-dispatch workflow completes; a NEW bounded watch starts afterward.
-		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
 			t.Fatalf("slow approval: client=%v code=%d observation=%s stderr=%s", clientFinished, code, time.Since(scheduledAt), &stderr)
 		}
 	})

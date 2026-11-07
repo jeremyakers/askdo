@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -543,6 +544,34 @@ func TestUpgradeCooperativeStopStillUsesSystemctl(t *testing.T) {
 	expected := upgrade.Unit{MainPID: 101, StartTime: 123}
 	if err := host.Stop(t.Context(), "askdo.service", expected); err != nil || !called {
 		t.Fatalf("cooperative stop changed: %v called=%v", err, called)
+	}
+}
+
+func TestUpgradeHaltStopsThenClearsFailedStateForAnyUnit(t *testing.T) {
+	// Given: a crash-looping unit, which has no main process whose identity
+	// Stop could check, and a systemctl whose stop may fail.
+	for _, stopFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(stopFails), func(t *testing.T) {
+			var calls []string
+			host := upgradeLocalHost{tools: upgradeToolFunc(func(_ context.Context, path string, args ...string) (string, error) {
+				calls = append(calls, path+" "+strings.Join(args, " "))
+				if stopFails && args[0] == "stop" {
+					return "", errors.New("stop failed")
+				}
+				return "", nil
+			}), kill: func(int, syscall.Signal) error { t.Fatal("halt sent a direct signal"); return nil }}
+			// When
+			err := host.Halt(t.Context(), "askdo-gateway.service")
+			// Then: reset-failed follows a successful stop, which a start-limit
+			// failure needs, and never follows a failed one.
+			want := []string{fleetSystemctlTool + " stop askdo-gateway.service", fleetSystemctlTool + " reset-failed askdo-gateway.service"}
+			if stopFails {
+				want = want[:1]
+			}
+			if (err != nil) != stopFails || !reflect.DeepEqual(calls, want) {
+				t.Fatalf("halt: err=%v calls=%q, want %q", err, calls, want)
+			}
+		})
 	}
 }
 

@@ -309,8 +309,9 @@ func TestUpgradeSystemdManagerStartsUniqueIndependentOneShotWithoutWaiting(t *te
 	// When
 	digest := strings.Repeat("ab", 32)
 	err := manager.Start(t.Context(), id, stage, digest)
-	// Then
-	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=660", "--", "/bin/sh", "-c", upgradeActivationScript, "sh", stage, digest, filepath.Join(defaultUpgradeReceiptRoot, "activate-"+id, "askdo")}}}
+	// Then: the unit may run the 10 minute deadline, a 5 minute rollback and a
+	// minute of slack (960s), so systemd never kills the helper mid-rollback.
+	want := []upgradeToolCall{{path: "/usr/bin/systemd-run", args: []string{"--unit=askdo-upgrade-" + id, "--no-block", "--collect", "--property=Type=oneshot", "--property=TimeoutStartSec=960", "--", "/bin/sh", "-c", upgradeActivationScript, "sh", stage, digest, filepath.Join(defaultUpgradeReceiptRoot, "activate-"+id, "askdo")}}}
 	if err != nil || !reflect.DeepEqual(tools.calls, want) {
 		t.Fatalf("manager: %v calls=%+v", err, tools.calls)
 	}
