@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -820,4 +821,91 @@ func TestHelperActivateRollbackRefusesWhatIsReplacedAsTheFailedReleaseStops(t *t
 			assertNoStartAfterHalt(t, f)
 		})
 	}
+}
+
+// rollBackIdenticalBinaries rolls back an upgrade whose release is byte for
+// byte the one already installed, whose files were recorded with the given modes
+// and, unless owner is negative, that owner. The installer makes its files 0755
+// and, as root, root-owned, so the bytes cannot say that anything needs
+// restoring: only the recorded metadata can.
+func rollBackIdenticalBinaries(t *testing.T, cliMode, launchMode os.FileMode, owner int) {
+	t.Helper()
+	f := newActivationFixture(t, false)
+	layout := f.host.layout
+	recorded := map[string]os.FileMode{layout.CLI: cliMode, layout.Launch: launchMode}
+	content := map[string][]byte{}
+	for live, asset := range map[string]string{layout.CLI: f.plan.CLIAsset, layout.Launch: f.plan.HelperAsset} {
+		data, err := os.ReadFile(filepath.Join(f.source, asset))
+		if err != nil {
+			t.Fatal(err)
+		}
+		content[live] = data
+		replaceFile(t, live, string(data))
+		if err := os.Chmod(live, recorded[live]); err != nil {
+			t.Fatal(err)
+		}
+		if owner >= 0 {
+			if err := os.Chown(live, owner, owner); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	f.schedule(t)
+	failure := errors.New("new release does not answer")
+	verifications := 0
+	f.host.beforeVerify = func() {
+		verifications++
+		f.host.verifyErr = nil
+		if verifications > 1 {
+			return
+		}
+		// Only the first probe, of the new release, fails. Prove the install reset
+		// the metadata, or this test would pass without testing anything.
+		for live := range recorded {
+			info, err := os.Stat(live)
+			if err != nil || info.Mode().Perm() != 0o755 || (owner >= 0 && info.Sys().(*syscall.Stat_t).Uid != 0) {
+				t.Fatalf("the install left %s as %v, %v", live, info, err)
+			}
+		}
+		f.host.verifyErr = failure
+	}
+	f.helper.Wait = func(context.Context) error { return errors.New("verification wait ended") }
+	// When
+	err := f.helper.Activate(t.Context(), f.stage)
+	// Then: the bytes were never in question, but the recorded metadata is back.
+	if !errors.Is(err, failure) || verifications != 2 {
+		t.Fatalf("activation: %v after %d verifications", err, verifications)
+	}
+	if r := activationReceipt(t, f); r.State != "failed" || r.Detail != "verify responsiveness failed"+rolledBackDetail {
+		t.Fatalf("receipt: %+v", r)
+	}
+	for live, mode := range recorded {
+		info, statErr := os.Stat(live)
+		data, readErr := os.ReadFile(live)
+		if statErr != nil || readErr != nil || !bytes.Equal(data, content[live]) {
+			t.Fatalf("%s: %v %v", live, statErr, readErr)
+		}
+		if info.Mode().Perm() != mode {
+			t.Fatalf("%s mode = %v, want the recorded %v", live, info.Mode().Perm(), mode)
+		}
+		if stat := info.Sys().(*syscall.Stat_t); owner >= 0 && (int(stat.Uid) != owner || int(stat.Gid) != owner) {
+			t.Fatalf("%s owner = %d:%d, want the recorded %d:%d", live, stat.Uid, stat.Gid, owner, owner)
+		}
+	}
+	if left := rollbackLeftovers(t, f); len(left) != 0 {
+		t.Fatalf("restore staging left behind: %v", left)
+	}
+}
+
+func TestHelperActivateRollbackRestoresModeOfIdenticalBinaries(t *testing.T) {
+	// Only the mode differs: the installer's 0755 against the recorded modes.
+	rollBackIdenticalBinaries(t, 0o700, 0o750, -1)
+}
+
+func TestHelperActivateRollbackRestoresOwnerOfIdenticalBinaries(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("ownership: run this test in a disposable rootless container")
+	}
+	// Only the owner differs: the recorded mode is the installer's own 0755.
+	rollBackIdenticalBinaries(t, 0o755, 0o755, 65534)
 }

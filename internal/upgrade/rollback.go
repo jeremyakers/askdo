@@ -21,6 +21,27 @@ import (
 // watch) must therefore allow OperationTimeout plus RollbackTimeout.
 const RollbackTimeout = 5 * time.Minute
 
+// fileMeta is the metadata a restore puts back with a file's bytes.
+type fileMeta struct {
+	mode     os.FileMode
+	uid, gid uint32
+}
+
+func metaOf(info os.FileInfo) fileMeta {
+	meta := fileMeta{mode: info.Mode().Perm()}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		meta.uid, meta.gid = stat.Uid, stat.Gid
+	}
+	return meta
+}
+
+// matches reports whether m is already what a restore of recorded would set:
+// the recorded mode and, where a restore can set it (only root can chown), the
+// recorded owner.
+func (m fileMeta) matches(recorded fileMeta) bool {
+	return m.mode == recorded.mode && (os.Geteuid() != 0 || (m.uid == recorded.uid && m.gid == recorded.gid))
+}
+
 // preserved is one live file captured while its services were stopped. The 0600
 // backup copy cannot carry the original permissions and ownership, so they are
 // recorded here with the digest that proves the copy is still the one captured.
@@ -35,8 +56,7 @@ type preserved struct {
 	// shared-memory and journal files of the database it replaces: they belong
 	// to its content, and replaying them over an older image would corrupt it.
 	database bool
-	mode     os.FileMode
-	uid, gid uint32
+	fileMeta // of the live file when it was captured
 }
 
 // sqliteSidecars are the files SQLite keeps beside a database that belong to
@@ -89,11 +109,7 @@ func (e *rollbackError) Error() string { return "rollback " + e.step + ": " + e.
 func (e *rollbackError) Unwrap() error { return e.err }
 
 func identify(info os.FileInfo, live, saved string) preserved {
-	item := preserved{live: live, saved: saved, mode: info.Mode().Perm()}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		item.uid, item.gid = stat.Uid, stat.Gid
-	}
-	return item
+	return preserved{live: live, saved: saved, fileMeta: metaOf(info)}
 }
 
 // preserveFile copies live into the backup and records what a rollback needs to
@@ -162,19 +178,30 @@ func captureLink(path string) (linkState, error) {
 	return state, nil
 }
 
-// fileDigest hashes a regular, nonsymlink file. It fails with os.ErrNotExist for
-// an absent path and with another error for anything that is not a regular file.
-func fileDigest(path string) (string, error) {
+// inspectFile hashes a regular, nonsymlink file and reads its metadata through
+// one descriptor, so both describe the same file. It fails with os.ErrNotExist
+// for an absent path and with another error for anything that is not a regular
+// file.
+func inspectFile(path string) (string, fileMeta, error) {
 	f, err := openRegular(path)
 	if err != nil {
-		return "", err
+		return "", fileMeta{}, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fileMeta{}, err
+	}
 	sum := sha256.New()
 	if _, err := io.Copy(sum, f); err != nil {
-		return "", err
+		return "", fileMeta{}, err
 	}
-	return hex.EncodeToString(sum.Sum(nil)), nil
+	return hex.EncodeToString(sum.Sum(nil)), metaOf(info), nil
+}
+
+func fileDigest(path string) (string, error) {
+	digest, _, err := inspectFile(path)
+	return digest, err
 }
 
 func syncRegular(path string) error {
@@ -392,20 +419,22 @@ func verifySaved(item preserved) error {
 }
 
 // needsRestore decides, from the live file alone, whether a rollback replaces
-// it. A database is always replaced. Anything else is left alone while it still
-// matches the backup, and a binary is replaced only if it is the one activation
-// installed: a file someone else put there is never overwritten.
+// it. A database is always replaced. Anything else is left alone only while its
+// bytes and its recorded metadata both match the backup: installing identical
+// bytes still resets the mode and owner. A file whose bytes differ is replaced
+// only if it is the one activation installed: a file someone else put there is
+// never overwritten.
 func needsRestore(item preserved) (bool, error) {
 	if item.database {
 		return true, nil
 	}
-	current, err := fileDigest(item.live)
+	current, meta, err := inspectFile(item.live)
 	absent := errors.Is(err, os.ErrNotExist)
 	switch {
 	case err != nil && !absent:
 		return false, err
 	case !absent && current == item.digest:
-		return false, nil
+		return !meta.matches(item.fileMeta), nil
 	case item.installed == "" || absent || current == item.installed:
 		return true, nil
 	}

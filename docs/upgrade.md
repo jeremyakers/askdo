@@ -180,7 +180,10 @@ once nothing is running, and the restore follows what they find then: a
 configuration file or database it rewrote on its way out is put back, and a
 binary that was replaced in the meantime by something the upgrade did not
 install is refused (step `recheck <file>`) before any file is touched, leaving
-the services stopped.
+the services stopped. A file is left alone only while its bytes and its recorded
+permissions (and, as root, its owner and group) match the backup, so a release
+whose bytes are identical but that was installed with other permissions is
+restored too.
 
 Restoring a database moves its `-wal`, `-shm` and `-journal` files aside instead
 of deleting them, because replaying them over the older image would corrupt it.
