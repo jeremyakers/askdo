@@ -13,7 +13,7 @@ func TestShellCommandPreservesArgumentBoundaries(t *testing.T) {
 		return []byte("root:x:0:0:Root:/root:/bin/sh\n"), nil
 	}
 	t.Cleanup(func() { shellPasswd = original })
-	argv, _, err := shellCommand(context.Background(), "", []string{"printf", `%s|`, "a b", "x;y", "it's", "$0"}, false)
+	argv, _, err := shellCommand(context.Background(), "", []string{"printf", `%s|`, "a b", "x;y", "it's", "$0", "", "l1\nl2", "é"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestShellCommandPreservesArgumentBoundaries(t *testing.T) {
 		t.Fatalf("argv=%q err=%v", argv, err)
 	}
 	// Then each argument arrives intact, as with sudo -s, and $VAR still expands.
-	if got := string(out); got != "a b|x;y|it's|/bin/sh|" {
+	if got := string(out); got != "a b|x;y|it's|/bin/sh||l1\nl2|é|" {
 		t.Fatalf("shell output=%q argv=%q", got, argv)
 	}
 }

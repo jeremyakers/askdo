@@ -14,7 +14,7 @@ func TestNewOperationCleansStaleLaunchDirectories(t *testing.T) {
 		t.Skip("root ownership: run this test in a disposable rootless container")
 	}
 	for _, prefix := range []string{"bootstrap-", "activate-"} {
-		for _, state := range []string{"absent", stateSucceeded, stateFailed, "expired", "old directory", "live scheduled"} {
+		for _, state := range []string{"absent", "absent old", stateSucceeded, stateFailed, "expired", "old directory", "live scheduled"} {
 			t.Run(prefix+state, func(t *testing.T) {
 				root := t.TempDir()
 				stale := filepath.Join(root, prefix+testOpID2)
@@ -27,7 +27,7 @@ func TestNewOperationCleansStaleLaunchDirectories(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if state != "absent" {
+				if state != "absent" && state != "absent old" {
 					receiptState := state
 					if state == "expired" || state == "old directory" || state == "live scheduled" {
 						receiptState = stateScheduled
@@ -46,7 +46,7 @@ func TestNewOperationCleansStaleLaunchDirectories(t *testing.T) {
 				if err := os.Chtimes(live, old, old); err != nil {
 					t.Fatal(err)
 				}
-				if state == "old directory" {
+				if state == "old directory" || state == "absent old" {
 					if err := os.Chtimes(stale, old, old); err != nil {
 						t.Fatal(err)
 					}
@@ -64,9 +64,11 @@ func TestNewOperationCleansStaleLaunchDirectories(t *testing.T) {
 					unlock()
 				}
 				_, statErr := os.Lstat(stale)
-				if state == "live scheduled" {
+				// A fresh receiptless directory may belong to a concurrent
+				// scheduler that has not written its receipt yet.
+				if state == "live scheduled" || state == "absent" {
 					if statErr != nil {
-						t.Fatalf("live scheduled candidate removed: %v", statErr)
+						t.Fatalf("live candidate (%s) removed: %v", state, statErr)
 					}
 				} else if !errors.Is(statErr, os.ErrNotExist) {
 					t.Fatalf("stale launch directory retained: %v", statErr)

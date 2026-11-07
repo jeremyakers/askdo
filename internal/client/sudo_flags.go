@@ -92,9 +92,18 @@ func shellCommand(ctx context.Context, target string, args []string, login bool)
 func shellJoin(args []string) string {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
+		if arg == "" {
+			quoted[i] = "''"
+			continue
+		}
 		var b strings.Builder
 		for j := 0; j < len(arg); j++ {
 			c := arg[j]
+			if c == '\n' {
+				// Backslash-newline is a line continuation; single-quote it.
+				b.WriteString("'\n'")
+				continue
+			}
 			if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '$' {
 				b.WriteByte(c)
 				continue
