@@ -221,12 +221,12 @@ func (h Helper) rollBackActivation(update func(state, detail string) error, undo
 // captured, and refuses rather than overwrite a binary or link that is no
 // longer what activation installed. Everything that can be checked read-only is
 // checked before the first service is stopped: a rollback that cannot finish
-// must not take the host down.
+// must not take the host down. That check only decides whether to proceed. The
+// abandoned release can write until it exits, so what is restored is decided
+// again, by restoreInstalled, once nothing is running.
 func (h Helper) rollback(ctx context.Context, undo *undoLog) error {
-	var replace []preserved
 	if undo.installing {
-		var err error
-		if replace, err = h.planRestore(undo); err != nil {
+		if _, err := h.planRestore(undo, "restore"); err != nil {
 			return err
 		}
 	}
@@ -235,7 +235,7 @@ func (h Helper) rollback(ctx context.Context, undo *undoLog) error {
 		return err
 	}
 	if undo.installing {
-		if err := h.restoreInstalled(undo, replace); err != nil {
+		if err := h.restoreInstalled(undo); err != nil {
 			return err
 		}
 	}
@@ -317,8 +317,9 @@ func (h Helper) settleServices(ctx context.Context, undo *undoLog) (map[string]b
 // must still be what activation made. The result is in restore order: data
 // first, because until the binaries flip a failure leaves files the new release
 // can start from, whereas old binaries over data the new release migrated can
-// start nowhere.
-func (h Helper) planRestore(undo *undoLog) ([]preserved, error) {
+// start nowhere. A refusal is named for step: "restore" while the check precedes
+// the services stopping, "recheck" when it repeats after they stopped.
+func (h Helper) planRestore(undo *undoLog, step string) ([]preserved, error) {
 	if err := h.trust(undo.backup, false); err != nil {
 		return nil, &rollbackError{"backup directory", err}
 	}
@@ -342,21 +343,30 @@ func (h Helper) planRestore(undo *undoLog) ([]preserved, error) {
 			err = verifySaved(item)
 		}
 		if err != nil {
-			return nil, &rollbackError{"restore " + filepath.Base(item.saved), err}
+			return nil, &rollbackError{step + " " + filepath.Base(item.saved), err}
 		}
 		if needed {
 			replace = append(replace, item)
 		}
 	}
 	if _, _, err := linkRestoration(configLinkPath(undo.layout.CLI), undo.link, filepath.Base(undo.layout.CLI)); err != nil {
-		return nil, &rollbackError{"restore askdo-config link", err}
+		return nil, &rollbackError{step + " askdo-config link", err}
 	}
 	return replace, nil
 }
 
-// restoreInstalled replaces the planned files in order, then the multicall
-// link, which depends on the binaries, last.
-func (h Helper) restoreInstalled(undo *undoLog, replace []preserved) error {
+// restoreInstalled replaces what the rollback puts back, in order, then the
+// multicall link, which depends on the binaries, last. It decides what to
+// replace here, after the services stopped, and never from the check made
+// before they did: the abandoned release can rewrite its configuration or
+// database until it exits, and a file may have changed to something that is not
+// the activation's to overwrite. A file rewritten since is replaced, and one
+// that is no longer safe to replace is refused, before any file is touched.
+func (h Helper) restoreInstalled(undo *undoLog) error {
+	replace, err := h.planRestore(undo, "recheck")
+	if err != nil {
+		return err
+	}
 	for _, item := range replace {
 		if err := h.replaceFromSaved(item); err != nil {
 			return &rollbackError{"restore " + filepath.Base(item.saved), err}

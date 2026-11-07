@@ -174,6 +174,14 @@ stage's `backup/`, in the same process and under the same operation lock:
    each runs the restored executable (by hash), the broker and gateway answer
    their probes, and every service is observed again afterward.
 
+What step 3 restores is decided after the services stop, not before. The release
+being abandoned can write until it exits, so the checks of step 1 are made again
+once nothing is running, and the restore follows what they find then: a
+configuration file or database it rewrote on its way out is put back, and a
+binary that was replaced in the meantime by something the upgrade did not
+install is refused (step `recheck <file>`) before any file is touched, leaving
+the services stopped.
+
 Restoring a database moves its `-wal`, `-shm` and `-journal` files aside instead
 of deleting them, because replaying them over the older image would corrupt it.
 They are deleted only after the snapshot is in place. If the snapshot cannot be
@@ -201,8 +209,9 @@ kept. The detail is one of:
 - `<phase> failed; rollback failed: <step>; manual recovery required; backup retained at stage/backup`
 
 `<phase>` is the activation step that failed, such as `start askdo.service` or
-`verify responsiveness`; `<step>` is the rollback step, such as `restore askdo`
-or `stop askdo.service`. Receipts carry no error text; the cause is in the
+`verify responsiveness`; `<step>` is the rollback step, such as `restore askdo`,
+`recheck askdo` (a file changed after the services stopped) or
+`stop askdo.service`. Receipts carry no error text; the cause is in the
 activation log. After `rollback failed`, recover manually from `<stage>/backup/`.
 
 Rollback applies only while the helper that observed the failure is alive. If the

@@ -43,6 +43,7 @@ type activationHost struct {
 	legacy          map[string]bool
 	beforeQuiet     func()
 	beforeStopCheck func(string)
+	afterHalt       func(string)
 }
 
 func (h *activationHost) Layout(context.Context) (Layout, error) { return h.layout, nil }
@@ -118,6 +119,9 @@ func (h *activationHost) Halt(_ context.Context, name string) error {
 		return h.haltErr
 	}
 	h.units[name] = Unit{ActiveState: "inactive", ControlGroup: "/system.slice/" + name}
+	if h.afterHalt != nil {
+		h.afterHalt(name) // the stopped release's last writes land as it exits.
+	}
 	return nil
 }
 func (h *activationHost) Start(_ context.Context, name string) error {

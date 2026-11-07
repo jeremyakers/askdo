@@ -751,3 +751,73 @@ func TestHelperActivateRollbackKeepsSidecarsThatCannotBePutBack(t *testing.T) {
 		t.Fatalf("receipt: %+v", r)
 	}
 }
+
+func TestHelperActivateRollbackRestoresFileRewrittenAsTheFailedReleaseStops(t *testing.T) {
+	// Given: the failed release has not touched its configuration when the
+	// rollback first checks it, then rewrites it as it exits.
+	f := newActivationFixture(t, false)
+	f.schedule(t)
+	unresponsive := f.newReleaseIsUnresponsive(t)
+	f.host.afterHalt = func(string) {
+		replaceFile(t, f.host.layout.Config, "configuration rewritten as the release exits")
+	}
+	// When
+	err := f.helper.Activate(t.Context(), f.stage)
+	// Then: what the check found is stale, so the rewritten file is replaced and
+	// the previous release does not start on the failed release's configuration.
+	if !errors.Is(err, unresponsive) {
+		t.Fatalf("cause lost: %v", err)
+	}
+	assertPreUpgradeState(t, f)
+	if r := activationReceipt(t, f); r.State != "failed" || r.Detail != "verify responsiveness failed"+rolledBackDetail {
+		t.Fatalf("receipt: %+v", r)
+	}
+}
+
+func TestHelperActivateRollbackRefusesWhatIsReplacedAsTheFailedReleaseStops(t *testing.T) {
+	for _, tc := range []struct {
+		name, step string
+		path       func(Layout) string
+	}{
+		{"launcher", "recheck askdo-launch", func(l Layout) string { return l.Launch }},
+		{"multicall link", "recheck askdo-config link", func(l Layout) string { return configLinkPath(l.CLI) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given: the new release migrated its state and, after the rollback's
+			// first check, something the activation did not install takes the
+			// place of what it did.
+			f := newActivationFixture(t, false)
+			f.schedule(t)
+			f.host.beforeStart = func() { f.migrateState(t) }
+			f.newReleaseIsUnresponsive(t)
+			layout := f.host.layout
+			foreign := tc.path(layout)
+			f.host.afterHalt = func(string) {
+				if err := os.Remove(foreign); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(foreign, []byte("someone else's file"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// When
+			err := f.helper.Activate(t.Context(), f.stage)
+			// Then: the second check refuses, by name, before replacing anything:
+			// the foreign file is untouched, nothing else was restored, and
+			// nothing started.
+			r := activationReceipt(t, f)
+			if err == nil || r.State != "failed" || r.Detail != "verify responsiveness failed; rollback failed: "+tc.step+manualRecoveryDetail {
+				t.Fatalf("replaced %s: %v receipt=%+v", tc.name, err, r)
+			}
+			for path, want := range map[string]string{foreign: "someone else's file", layout.Config: "configuration migrated by the new release", layout.JobsDB: migratedJobs} {
+				if data, readErr := os.ReadFile(path); readErr != nil || string(data) != want {
+					t.Fatalf("%s = %q, %v; want %q", path, data, readErr, want)
+				}
+			}
+			if !f.newReleaseLive(t) {
+				t.Fatal("askdo was restored although the rollback refused")
+			}
+			assertNoStartAfterHalt(t, f)
+		})
+	}
+}
