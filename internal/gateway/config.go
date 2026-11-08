@@ -30,6 +30,9 @@ type Config struct {
 	Profiles       []config.ModelConfig `json:"profiles"`
 	Bots           []BotConfig          `json:"bots"`
 	Channels       []ChannelConfig      `json:"channels"`
+	// ReviewerWebfetchEnabled, when present, overrides every fleet host's
+	// review.webfetch_enabled; omit it to leave the choice to each host.
+	ReviewerWebfetchEnabled *bool `json:"reviewer_webfetch_enabled,omitempty"`
 }
 
 type BotConfig struct {

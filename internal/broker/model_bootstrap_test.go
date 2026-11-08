@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/jeremyakers/askdo/internal/fleetclient"
+	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"os"
 	"strings"
 	"testing"
@@ -142,6 +144,12 @@ func TestBootstrapProjectsWebfetchEnabled(t *testing.T) {
 	h.daemon.cfg.Review.WebfetchEnabled = true
 	if boot := job.bootstrap(); !boot.ConfigProjection.Limits.WebfetchEnabled {
 		t.Fatal("webfetch_enabled was not projected to the worker limits")
+	}
+	// A signed gateway policy overrides the host setting in the projection.
+	no := false
+	job.fleet = &fleetJob{selection: fleetclient.Selection{Catalog: fleetproto.Catalog{ReviewerWebfetchEnabled: &no}}}
+	if boot := job.bootstrap(); boot.ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("gateway webfetch policy did not override the host setting")
 	}
 }
 

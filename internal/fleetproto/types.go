@@ -107,6 +107,10 @@ type Catalog struct {
 	Profiles     []ProfileMetadata `json:"profiles"`
 	Route        RouteSnapshot     `json:"route"`
 	ExpiresAt    int64             `json:"expires_at"`
+	// ReviewerWebfetchEnabled is the gateway's fleet-wide webfetch policy.
+	// Absent (nil) from older gateways or when unconfigured, in which case
+	// the host's own review.webfetch_enabled applies.
+	ReviewerWebfetchEnabled *bool `json:"reviewer_webfetch_enabled,omitempty"`
 }
 
 type ReviewReport = proto.ReviewReport

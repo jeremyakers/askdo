@@ -511,3 +511,39 @@ func TestFleetRegistrySurvivesRealPipeJSON(t *testing.T) {
 		t.Fatalf("real pipe registry rejected: %v", err)
 	}
 }
+
+func TestFleetWebfetchPolicyPrecedence(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name    string
+		host    bool
+		gateway *bool
+		want    bool
+	}{
+		{"absent_host_off", false, nil, false},
+		{"absent_host_on", true, nil, true},
+		{"gateway_on_overrides_host_off", false, &yes, true},
+		{"gateway_off_overrides_host_on", true, &no, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j, r := fleetTurnFixture()
+			j.daemon.cfg.Review.WebfetchEnabled = tc.host
+			j.fleet.selection.Catalog.ReviewerWebfetchEnabled = tc.gateway
+			if got := j.webfetchEnabled(); got != tc.want {
+				t.Fatalf("effective=%v want %v", got, tc.want)
+			}
+			// Tool lists must agree with the effective value, and only it.
+			r.Request.Tools = reviewer.DefinitionsWithWebfetch(tc.want)
+			if _, err := j.fleetTurn(r); err != nil {
+				t.Fatalf("matching tool list rejected: %v", err)
+			}
+			j, r = fleetTurnFixture()
+			j.daemon.cfg.Review.WebfetchEnabled = tc.host
+			j.fleet.selection.Catalog.ReviewerWebfetchEnabled = tc.gateway
+			r.Request.Tools = reviewer.DefinitionsWithWebfetch(!tc.want)
+			if _, err := j.fleetTurn(r); err == nil {
+				t.Fatal("tool list disagreeing with effective policy accepted")
+			}
+		})
+	}
+}

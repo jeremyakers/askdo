@@ -339,6 +339,14 @@ approve, notify, or execute anything.
 
 ### Optional `webfetch`
 
+In fleet mode the gateway can set this for every host: the gateway config's
+optional `reviewer_webfetch_enabled` (boolean) is carried in the signed
+catalog and, when present, **overrides** the host's `review.webfetch_enabled`
+in either direction. When it is absent (older gateway, or not configured) and
+for standalone hosts, the host's own `review.webfetch_enabled` applies. The
+effective value is read once per review from the catalog the host fetched for
+it. Fetches still run in the host's worker, never through the gateway.
+
 With `review.webfetch_enabled: true`, the reviewer worker can fetch one
 model-chosen public HTTP(S) `url` (≤ 4096 bytes) per call. It returns
 `status: "ok"`, `final_url`, `http_status`, and UTF-8 `content` (≤ 2 MiB

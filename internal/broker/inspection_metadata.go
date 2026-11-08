@@ -41,6 +41,18 @@ func (j *jobRuntime) inspectionCapabilities() proto.InspectionCapabilities {
 	return proto.InspectionCapabilities{HashPathEnabled: c.HashPathEnabled, ServiceStatusEnabled: c.ServiceStatusEnabled, SudoPolicyEnabled: c.SudoPolicyEnabled}
 }
 
+// webfetchEnabled is the review's effective webfetch opt-in: the gateway's
+// signed catalog value when a fleet review carries one, else the host's own
+// review.webfetch_enabled.
+func (j *jobRuntime) webfetchEnabled() bool {
+	if j.fleet != nil {
+		if v := j.fleet.selection.Catalog.ReviewerWebfetchEnabled; v != nil {
+			return *v
+		}
+	}
+	return j.configuration().Review.WebfetchEnabled
+}
+
 func metadataOperation(op string) bool {
 	switch op {
 	case "inspection_scope", "hash_path", "service_status", "sudo_policy":
