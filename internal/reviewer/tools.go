@@ -544,6 +544,11 @@ func (e *ToolExecutor) webfetch(ctx context.Context, rawURL string) (any, error)
 	if fetch == nil {
 		fetch = fetchReviewURL
 	}
+	// Check the shared budget first, so calls past it cost no network time.
+	remaining := webfetchReviewBudget - e.webfetchUsed
+	if remaining < 1024 {
+		return nil, &fetchToolError{category: "review_fetch_budget_exhausted"}
+	}
 	result, err := fetch(ctx, rawURL)
 	if err != nil {
 		// Replace the fetch error entirely: its text can embed URL
@@ -551,13 +556,9 @@ func (e *ToolExecutor) webfetch(ctx context.Context, rawURL string) (any, error)
 		// crosses to the model.
 		return nil, &fetchToolError{category: fetchErrorCategory(err)}
 	}
-	remaining := webfetchReviewBudget - e.webfetchUsed
-	if remaining < 1024 {
-		return nil, &fetchToolError{category: "review_fetch_budget_exhausted"}
-	}
 	limit := min(webfetchEncodedMax, remaining)
 	content, truncated := truncateUTF8(fleetSafeText(result.Content), webfetchContentMax)
-	out := webfetchToolResult{Status: "ok", FinalURL: result.FinalURL, HTTPStatus: result.Status, Content: content, Truncated: truncated}
+	out := webfetchToolResult{Status: "ok", FinalURL: fleetSafeText(result.FinalURL), HTTPStatus: result.Status, Content: content, Truncated: truncated}
 	// Shrink until the encoded result fits; each pass cuts in proportion to
 	// the overshoot, so heavily escaped content converges in a few passes.
 	for {

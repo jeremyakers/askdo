@@ -78,7 +78,7 @@ func TestWebfetchControlCharactersAreFleetSafe(t *testing.T) {
 	boot.ConfigProjection.Limits.WebfetchEnabled = true
 	executor := NewToolExecutor(boot, noBroker{})
 	executor.Fetch = func(context.Context, string) (FetchResult, error) {
-		return FetchResult{FinalURL: "https://example.com/", Status: 200, Content: "a\x7fb\u0080c\r\nd\te"}, nil
+		return FetchResult{FinalURL: "https://example.com/?q=\u0080", Status: 200, Content: "a\x7fb\u0080c\r\nd\te"}, nil
 	}
 	result, _, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"https://example.com/"}`)})
 	if err != nil || result.IsError || !fleetproto.ValidMessageContent(result.Content) {
@@ -97,10 +97,12 @@ func TestWebfetchResultsShareOneReviewBudget(t *testing.T) {
 	boot := toolBootstrap()
 	boot.ConfigProjection.Limits.WebfetchEnabled = true
 	executor := NewToolExecutor(boot, noBroker{})
+	fetches := 0
 	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		fetches++
 		return FetchResult{FinalURL: "https://example.com/", Status: 200, Content: strings.Repeat(`<p class="x">\\</p>`, 20000)}, nil
 	}
-	total, exhausted := 0, false
+	total, exhausted, refused := 0, false, 0
 	for i := 0; i < 10; i++ {
 		result, _, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"https://example.com/"}`)})
 		if err != nil {
@@ -108,9 +110,14 @@ func TestWebfetchResultsShareOneReviewBudget(t *testing.T) {
 		}
 		if strings.Contains(result.Content, "review_fetch_budget_exhausted") {
 			exhausted = true
+			refused++
 			continue
 		}
 		total += len(result.Content)
+	}
+	// Calls past the budget are refused without fetching.
+	if fetches != 10-refused {
+		t.Fatalf("fetched %d times for %d results", fetches, 10-refused)
 	}
 	if !exhausted || total > webfetchReviewBudget {
 		t.Fatalf("total encoded=%d budget=%d exhausted=%v", total, webfetchReviewBudget, exhausted)
