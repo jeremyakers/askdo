@@ -70,8 +70,10 @@ type Config struct {
 	Limits           LimitsConfig     `json:"limits"`
 	Telegram         TelegramConfig   `json:"telegram"`
 	Fleet            *FleetConfig     `json:"fleet,omitempty"`
-	Warnings         []string         `json:"-"`
-	present          configPresence
+	// FleetUpgrade is the host's opt-out of gateway-pushed upgrades (see fleet_upgrade.go).
+	FleetUpgrade *FleetUpgradeConfig `json:"fleet_upgrade,omitempty"`
+	Warnings     []string            `json:"-"`
+	present      configPresence
 }
 
 // MarshalJSON preserves the direct document unchanged, but omits its forbidden
