@@ -171,9 +171,12 @@ addressed to the asking host:
 It is omitted when there is no offer, so such a catalog is byte for byte what a
 gateway without the member signs. Its members are optional on the wire as well: an
 offer a host cannot act on is ignored and is never a reason to refuse the catalog,
-and with it every review. The gateway sends it **only to a host that has reported
-that it applies pushed upgrades**, so a host built before the member existed, which
-never reports, never receives it and keeps working unchanged. Hosts built with
+and with it every review. The gateway sends it **only to the host it has assigned
+the offer to, which it does only on the report of a host that says it is ready for
+one**, so a host built before the member existed, which never reports, never
+receives it and keeps working unchanged. The catalog is read by more than the
+upgrade agent (the broker reads it for every job it reviews, and the activation's
+post-upgrade probe reads it too), so reading it never assigns the offer. Hosts built with
 unknown-field tolerance (see [unknown fields on the
 wire](architecture.md#unknown-fields-on-the-wire)) would ignore it in any case.
 
@@ -182,26 +185,32 @@ authenticated like every host request by its own credential; nothing in the body
 can name another host.
 
 ```json
-{"version":1,"hostname":"nas-01","release":"v1.0.0","auto_upgrade":true,
+{"version":1,"hostname":"nas-01","release":"v1.0.0","auto_upgrade":true,"ready":true,
  "upgrade":{"operation":"up_…","release":"v1.0.1","state":"failed",
             "outcome":"rolled_back","detail":"…","updated_at":1783900000}}
 ```
 
-`release` is the release the binary was built from (absent for any other build),
-`auto_upgrade` whether the host will act on an offer, and `upgrade` the latest
-upgrade receipt (or a `refused` result when the host declined an offer before it
-made one). It reports something and asks for nothing, so it is a report under the
-unknown-field rule: a field this gateway does not define is ignored. It is bounded
-to 8 KiB, its text is reduced to bounded printable ASCII before it is kept or
-shown, and the answer, `{"version":1}`, carries nothing a host acts on and is not
-signed. A gateway from before the endpoint answers with an ordinary failure, which
-the host ignores until its next report.
+Only `version` is required; an absent flag means no. `release` is the release the
+binary was built from (absent for any other build), `auto_upgrade` whether the host
+applies pushed upgrades (not opted out, and it can compare releases), `ready`
+whether it could take one right now (it applies them and none is running on it),
+and `upgrade` the latest upgrade receipt (or a `refused` result when the host
+declined an offer before it made one). A report describes the host and asks for
+nothing, so it is a report under the unknown-field rule: a field this gateway does
+not define is ignored. It is bounded to 8 KiB, its text is reduced to bounded
+printable ASCII before it is kept or shown, and the answer, `{"version":1}`, carries
+nothing a host acts on and is not signed. A gateway from before the endpoint
+answers with an ordinary failure, which the host ignores until its next report.
 
-**Rollout.** The offer goes to one host at a time: the first to ask that applies
-pushed upgrades and is older than the target, and it stays with that host until it
-reports that it runs the target or how its upgrade failed. A result for the target
-that is a failure, a rollback, unknown or a refusal pauses the rollout for every
-host; so does a holder that reports no outcome within 45 minutes. A result counts
+**Rollout.** The offer goes to one host at a time, and a host takes its turn by
+reporting: the first ready host that runs an older release than the target is
+assigned the offer (a compare-and-set in the database, so concurrent reports assign
+exactly one). It stays with that host until the host reports how its upgrade ended,
+that it runs the target with nothing running (it was upgraded by hand), or that it
+has opted out. A host whose new release is up but whose upgrade is still being
+verified keeps it, because that verdict can still be a rollback. A result for the
+target that is a failure, a rollback, unknown or a refusal pauses the rollout for
+every host; so does a holder that reports no outcome within an hour. A result counts
 only when it differs from the one the gateway last saw from that host, so receipts
 left from before the target was set, or carried in a host's first report, are never
 mistaken for its outcome. Setting the target again starts afresh. The state lives in

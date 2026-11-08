@@ -278,10 +278,13 @@ Hosts that already run the target (or something newer) are left alone.
 About fifteen seconds after its broker starts, and then every five minutes (every
 thirty seconds while one of its own upgrades is running, so the result reaches the
 gateway soon after the receipt records it), an enrolled host reports to the
-gateway: the release it was built from, whether it applies pushed upgrades, and its
-latest upgrade receipt, whoever started that upgrade. If it applies pushed
-upgrades it then reads the signed catalog. It upgrades itself only when **all** of
-these hold:
+gateway: the release it was built from, whether it applies pushed upgrades, whether
+it is **ready** for one right now (it applies them and none is running on it), and
+its latest upgrade receipt, whoever started that upgrade. That report is how a host
+takes its turn ([below](#one-host-at-a-time-and-a-pause-on-failure)). If it applies
+pushed upgrades and none is running it then reads the signed catalog, which carries
+an offer only if the gateway has assigned it to this host. It upgrades itself only
+when **all** of these hold:
 
 - it has not opted out ([below](#opting-a-host-out)) and its binary knows its release;
 - no upgrade of its own is in progress on the host;
@@ -311,33 +314,46 @@ The only thing that replaces a human's approval of this host is the operator's o
 approval of the target. The host still verifies the signed offer, the manifest
 digest and the release's own digests, never downgrades, and runs the unchanged
 activation checks. A refusal, or a failure before activation starts (a failed
-download, or another upgrade operation being active), is not tried again for thirty
-minutes rather than at every look; only the refusal is reported as a result, the
-other is logged.
+download, or another upgrade operation being active), is not tried again for ten
+minutes rather than at every look, which is well inside the gateway's one-hour lease
+on the offer, so a dropped download is retried before the rollout gives up on the
+host; only the refusal is reported as a result, the other is logged.
 The release is downloaded into the root-private `/var/lib/askdo/fleet-upgrade` and
 removed once the helper has staged its own copy; a leftover from a crashed broker
 is removed at the next start.
 
 ### One host at a time, and a pause on failure
 
-The gateway offers the target to **one host at a time**: the first host that asks,
-that has reported it applies pushed upgrades and runs an older release. The offer
-stays with that host until it reports that it now runs the target, or how its
-upgrade failed. Then the next host to ask has its turn. Within a rollout the order
-is therefore the order hosts happen to ask in; to have a particular host go first
-(the gateway host, say), upgrade it by hand before setting the target. The gateway
-host is otherwise an ordinary host: its upgrade restarts the gateway, and other
-hosts' looks fail and are retried meanwhile.
+The gateway offers the target to **one host at a time**, and a host takes its turn
+by **reporting**: the first host whose report says it is ready, and that runs an
+older release, is assigned the offer, and only that host's catalog carries it. The
+offer stays with that host until it reports how its upgrade ended (or that it now
+runs the target with nothing running, which is what a host upgraded by hand
+reports, or that it has opted out). A host whose new release is already up but
+whose upgrade is still being verified keeps the offer: that verdict can still be a
+rollback, and the next host must not start before it. Then the next ready host to
+report has its turn, which is at most a few minutes later. Within a rollout the
+order is therefore the order hosts happen to report in; to have a particular host
+go first (the gateway host, say), upgrade it by hand before setting the target. The
+gateway host is otherwise an ordinary host: its upgrade restarts the gateway, and
+other hosts' reports and catalog reads fail and are retried meanwhile.
+
+Reading the catalog never assigns the offer. A host's broker reads it for every job
+it reviews, and the activation's own post-upgrade probe and `askdo-config gateway
+check` read it too, none of which can act on an offer; only the upgrade agent's
+report takes a turn.
 
 The rollout **pauses for every host** as soon as any host reports an upgrade to the
 target that ended in a failure, a rollback, an unknown outcome or a refusal. A bad
 release therefore stops at the first host it fails on. It also pauses if the host
-holding the offer reports no outcome for 45 minutes: that host may be the one a bad
+holding the offer reports no outcome for an hour: that host may be the one a bad
 release took down, so the offer is not passed on. In both cases `askdo-config
 gateway upgrade-target` shows why, and running it with the tag again resumes.
 
 Changing the target while a host holds the offer does not stop that host's upgrade,
-and the next host may then start before it finishes; the command warns you.
+and the next host may then start before it finishes; the command warns you. The
+outcome of an upgrade to a release that is no longer the target is not announced and
+pauses nothing, though `hosts list` still shows it.
 
 ### What you are told
 
@@ -351,7 +367,7 @@ buttons, to the recipients of the host's default channel:
   rollout is paused;
 - **failed before changing anything**, **outcome unknown** (the helper was
   interrupted) or **refused** (the manifest digest differed): the rollout is paused;
-- **not reported**: the host holding the offer reported nothing for 45 minutes; the
+- **not reported**: the host holding the offer reported no outcome for an hour; the
   rollout is paused.
 
 A notice is delivered once per chat and retried once a minute for up to thirty
