@@ -120,6 +120,9 @@ func runDaemon(args []string) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return 125
 	}
+	// An enrolled host also looks for the upgrade its gateway may offer. It runs
+	// beside the broker and never in its way (see fleet_upgrade.go).
+	defer startFleetUpgrade(*configPath)()
 	if err := broker.Run(context.Background(), *configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 125
