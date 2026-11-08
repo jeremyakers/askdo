@@ -398,3 +398,33 @@ func TestAnOfferNeverReportedOnPausesAndTellsTheOperator(t *testing.T) {
 		t.Fatalf("target = %+v, %v", target, err)
 	}
 }
+
+// A host that reported and was then revoked and deleted has nowhere to be told
+// about; retrying would never change that, so the notice is dropped.
+func TestANoticeForAHostThatIsGoneIsDroppedNotRetriedForever(t *testing.T) {
+	f := upgradeWire(t, 0)
+	ctx := context.Background()
+	u := f.upgrades(t)
+	setTarget(t, u, "v1.0.1")
+	reportAs(t, u, "host_ghost", time.Now(), hostReport("v1.0.0", true, nil))
+	reportAs(t, u, "host_ghost", time.Now(), hostReport("v1.0.1", true, result("up_1", "v1.0.1", "succeeded", "", 5)))
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		pending, err := u.PendingNotices(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pending) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("notice for a host that is gone is still pending: %+v", pending)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, m := range f.bot.Sent() {
+		if strings.Contains(m.Text, "askdo upgraded") {
+			t.Fatalf("a notice was sent for a host with no channel: %+v", m)
+		}
+	}
+}
