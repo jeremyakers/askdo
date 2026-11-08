@@ -63,7 +63,7 @@ func upgradeBootstrapScript(plan upgrade.Plan, capturedPlan []byte, bootstrapRoo
 # the restarted services. If activation fails after any service stop, it
 # automatically restores the backed-up binaries, config and databases, restarts
 # the previous release and verifies it; see
-#   https://github.com/%[3]s/blob/%[2]s/docs/upgrade.md
+#   https://raw.githubusercontent.com/%[3]s/%[2]s/docs/upgrade.md
 `, plan.Release, plan.SourceCommit, upgradeRepository, plan.CLIAsset, plan.CLIDigest)
 	script := header + fmt.Sprintf(`set -eu
 operation=$1

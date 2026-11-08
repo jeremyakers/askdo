@@ -8,6 +8,7 @@ import (
 	"io"
 	"regexp"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/jeremyakers/askdo/internal/modelwire"
 	"github.com/jeremyakers/askdo/internal/proto"
@@ -182,7 +183,15 @@ type webfetchToolResult struct {
 	FinalURL   string `json:"final_url,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
 	Content    string `json:"content,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
 }
+
+// webfetchContentMax bounds the page text one webfetch returns to the model.
+// Every tool result travels in later model turns, and a fleet model message is
+// limited to fleetproto.MaxMessageContentBytes after JSON escaping; returning a
+// whole 200+ KiB HTML page made the next turn unsendable and failed the review.
+// A longer page returns its leading text with truncated set instead.
+const webfetchContentMax = 64 << 10
 
 // webfetchToolError is the fixed model-visible failure payload: a category
 // only, never the URL, credentials, hostnames, addresses, or transport text.
@@ -526,7 +535,20 @@ func (e *ToolExecutor) webfetch(ctx context.Context, rawURL string) (any, error)
 		// crosses to the model.
 		return nil, &fetchToolError{category: fetchErrorCategory(err)}
 	}
-	return webfetchToolResult{Status: "ok", FinalURL: result.FinalURL, HTTPStatus: result.Status, Content: result.Content}, nil
+	content, truncated := truncateUTF8(result.Content, webfetchContentMax)
+	return webfetchToolResult{Status: "ok", FinalURL: result.FinalURL, HTTPStatus: result.Status, Content: content, Truncated: truncated}, nil
+}
+
+// truncateUTF8 returns at most limit bytes of s, cut on a rune boundary.
+func truncateUTF8(s string, limit int) (string, bool) {
+	if len(s) <= limit {
+		return s, false
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
 }
 
 // fetchToolError carries only a fixed, model-visible fetch failure category.
