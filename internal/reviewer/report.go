@@ -90,6 +90,13 @@ const EmbeddedReportSchema = `{"type":"object","additionalProperties":false,"req
 
 var ErrMalformedReview = errors.New("malformed submit_review arguments")
 
+// reportRequest is the model's submit_review tool call: the report fields as
+// one flat object. A tool call is a request, so a field the report does not
+// define (approved, callback_data, provider identity) is refused, not dropped.
+type reportRequest proto.ReviewReport
+
+func (reportRequest) IsRequest() {}
+
 // ValidateReportArgs strictly validates model submit_review arguments: the
 // flat report object with all seven fields at the top level. Report fields
 // are model-generated content, so escaped control characters (including NUL,
@@ -106,7 +113,7 @@ func ValidateReportArgs(data []byte) (proto.ReviewReport, error) {
 		}
 	}
 	var report proto.ReviewReport
-	if err := proto.StrictUnmarshalAllowNUL(data, &report); err != nil {
+	if err := proto.StrictUnmarshalAllowNUL(data, (*reportRequest)(&report)); err != nil {
 		return proto.ReviewReport{}, fmt.Errorf("%w: %v", ErrMalformedReview, err)
 	}
 	for index, warning := range report.Warnings {

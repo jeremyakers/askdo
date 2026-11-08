@@ -261,7 +261,10 @@ func TestEventValidationAndCorrelation(t *testing.T) {
 		{"matching-wait-timeout", `{"op":"wait_timeout","request_id":"0123456789abcdef0123456789abcdef"}`, 124},
 		{"mismatched-wait-timeout", `{"op":"wait_timeout","request_id":"11111111111111111111111111111111"}`, 125},
 		{"malformed-wait-timeout", `{"op":"wait_timeout"}`, 125},
-		{"unknown-wait-timeout-field", `{"op":"wait_timeout","request_id":"0123456789abcdef0123456789abcdef","extra":true}`, 125},
+		// An event is a report from the broker: a field this client does not
+		// define is ignored, so a newer broker's addition does not turn a
+		// timeout into a protocol failure.
+		{"additive-wait-timeout-field", `{"op":"wait_timeout","request_id":"0123456789abcdef0123456789abcdef","extra":true}`, 124},
 		{"mismatched-accepted", `{"op":"accepted","request_id":"11111111111111111111111111111111","state":"queued"}`, 125},
 		{"malformed-error", `{"op":"error","code":"bad"}`, 125},
 	}

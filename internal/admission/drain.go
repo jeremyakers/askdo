@@ -161,7 +161,6 @@ func Read(path string) (Status, error) {
 	}
 	var status Status
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&status); err != nil {
 		return Status{}, err
 	}

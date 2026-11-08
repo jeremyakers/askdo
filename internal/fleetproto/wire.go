@@ -22,8 +22,10 @@ var (
 	ErrExpired   = errors.New("fleet proof expired")
 )
 
-// Parse rejects duplicate/unknown/case-alias keys, absent required fields,
-// nulls, invalid unions and bounds. Unsigned parsing never confers authority.
+// Parse rejects duplicate keys, absent required fields, nulls, invalid unions
+// and bounds. Fields the type does not define are rejected only for a request
+// (proto.Request) and ignored for everything else. Unsigned parsing never
+// confers authority.
 func Parse[T Payload](data []byte) (T, error) {
 	var value T
 	if err := strict(data, &value, MaxPayloadBytes); err != nil {
@@ -88,16 +90,18 @@ func strict(data []byte, dst any, limit int) error {
 	if err := proto.StrictUnmarshal(data, dst); err != nil {
 		return fmt.Errorf("%w: %w", ErrProtocol, err)
 	}
-	if err := shape(data, reflect.TypeOf(dst).Elem(), 0); err != nil {
+	if err := shape(data, reflect.TypeOf(dst).Elem(), proto.RejectsUnknownFields(dst), 0); err != nil {
 		return fmt.Errorf("%w: required JSON shape", ErrProtocol)
 	}
 	return nil
 }
 
 // The standard JSON decoder accepts case-insensitive names and zeroes missing
-// fields. This closed typed shape pass supplies the stricter network semantics,
-// including required numeric zero values (root UID, upstream index).
-func shape(data []byte, typ reflect.Type, depth int) error {
+// fields. This typed shape pass supplies the stricter network semantics,
+// including required numeric zero values (root UID, upstream index) and exact
+// spelling of every field the types define. closed additionally refuses every
+// field the types do not define, as a request must; a report ignores those.
+func shape(data []byte, typ reflect.Type, closed bool, depth int) error {
 	if depth > 64 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return ErrProtocol
 	}
@@ -105,7 +109,7 @@ func shape(data []byte, typ reflect.Type, depth int) error {
 		return nil
 	}
 	if typ.Kind() == reflect.Pointer {
-		return shape(data, typ.Elem(), depth+1)
+		return shape(data, typ.Elem(), closed, depth+1)
 	}
 	switch typ.Kind() {
 	case reflect.Struct:
@@ -113,6 +117,7 @@ func shape(data []byte, typ reflect.Type, depth int) error {
 		if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
 			return ErrProtocol
 		}
+		defined := make([]string, 0, typ.NumField())
 		for i := 0; i < typ.NumField(); i++ {
 			f := typ.Field(i)
 			tag := strings.Split(f.Tag.Get("json"), ",")
@@ -120,6 +125,7 @@ func shape(data []byte, typ reflect.Type, depth int) error {
 			if name == "" || name == "-" {
 				return ErrProtocol
 			}
+			defined = append(defined, name)
 			raw, exists := fields[name]
 			optional := len(tag) > 1 && tag[1] == "omitempty"
 			if !exists {
@@ -128,13 +134,25 @@ func shape(data []byte, typ reflect.Type, depth int) error {
 				}
 				return ErrProtocol
 			}
-			if err := shape(raw, f.Type, depth+1); err != nil {
+			if err := shape(raw, f.Type, closed, depth+1); err != nil {
 				return err
 			}
 			delete(fields, name)
 		}
-		if len(fields) != 0 {
+		// What remains is unknown to this side. A request must not carry it. A
+		// report may: a newer gateway can add to what it reports without
+		// breaking older hosts. A key that only differs in case from a field
+		// this side defines is not unknown: the decoder would read it as that
+		// field, so it is refused either way.
+		if closed && len(fields) != 0 {
 			return ErrProtocol
+		}
+		for name := range fields {
+			for _, known := range defined {
+				if strings.EqualFold(name, known) {
+					return ErrProtocol
+				}
+			}
 		}
 	case reflect.Slice:
 		var items []json.RawMessage
@@ -142,7 +160,7 @@ func shape(data []byte, typ reflect.Type, depth int) error {
 			return ErrProtocol
 		}
 		for _, item := range items {
-			if err := shape(item, typ.Elem(), depth+1); err != nil {
+			if err := shape(item, typ.Elem(), closed, depth+1); err != nil {
 				return err
 			}
 		}

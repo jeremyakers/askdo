@@ -2,6 +2,7 @@ package proto
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -88,12 +89,26 @@ func TestMetadataTypedResultsAndStrictFields(t *testing.T) {
 				}
 				fields[name] = original
 			}
-			bad := res
-			bad.Payload = append(append([]byte{}, res.Payload[:len(res.Payload)-1]...), []byte(`,"secret":"raw sudoers"}`)...)
-			if err := ValidateInspectResultFor(req, bad); err == nil {
-				t.Fatal("unknown field accepted")
+			// A metadata result is a report: a field this side does not define
+			// (a newer broker's addition, or raw policy text) is ignored and,
+			// because only the typed value is forwarded, never reaches the model.
+			extended := res
+			extended.Payload = append(append([]byte{}, res.Payload[:len(res.Payload)-1]...), []byte(`,"secret":"raw sudoers"}`)...)
+			if err := ValidateInspectResultFor(req, extended); err != nil {
+				t.Fatalf("additive field rejected: %v", err)
 			}
-			bad = res
+			want, err := DecodeInspectionMetadataResult(req, res)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := DecodeInspectionMetadataResult(req, extended)
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, %v; want %+v", got, err, want)
+			}
+			if encoded, _ := json.Marshal(got); strings.Contains(string(encoded), "raw sudoers") {
+				t.Fatalf("unknown field forwarded: %s", encoded)
+			}
+			bad := res
 			bad.RequestSeq++
 			if err := ValidateInspectResultFor(req, bad); err == nil {
 				t.Fatal("uncorrelated result accepted")
@@ -211,11 +226,21 @@ func TestCapabilitiesWireCompatibility(t *testing.T) {
 	if err := strictUnmarshalWorker(raw, &decoded); err != nil || decoded != limits {
 		t.Fatalf("roundtrip %v %+v", err, decoded)
 	}
-	for _, suffix := range []string{`"inspection_caps":null`, `"inspection_caps":{"hash_path_enabled":true}`, `"inspection_caps":{"hash_path_enabled":true,"service_status_enabled":false,"sudo_policy_enabled":false,"read_roots":["/secret"]}`} {
+	for _, suffix := range []string{`"inspection_caps":null`, `"inspection_caps":{"hash_path_enabled":true}`} {
 		raw := []byte(`{"max_model_calls_per_attempt":32,"max_output_tokens":8192,` + suffix + `}`)
 		if err := strictUnmarshalWorker(raw, &decoded); err == nil {
 			t.Fatalf("invalid caps accepted: %s", raw)
 		}
+	}
+	// Capabilities are a projection the worker reads. A field this side does
+	// not define (host roots, say) is ignored and never retained.
+	var tolerant WorkerLimits
+	raw = []byte(`{"max_model_calls_per_attempt":32,"max_output_tokens":8192,"inspection_caps":{"hash_path_enabled":true,"service_status_enabled":false,"sudo_policy_enabled":false,"read_roots":["/secret"]}}`)
+	if err := strictUnmarshalWorker(raw, &tolerant); err != nil {
+		t.Fatalf("additive capability field rejected: %v", err)
+	}
+	if want := (WorkerLimits{MaxModelCallsPerAttempt: 32, MaxOutputTokens: 8192, InspectionCaps: InspectionCapabilities{HashPathEnabled: true}}); tolerant != want {
+		t.Fatalf("decoded %+v, want %+v", tolerant, want)
 	}
 }
 
@@ -292,12 +317,25 @@ func TestScopeCompatibilityLeafValidation(t *testing.T) {
 	for _, raw := range []string{
 		`{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":null}`,
 		`{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":{"path_resolver":"openat2"}}`,
-		`{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":{"path_resolver":"openat2","terminal_link_follow_supported":true,"absolute_path_follow_supported":true,"mount_identity_policy":"statx_or_file_handle","guaranteed_all_fs":true}}`,
 	} {
 		res := InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: json.RawMessage(raw)}
 		if err := ValidateInspectResultFor(req, res); err == nil {
 			t.Fatalf("invalid compatibility wire accepted: %s", raw)
 		}
+	}
+	// A field a newer broker adds to the leaf is ignored; every field this
+	// side requires and every closed enum is still checked.
+	additive := `{"read_roots":["/usr"],"next_cursor":"","exclusions_remain":true,"capabilities":{"hash_path_enabled":false,"service_status_enabled":false,"sudo_policy_enabled":false},"max_read_bytes":16384,"max_inspected_files":256,"max_inspected_bytes":8388608,"max_hash_file_bytes":33554432,"max_hashed_bytes_per_review":67108864,"sudo_policy_uids":[],"compatibility":{"path_resolver":"openat2","terminal_link_follow_supported":true,"absolute_path_follow_supported":true,"mount_identity_policy":"statx_or_file_handle","guaranteed_all_fs":true}}`
+	typedAdditive, err := DecodeInspectionMetadataResult(req, InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: json.RawMessage(additive)})
+	if err != nil {
+		t.Fatalf("additive compatibility field rejected: %v", err)
+	}
+	if got := typedAdditive.(InspectionScopeResult).Compatibility; got == nil || *got != valid[0] {
+		t.Fatalf("compat = %+v, want %+v", got, valid[0])
+	}
+	badEnum := strings.Replace(additive, `"path_resolver":"openat2"`, `"path_resolver":"uname"`, 1)
+	if _, err := DecodeInspectionMetadataResult(req, InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: json.RawMessage(badEnum)}); err == nil {
+		t.Fatal("unknown path_resolver spelling accepted")
 	}
 	// Historical JSON without the field decodes unchanged: the absence is
 	// preserved, not defaulted into a backend claim.

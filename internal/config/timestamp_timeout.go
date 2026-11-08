@@ -59,7 +59,7 @@ func (review *ReviewConfig) UnmarshalJSON(data []byte) error {
 		Minutes json.RawMessage `json:"timestamp_timeout_users"`
 		Seconds json.RawMessage `json:"approval_timestamp_users"`
 	}
-	if err := proto.StrictUnmarshal(data, &wire); err != nil {
+	if err := proto.StrictRequestUnmarshal(data, &wire); err != nil {
 		return err
 	}
 	if len(wire.Minutes) != 0 && len(wire.Seconds) != 0 {

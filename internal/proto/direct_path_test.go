@@ -152,10 +152,12 @@ func TestDirectPathOkResultCorrelatesStrictlyByOp(t *testing.T) {
 	if err := ValidateInspectResultFor(readRequest, InspectResult{Type: "inspect_result", RequestSeq: 11, Status: "ok", Payload: okList}); err == nil {
 		t.Fatal("wrong-op payload accepted for read_path request")
 	}
-	// Result payloads carry no capture IDs or hashes: unknown keys are rejected.
+	// Result payloads carry no capture IDs or hashes. A result is a report, so a
+	// legacy file_id is a field this side ignores rather than a reason to refuse
+	// the whole result; only the typed result is forwarded.
 	withCaptureID := json.RawMessage(`{"content":"x","offset":0,"next_offset":1,"eof":false,"file_id":"f1"}`)
-	if err := ValidateInspectResultFor(readRequest, InspectResult{Type: "inspect_result", RequestSeq: 11, Status: "ok", Payload: withCaptureID}); err == nil {
-		t.Fatal("capture ID in read_path result accepted")
+	if err := ValidateInspectResultFor(readRequest, InspectResult{Type: "inspect_result", RequestSeq: 11, Status: "ok", Payload: withCaptureID}); err != nil {
+		t.Fatalf("capture ID in read_path result rejected: %v", err)
 	}
 	// Mismatched request_seq is rejected.
 	if err := ValidateInspectResultFor(readRequest, InspectResult{Type: "inspect_result", RequestSeq: 12, Status: "ok", Payload: okRead}); err == nil {
@@ -210,11 +212,18 @@ func TestDirectPathListAndSearchResultBounds(t *testing.T) {
 	if err := ValidateInspectResultFor(searchRequest, InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: okSearch}); err != nil {
 		t.Fatalf("valid search_path result rejected: %v", err)
 	}
-	// Direct search matches identify files by path only; a capture file_id
-	// key is an unknown field and must be rejected.
+	// Direct search matches identify files by path only; a capture file_id key
+	// is a field this side does not define, so it is ignored, not forwarded.
 	matchWithFileID := json.RawMessage(`{"matches":[{"path":"main.go","line":1,"excerpt":"x","file_id":"f1"}],"next_cursor":"","skipped_masked":0}`)
-	if err := ValidateInspectResultFor(searchRequest, InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: matchWithFileID}); err == nil {
-		t.Fatal("capture file_id in search match accepted")
+	if err := ValidateInspectResultFor(searchRequest, InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: matchWithFileID}); err != nil {
+		t.Fatalf("capture file_id in search match rejected: %v", err)
+	}
+	var matches SearchPathResult
+	if err := StrictUnmarshal(matchWithFileID, &matches); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, _ := json.Marshal(matches); strings.Contains(string(encoded), "file_id") {
+		t.Fatalf("capture file_id forwarded: %s", encoded)
 	}
 	emptyPath, _ := json.Marshal(SearchPathResult{Matches: []DirectSearchMatch{{Path: "", Line: 1, Excerpt: "x"}}})
 	if err := ValidateInspectResultFor(searchRequest, InspectResult{Type: "inspect_result", RequestSeq: 7, Status: "ok", Payload: emptyPath}); err == nil {

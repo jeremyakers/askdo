@@ -623,7 +623,6 @@ func TestReadReceiptRejectsMalformedAndTampered(t *testing.T) {
 		"short source":    strings.Replace(good, testSourceCommit, strings.Repeat("a", 39), 1),
 		"upper source":    strings.Replace(good, testSourceCommit, strings.Repeat("A", 40), 1),
 		"zero timestamp":  strings.Replace(good, fmt.Sprint(validTimestamp), `0`, 1),
-		"unknown field":   good[:len(good)-2] + `,"extra":1}` + "\n",
 		"bad plan digest": good[:len(good)-2] + `,"plan_digest":"not-a-sha256"}` + "\n",
 		"trailing data":   good + `{}` + "\n",
 		"truncated":       good[:len(good)/2],
@@ -640,6 +639,49 @@ func TestReadReceiptRejectsMalformedAndTampered(t *testing.T) {
 		if _, err := ReadReceipt(root, testOpID); err == nil {
 			t.Errorf("%s: ReadReceipt accepted tampered data", name)
 		}
+	}
+}
+
+// Given a receipt written by a newer release that carries a field this build
+// does not know, When an older client reads it, Then it reads the same receipt
+// as without the field. An unreadable receipt would block every new operation
+// (NewOperation refuses while any receipt is unreadable), so the older client
+// must not stop on an additive field, while a genuinely malformed one still does.
+func TestReadReceiptIgnoresFieldsAddedByNewerReleases(t *testing.T) {
+	root := t.TempDir()
+	good := receiptText(testOpID, testRelease, testSourceCommit, stateScheduled)
+	if err := os.WriteFile(receiptFilePath(root, testOpID), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want, err := ReadReceipt(root, testOpID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, extended := range map[string]string{
+		"scalar": good[:len(good)-2] + `,"extra":1}` + "\n",
+		"object": good[:len(good)-2] + `,"rollback":{"stage":"/x","steps":[1,2]}}` + "\n",
+		"first":  `{"future":true,` + good[1:],
+	} {
+		if err := os.WriteFile(receiptFilePath(root, testOpID), []byte(extended), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ReadReceipt(root, testOpID)
+		if err != nil {
+			t.Errorf("%s: ReadReceipt rejected an additive field: %v", name, err)
+		} else if got != want {
+			t.Errorf("%s: read %+v, want %+v", name, got, want)
+		}
+	}
+
+	// An older client also keeps admitting new operations next to such a receipt
+	// instead of reporting it unreadable, and still refuses while it is active.
+	extended := good[:len(good)-2] + `,"extra":1}` + "\n"
+	if err := os.WriteFile(receiptFilePath(root, testOpID), []byte(extended), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewOperation(root, testOpID2, testRelease, testSourceCommit, testStage)
+	if err == nil || !strings.Contains(err.Error(), "active operation "+testOpID) || strings.Contains(err.Error(), "not readable") {
+		t.Fatalf("NewOperation next to a newer receipt: %v", err)
 	}
 }
 

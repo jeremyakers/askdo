@@ -69,29 +69,47 @@ func (d *daemon) serveHelpers() {
 	}
 }
 
-// strictHelperObject rejects duplicate/unknown keys before a typed decode.
-// No caller-provided job identity or operation is ever used for lookup.
+// strictHelperObject rejects duplicate/unknown keys before a typed decode and
+// requires every named field. It guards what asks the broker to act: the
+// reservation request and the helper's claim. No caller-provided job identity
+// or operation is ever used for lookup.
 func strictHelperObject(body []byte, fields ...string) error {
+	return helperObject(body, true, fields)
+}
+
+// requiredHelperObject is strictHelperObject for what a helper only reports
+// (its completion): duplicate keys and absent named fields are still refused,
+// but a field this broker does not define is ignored, so a newer helper can add
+// to its report without the outcome of a command that already ran being lost.
+func requiredHelperObject(body []byte, fields ...string) error {
+	return helperObject(body, false, fields)
+}
+
+func helperObject(body []byte, closed bool, fields []string) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	token, err := dec.Token()
 	if err != nil || token != json.Delim('{') {
 		return errors.New("invalid helper object")
 	}
-	allowed := make(map[string]bool, len(fields))
+	named := make(map[string]bool, len(fields))
 	for _, name := range fields {
-		allowed[name] = true
+		named[name] = true
 	}
 	seen := make(map[string]bool, len(fields))
+	present := 0
 	for dec.More() {
 		key, err := dec.Token()
 		if err != nil {
 			return err
 		}
 		name, ok := key.(string)
-		if !ok || !allowed[name] || seen[name] {
+		if !ok || seen[name] || (closed && !named[name]) {
 			return errors.New("unexpected or duplicate helper field")
 		}
 		seen[name] = true
+		if named[name] {
+			present++
+		}
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil {
 			return err
@@ -100,7 +118,7 @@ func strictHelperObject(body []byte, fields ...string) error {
 	if _, err := dec.Token(); err != nil {
 		return err
 	}
-	if _, err := dec.Token(); err != io.EOF || len(seen) != len(fields) {
+	if _, err := dec.Token(); err != io.EOF || present != len(fields) {
 		return errors.New("missing field or trailing helper data")
 	}
 	return nil
@@ -253,7 +271,7 @@ func (d *daemon) handleHelper(conn *net.UnixConn) {
 		}
 		break
 	}
-	if strictHelperObject(body, "type", "job_id", "exit_code", "signal") != nil {
+	if requiredHelperObject(body, "type", "job_id", "exit_code", "signal") != nil {
 		return
 	}
 	var completion foreground.Completion

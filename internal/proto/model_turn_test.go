@@ -23,7 +23,6 @@ func TestModelTurnStrictVariants(t *testing.T) {
 		`{"type":"model_turn_result","request_seq":1}`,
 		`{"type":"model_turn_result","request_seq":1,"response":{},"failure":{"code":"auth"}}`,
 		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"secret"}}`,
-		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"auth","detail":"secret"}}`,
 		`{"type":"model_turn_result","request_seq":1,"request_seq":1,"response":{}}`,
 		`{"type":"model_turn_result","request_seq":"1","response":{}}`,
 		`{"type":"model_turn_result","request_seq":1,"response":null,"failure":{"code":"auth"}}`,
@@ -32,10 +31,24 @@ func TestModelTurnStrictVariants(t *testing.T) {
 		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"safety","retry":{"after_ms":250}}}`,
 		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":-1}}}`,
 		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":9223372036854775807}}}`,
-		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":250,"cause":"secret"}}}`,
 	} {
 		if _, err := DecodeWorkerMessage([]byte(raw), BrokerToWorker); err == nil {
 			t.Fatalf("accepted %s", raw)
+		}
+	}
+	// A result is a report: a field a newer root adds to the failure or to its
+	// retry metadata is ignored, and its text never reaches the worker.
+	for _, raw := range []string{
+		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"auth","detail":"secret"}}`,
+		`{"type":"model_turn_result","request_seq":1,"failure":{"code":"upstream_timeout","retry":{"after_ms":250,"cause":"secret"}}}`,
+		`{"type":"model_turn_result","request_seq":1,"response":{"content":"ok","provider":"secret"},"trace":"secret"}`,
+	} {
+		decoded, err := DecodeWorkerMessage([]byte(raw), BrokerToWorker)
+		if err != nil {
+			t.Fatalf("additive field rejected in %s: %v", raw, err)
+		}
+		if encoded, err := json.Marshal(decoded); err != nil || strings.Contains(string(encoded), "secret") {
+			t.Fatalf("unknown field forwarded: %s, %v", encoded, err)
 		}
 	}
 	if _, err = DecodeWorkerMessage(body, WorkerToBroker); err == nil {

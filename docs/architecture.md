@@ -248,6 +248,43 @@ from trusting the worker or the network peer. See
   as root — or, with `-u USER` (`sudo -u` style), as that resolved host
   account — and can make persistent changes to the host.
 
+## Unknown fields on the wire
+
+A newer askdo component may add an optional field to something it reports, and
+an older reader must keep working. One rule covers the client socket, the
+private worker pipe, the foreground handoff and the fleet gateway wire:
+
+- **Requests refuse unknown fields.** A message that asks a component to do
+  something is refused if it carries a field the receiver does not define,
+  because silently dropping the field could change what is done: client
+  requests to the broker, a host's join, ticket-submission and model-turn
+  requests to the gateway, a worker's inspection and model requests (and the
+  model's tool-call arguments), a worker's `decision` (the human approval that
+  authorizes dispatch), the helper's claim and the broker's instructions to
+  the helper, the approved upgrade plan, and administrator
+  files (the daemon and gateway configuration and the fleet enrollment bundle,
+  which a host trusts to reach its gateway). In code the typed messages
+  implement `proto.Request`; administrator configuration is decoded with
+  `proto.StrictRequestUnmarshal`.
+- **Reports ignore unknown fields.** Results, events, catalogs, receipts,
+  capabilities, status, display facts, retry and availability metadata, review
+  reports, the helper's acknowledgement and completion, and the broker's
+  bootstrap and config projection to the worker are read as if the field were
+  absent. An ignored field is never kept or forwarded.
+- **Everything else stays strict:** duplicate keys, NUL, invalid UTF-8,
+  trailing values, required and null fields, bounds, closed enums, protocol
+  versions, signatures, authorization and semantic validation. On the fleet
+  wire a key that only differs in case from a field the reader defines is not
+  an unknown field and is still refused.
+
+Two limits follow from signatures and hashes. A signed payload is verified over
+its exact bytes, so a field the reader does not understand stays covered by
+the signature. A hash, though, is recomputed by the reader from the fields it
+knows: a new field inside a hashed object (profile and route metadata, ticket
+display facts) makes an older reader's hash differ, and it refuses the object.
+Put new optional fields outside hashed objects. Binaries released before this
+rule was introduced remain strict about everything.
+
 ## Job state machine
 
 States are the durable store states (`internal/store`); every transition is a

@@ -366,10 +366,12 @@ func newOperation(root, id, release, sourceCommit, stage, planDigest string) (fu
 	return unlock, nil
 }
 
-// ReadReceipt reads and strictly validates the receipt for id: exact schema
-// with no unknown or trailing JSON, a matching version 1 and ID, a valid
-// release tag and 40-digit lowercase source commit, a valid state and a
-// positive timestamp. Symlinked and oversized files are refused.
+// ReadReceipt reads and strictly validates the receipt for id: no trailing
+// JSON, a matching version 1 and ID, a valid release tag and 40-digit
+// lowercase source commit, a valid state and a positive timestamp. Symlinked
+// and oversized files are refused. A field this build does not know is
+// ignored, so a receipt written by a newer release stays readable: an
+// unreadable receipt blocks every new operation.
 func ReadReceipt(root, id string) (Receipt, error) {
 	if err := validateOperationID(id); err != nil {
 		return Receipt{}, err
@@ -393,7 +395,6 @@ func ReadReceipt(root, id string) (Receipt, error) {
 
 	var receipt Receipt
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&receipt); err != nil {
 		return Receipt{}, fmt.Errorf("malformed receipt %s: %w", id, err)
 	}

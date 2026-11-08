@@ -13,11 +13,14 @@ func TestCreatorCancellationProtocolOptInCompatibility(t *testing.T) {
 	}
 	id := "2026-10-19_#1"
 	legacy, _ = json.Marshal(ReservedEvent{Op: "reserved", RequestID: id})
+	// Clients released before unknown fields were tolerated still reject them,
+	// so the capability stays opt-in. They are modeled with the rejecting decoder.
 	var olderClient struct {
 		Op        string `json:"op"`
 		RequestID string `json:"request_id"`
 	}
-	if err := StrictUnmarshal(legacy, &olderClient); err != nil {
+	strictOlderClient := func(body []byte) error { return strictUnmarshal(body, &olderClient, false, true) }
+	if err := strictOlderClient(legacy); err != nil {
 		t.Fatal("strict old client rejected non-opt-in reply")
 	}
 	cap := strings.Repeat("c", 64)
@@ -26,8 +29,16 @@ func TestCreatorCancellationProtocolOptInCompatibility(t *testing.T) {
 	if StrictUnmarshal(modern, &reply) != nil || reply.Validate() != nil || reply.CancelCapability != cap {
 		t.Fatal("opt-in capability round trip failed")
 	}
-	if StrictUnmarshal(modern, &olderClient) == nil {
+	if strictOlderClient(modern) == nil {
 		t.Fatal("test no longer models strict older client")
+	}
+	// Current clients read the same reply without needing the opt-in.
+	var currentClient struct {
+		Op        string `json:"op"`
+		RequestID string `json:"request_id"`
+	}
+	if err := StrictUnmarshal(modern, &currentClient); err != nil || currentClient.RequestID != id {
+		t.Fatalf("current client rejected the capability reply: %v", err)
 	}
 	bare, _ := json.Marshal(CancelRequest{Op: "cancel", RequestID: id})
 	if strings.Contains(string(bare), "force") || strings.Contains(string(bare), "capability") {

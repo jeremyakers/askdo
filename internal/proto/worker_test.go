@@ -1,9 +1,11 @@
 package proto
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -121,8 +123,18 @@ func TestAvailabilityWireStrictAndDirectional(t *testing.T) {
 			t.Fatalf("accepted history %+v", history)
 		}
 	}
-	if _, err := DecodeWorkerMessage([]byte(`{"type":"review_unavailable","code":"all_providers_unavailable","history":[{"name":"x","code":"quota_rate","extra":"approved"}]}`), WorkerToBroker); err == nil {
-		t.Fatal("accepted freeform history field")
+	// Availability is a report: a field this side does not define is ignored,
+	// so freeform text cannot cross to the broker even from a newer worker.
+	decoded, err := DecodeWorkerMessage([]byte(`{"type":"review_unavailable","code":"all_providers_unavailable","history":[{"name":"x","code":"quota_rate","extra":"approved"}]}`), WorkerToBroker)
+	if err != nil {
+		t.Fatalf("additive history field rejected: %v", err)
+	}
+	got, ok := decoded.(*ReviewUnavailable)
+	if !ok || len(got.History) != 1 || got.History[0] != (AvailabilityFailure{Name: "x", Code: AvailabilityQuota}) {
+		t.Fatalf("decoded = %#v", decoded)
+	}
+	if encoded, err := json.Marshal(got); err != nil || strings.Contains(string(encoded), "approved") {
+		t.Fatalf("freeform history text was forwarded: %s, %v", encoded, err)
 	}
 }
 
@@ -245,7 +257,9 @@ func TestInspectionWireRejectsParserSite(t *testing.T) {
 	}
 }
 
-func TestReviewWireRejectsCoverage(t *testing.T) {
+// A review report is a report: the retired coverage field a worker may still
+// send is ignored, never decoded and never forwarded.
+func TestReviewWireIgnoresRetiredCoverage(t *testing.T) {
 	review := ReviewComplete{Type: "review_complete", Report: validReport(), ModelHistory: []ModelHistoryEntry{{Name: "m", Outcome: "ok"}}}
 	body, err := json.Marshal(review)
 	if err != nil {
@@ -256,12 +270,25 @@ func TestReviewWireRejectsCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw["coverage"] = json.RawMessage(`{"supplied":[]}`)
-	body, err = json.Marshal(raw)
+	withCoverage, err := json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DecodeWorkerMessage(body, WorkerToBroker); err == nil {
-		t.Fatal("retired coverage wire field accepted")
+	decoded, err := DecodeWorkerMessage(withCoverage, WorkerToBroker)
+	if err != nil {
+		t.Fatalf("retired coverage wire field rejected: %v", err)
+	}
+	if got, ok := decoded.(*ReviewComplete); !ok || !reflect.DeepEqual(*got, review) {
+		t.Fatalf("decoded = %#v, want %#v", decoded, review)
+	}
+	if encoded, err := json.Marshal(decoded); err != nil || !bytes.Equal(encoded, body) {
+		t.Fatalf("coverage was forwarded: %s, %v", encoded, err)
+	}
+	// What makes a review report invalid is unchanged.
+	raw["report"] = json.RawMessage(`{"risk":"1"}`)
+	invalid, _ := json.Marshal(raw)
+	if _, err := DecodeWorkerMessage(invalid, WorkerToBroker); err == nil {
+		t.Fatal("incomplete report accepted")
 	}
 }
 
@@ -342,8 +369,9 @@ func TestBundleBootstrapAllowsNoArgumentsAfterWireRoundTrip(t *testing.T) {
 
 // TestBootstrapLimitsOmitInspectedBounds pins the worker projection boundary:
 // inspected-file/byte bounds are broker-only staging/search limits enforced
-// from the admin config, so the bootstrap limits JSON must never carry them;
-// a wire projection that does is rejected by the strict decoder.
+// from the admin config, so the bootstrap limits JSON must never carry them.
+// A projection that does is a report the worker reads: the bounds are ignored,
+// not decoded into any worker limit.
 func TestBootstrapLimitsOmitInspectedBounds(t *testing.T) {
 	bootstrap := Bootstrap{
 		Type:                 "bootstrap",
@@ -385,8 +413,12 @@ func TestBootstrapLimitsOmitInspectedBounds(t *testing.T) {
 	if legacy == string(body) {
 		t.Fatalf("wire JSON shape changed, legacy injection needs updating: %s", body)
 	}
-	if _, err := DecodeWorkerMessage([]byte(legacy), BrokerToWorker); err == nil {
-		t.Fatal("wire projection with obsolete inspected bounds accepted")
+	message, err := DecodeWorkerMessage([]byte(legacy), BrokerToWorker)
+	if err != nil {
+		t.Fatalf("projection with extra inspected bounds rejected: %v", err)
+	}
+	if got := message.(*Bootstrap).ConfigProjection.Limits; got != bootstrap.ConfigProjection.Limits {
+		t.Fatalf("limits = %+v, want %+v", got, bootstrap.ConfigProjection.Limits)
 	}
 }
 
@@ -655,10 +687,19 @@ func validReport() ReviewReport {
 	return ReviewReport{Risk: "1", Summary: "x", Effects: []string{}, Warnings: []ReviewWarning{}, MissingContext: []string{}, Reversibility: "x", IntentMatch: "consistent"}
 }
 
-func TestDirectResultRejectsLegacyFileID(t *testing.T) {
+// A direct result is a report: a legacy capture file_id is ignored and, because
+// callers forward only the typed result, never reaches the model.
+func TestDirectResultIgnoresLegacyFileID(t *testing.T) {
 	request := InspectRequest{Type: "inspect_request", RequestSeq: 3, Op: "read_path", Payload: json.RawMessage(`{"base":"host","path":"/file","offset":0,"max_bytes":32}`)}
 	result := InspectResult{Type: "inspect_result", RequestSeq: 3, Status: "ok", Payload: json.RawMessage(`{"content":"text","offset":0,"next_offset":4,"eof":true,"file_id":"old"}`)}
-	if err := ValidateInspectResultFor(request, result); err == nil {
-		t.Fatal("legacy file_id in direct response accepted")
+	if err := ValidateInspectResultFor(request, result); err != nil {
+		t.Fatalf("legacy file_id in direct response rejected: %v", err)
+	}
+	var typed ReadPathResult
+	if err := StrictUnmarshal(result.Payload, &typed); err != nil {
+		t.Fatal(err)
+	}
+	if encoded, _ := json.Marshal(typed); string(encoded) != `{"content":"text","offset":0,"next_offset":4,"eof":true}` {
+		t.Fatalf("forwarded %s", encoded)
 	}
 }

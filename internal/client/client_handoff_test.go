@@ -177,6 +177,43 @@ func TestOriginalHandoffAndRecovery(t *testing.T) {
 	}
 }
 
+// handoff_ready is a broker event: a field this client does not define is
+// ignored (it cannot reach the helper, which is given only the token and digest
+// the client read), while the event is accepted exactly as without the field.
+func TestHandoffReadyIgnoresAdditiveFields(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	token, digest := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	called, finished := make(chan struct{}), make(chan struct{})
+	defer close(finished)
+	go func() {
+		ready := `{"op":"handoff_ready","request_id":"` + id + `","digest":"` + digest + `","token_hex":"` + token + `","expiry_unix_ms":9999999999999,"command":"/bin/sh","next":{"a":[1]}}`
+		_ = proto.WriteFrame(server, []byte(ready))
+		select {
+		case <-called:
+		case <-finished:
+			return
+		}
+		_ = proto.WriteFrame(server, []byte(`{"op":"result","request_id":"`+id+`","state":"finished","exit_code":7,"future":true}`))
+		_, _ = io.Copy(io.Discard, server)
+	}()
+	var claim [2]string
+	var stderr bytes.Buffer
+	options := Options{Stderr: &stderr, Stdout: io.Discard, Interrupt: make(chan os.Signal), launchHelper: func(gotToken, gotDigest string) error {
+		claim = [2]string{gotToken, gotDigest}
+		close(called)
+		return nil
+	}}
+	if code := eventLoop(context.Background(), client, id, time.Time{}, true, options); code != 7 {
+		t.Fatalf("exit=%d stderr=%s", code, &stderr)
+	}
+	if claim != [2]string{token, digest} {
+		t.Fatalf("helper claim = %v", claim)
+	}
+}
+
 func TestRejectHandoffForAttachDetachAndInvalid(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef"
 	for _, tc := range []struct {
@@ -188,7 +225,6 @@ func TestRejectHandoffForAttachDetachAndInvalid(t *testing.T) {
 		{"detach", false, `{"op":"handoff_ready","request_id":"` + id + `","digest":"` + strings.Repeat("b", 64) + `","token_hex":"` + strings.Repeat("a", 64) + `","expiry_unix_ms":9999999999999}`},
 		{"wrong-id", true, `{"op":"handoff_ready","request_id":"` + strings.Repeat("1", 32) + `","digest":"` + strings.Repeat("b", 64) + `","token_hex":"` + strings.Repeat("a", 64) + `","expiry_unix_ms":9999999999999}`},
 		{"malformed", true, `{"op":"handoff_ready","request_id":"` + id + `","digest":"bad","token_hex":"` + strings.Repeat("a", 64) + `","expiry_unix_ms":9999999999999}`},
-		{"extra", true, `{"op":"handoff_ready","request_id":"` + id + `","digest":"` + strings.Repeat("b", 64) + `","token_hex":"` + strings.Repeat("a", 64) + `","expiry_unix_ms":9999999999999,"command":"/bin/sh"}`},
 		{"duplicate", true, `{"op":"handoff_ready","request_id":"` + id + `","request_id":"` + id + `","digest":"` + strings.Repeat("b", 64) + `","token_hex":"` + strings.Repeat("a", 64) + `","expiry_unix_ms":9999999999999}`},
 		{"late", true, `{"op":"handoff_ready","request_id":"` + id + `","digest":"` + strings.Repeat("b", 64) + `","token_hex":"` + strings.Repeat("a", 64) + `","expiry_unix_ms":1}`},
 	} {

@@ -57,7 +57,7 @@ func TestBootstrapAccountNotesRejectMalformedTextAndShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, replacement := range []string{`null`, `{}`, `[null]`, `[{}]`, `[{"text":null}]`, `[{"text":"x","source":"/file"}]`, `[{"text":"x","text":"y"}]`, `[{"text":"x\u0000y"}]`} {
+	for _, replacement := range []string{`null`, `{}`, `[null]`, `[{}]`, `[{"text":null}]`, `[{"text":"x","text":"y"}]`, `[{"text":"x\u0000y"}]`} {
 		// When
 		malformed := strings.Replace(string(body), `[{"text":"NOTE-CANARY"}]`, replacement, 1)
 		_, err := DecodeWorkerMessage([]byte(malformed), BrokerToWorker)
@@ -71,6 +71,36 @@ func TestBootstrapAccountNotesRejectMalformedTextAndShapes(t *testing.T) {
 		if err := ValidateWorkerMessage(boot, BrokerToWorker); err == nil {
 			t.Fatal("broker accepted unsafe note text")
 		}
+	}
+}
+
+// Notes and the rubric are broker projections the worker reads. A field this
+// side does not define (a provenance path, a hash) is ignored and never kept,
+// so a newer broker's additions do not stop an older worker from reviewing.
+func TestBootstrapProjectionIgnoresUnknownNoteAndRubricFields(t *testing.T) {
+	boot := riskPolicyBootstrap(&RiskPolicy{Text: "rubric"})
+	boot.AccountNotes = []AccountNote{{Text: "NOTE-CANARY"}}
+	body, err := json.Marshal(boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended := strings.NewReplacer(
+		`"account_notes":[{"text":"NOTE-CANARY"}]`, `"account_notes":[{"text":"NOTE-CANARY","source":"/file"}]`,
+		`"risk_policy":{"text":"rubric"}`, `"risk_policy":{"text":"rubric","sha256":"`+strings.Repeat("a", 64)+`"}`,
+	).Replace(string(body))
+	if extended == string(body) {
+		t.Fatalf("wire shape changed, injection needs updating: %s", body)
+	}
+	message, err := DecodeWorkerMessage([]byte(extended), BrokerToWorker)
+	if err != nil {
+		t.Fatalf("additive projection field rejected: %v", err)
+	}
+	got := message.(*Bootstrap)
+	if !reflect.DeepEqual(got.AccountNotes, boot.AccountNotes) || !reflect.DeepEqual(got.RiskPolicy, boot.RiskPolicy) {
+		t.Fatalf("notes=%+v rubric=%+v", got.AccountNotes, got.RiskPolicy)
+	}
+	if encoded, err := json.Marshal(got); err != nil || strings.Contains(string(encoded), "/file") || strings.Contains(string(encoded), "sha256") {
+		t.Fatalf("unknown field forwarded: %s, %v", encoded, err)
 	}
 }
 
@@ -145,10 +175,7 @@ func TestBootstrapRiskPolicyRejectsMalformedShapesAndUnsafeText(t *testing.T) {
 		"missing text": func(s string) string {
 			return strings.Replace(s, `"risk_policy":{"text":"rubric"}`, `"risk_policy":{}`, 1)
 		},
-		"null text": func(s string) string { return strings.Replace(s, `"text":"rubric"`, `"text":null`, 1) },
-		"worker hash": func(s string) string {
-			return strings.Replace(s, `"text":"rubric"`, `"text":"rubric","sha256":"`+strings.Repeat("a", 64)+`"`, 1)
-		},
+		"null text":   func(s string) string { return strings.Replace(s, `"text":"rubric"`, `"text":null`, 1) },
 		"escaped NUL": func(s string) string { return strings.Replace(s, `"text":"rubric"`, `"text":"ru\u0000bric"`, 1) },
 		"duplicate key": func(s string) string {
 			return strings.Replace(s, `"text":"rubric"`, `"text":"rubric","text":"other"`, 1)
