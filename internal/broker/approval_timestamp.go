@@ -116,15 +116,8 @@ func (d *daemon) newFleetLookup(ctx context.Context, cfg *config.Config, uid uin
 	return &fleetLookup{d: d, ctx: ctx, cfg: cfg, uid: uid}
 }
 
-// policyLookupTimeout bounds a lookup made only to learn the gateway's defaults.
-// Exchanges are admitted one at a time, so a gateway that hangs must not hold
-// every later admission for the broker's whole frame deadline over a question
-// the host's own policy has already answered: it falls back to that answer. A
-// lookup that a stored window needs keeps the frame deadline it always had.
-const policyLookupTimeout = 3 * time.Second
-
-// catalogue fetches the signed catalogue at most once; the first caller's
-// timeout bounds the fetch every later caller shares.
+// catalogue fetches the signed catalogue at most once, bounded by the frame
+// deadline every gateway lookup has always had.
 func (l *fleetLookup) catalogue(timeout time.Duration) (fleetproto.Catalog, bool) {
 	l.once.Do(func() {
 		if l.cfg.Fleet == nil {
@@ -159,7 +152,7 @@ func (l *fleetLookup) catalogue(timeout time.Duration) (fleetproto.Catalog, bool
 // unavailable reports a fleet host whose gateway answer could not be had, so
 // what the exchange knows is only the host's own policy.
 func (l *fleetLookup) unavailable() bool {
-	_, found := l.catalogue(policyLookupTimeout)
+	_, found := l.catalogue(frameDeadline)
 	return l.cfg.Fleet != nil && !found
 }
 
@@ -169,7 +162,7 @@ func (l *fleetLookup) unavailable() bool {
 func (l *fleetLookup) reviewPolicy() *config.ReviewConfig {
 	if l.review == nil {
 		l.review = &l.cfg.Review
-		if catalog, found := l.catalogue(policyLookupTimeout); found && catalog.ReviewDefaults != nil {
+		if catalog, found := l.catalogue(frameDeadline); found && catalog.ReviewDefaults != nil {
 			merged := l.cfg.Review.WithGatewayDefaults(catalog.ReviewDefaults)
 			l.review = &merged
 		}

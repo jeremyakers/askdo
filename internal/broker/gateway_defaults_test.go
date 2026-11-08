@@ -712,34 +712,27 @@ func TestAutoApprovalPlanUsesTheEffectiveCap(t *testing.T) {
 	}
 }
 
-// Exchanges are admitted one at a time, so a gateway that hangs must not hold
-// every later admission for the broker's whole frame deadline over a question
-// the host's own policy has already answered: the lookup for defaults gives up
-// after policyLookupTimeout and the host's answer stands.
-func TestHungGatewayDoesNotHoldAdmissionForTheFrameDeadline(t *testing.T) {
+// A gateway slower than a few seconds but within the frame deadline still
+// answers: the lookup for review defaults gets the same full deadline the
+// timestamp path always had, so a slow gateway is not treated as unavailable.
+func TestSlowGatewayStillSuppliesDefaultsWithinTheFrameDeadline(t *testing.T) {
 	cfg, uid, _ := gatewayDefaultsHost(t)
-	g := newFleetAuthorityGatewayDelayed(t, cfg, uid, time.Minute)
+	g := newFleetAuthorityGatewayDelayed(t, cfg, uid, 4*time.Second)
 	g.delayFrom.Store(1)
 	h := newBrokerHarnessWithConfig(t, nil, nil, cfg)
 	setTimestampPeer(h, uid)
-	req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
-	req.NonInteractive = true // no wait budget: only the lookup's own bound applies
 	conn, err := net.Dial("unix", h.socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	started := time.Now()
-	sendFrame(t, conn, req)
-	_ = conn.SetReadDeadline(started.Add(policyLookupTimeout + 3*time.Second))
+	sendFrame(t, conn, map[string]any{"op": "timestamp", "action": "list"})
+	_ = conn.SetReadDeadline(time.Now().Add(frameDeadline + 2*time.Second))
 	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
 	if err != nil {
-		t.Fatalf("admission still held by a hung gateway after %s: %v", time.Since(started), err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), `"code":"approval_required"`) {
-		t.Fatalf("the host's own refusal did not stand: %s", body)
-	}
-	if elapsed := time.Since(started); elapsed < policyLookupTimeout/2 || elapsed > policyLookupTimeout+2*time.Second {
-		t.Fatalf("answered after %s, want about %s", elapsed, policyLookupTimeout)
+	if strings.Contains(string(body), "unavailable") {
+		t.Fatalf("a 4s gateway was reported unavailable: %s", body)
 	}
 }
