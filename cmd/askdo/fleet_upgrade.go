@@ -31,10 +31,11 @@ import (
 // target, and the host still checks the digest, never downgrades, and rolls
 // back on any failure.
 const (
-	// fleetUpgradeInterval is how often the host reports to its gateway and asks
-	// for an offer. While one of its own upgrades is running it reports every
-	// fleetUpgradeActiveInterval instead, so that the result reaches the gateway
-	// soon after the receipt says how it ended.
+	// fleetUpgradeInterval is how often the host reports to its gateway, which is
+	// how it takes its turn, and reads the catalog for the offer. While one of its
+	// own upgrades is running it reports every fleetUpgradeActiveInterval instead,
+	// so that the result reaches the gateway soon after the receipt says how it
+	// ended.
 	fleetUpgradeInterval       = 5 * time.Minute
 	fleetUpgradeActiveInterval = 30 * time.Second
 	// fleetUpgradeStartDelay lets a freshly started broker settle before its first
@@ -42,8 +43,10 @@ const (
 	fleetUpgradeStartDelay = 15 * time.Second
 	// fleetUpgradeRetryAfter is how long the host leaves an offer alone after an
 	// attempt at it failed, so a persistent failure does not download a release
-	// every few minutes.
-	fleetUpgradeRetryAfter = 30 * time.Minute
+	// every few minutes. It is well inside the gateway's lease on the offer, so a
+	// transient failure (a download that dropped) is retried before the rollout
+	// gives up on the host.
+	fleetUpgradeRetryAfter = 10 * time.Minute
 
 	fleetUpgradeCallBudget     = 30 * time.Second
 	fleetUpgradeDownloadBudget = 15 * time.Minute
@@ -148,14 +151,12 @@ func fleetUpgradeSleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// startFleetUpgrade runs the agent beside the broker when this host is enrolled in
-// a gateway, and returns a function that stops it. A host that cannot read its
-// configuration here simply has no agent: the broker reports that failure itself.
+// startFleetUpgrade runs the agent beside the broker and returns a function that
+// stops it. The agent reads the host's configuration at every look and does
+// nothing on a host with no gateway, so a host that joins a fleet while its broker
+// is running is covered without a restart, and a configuration the agent cannot
+// read is the broker's to report, not the agent's.
 func startFleetUpgrade(configPath string) (stop func()) {
-	cfg, err := config.Load(configPath)
-	if err != nil || cfg.Fleet == nil {
-		return func() {}
-	}
 	return newFleetUpgradeAgent(configPath).start()
 }
 
@@ -240,7 +241,7 @@ func (a *fleetUpgradeAgent) tick(ctx context.Context) {
 	// applies nothing; it says so, and the gateway never offers it anything.
 	applies := cfg.FleetUpgradeAuto() && version.Valid(a.installed)
 	call, cancel := context.WithTimeout(ctx, fleetUpgradeCallBudget)
-	if err := gw.ReportStatus(call, a.status(applies, receipts)); err != nil {
+	if err := gw.ReportStatus(call, a.status(applies, applies && !inProgress, receipts)); err != nil {
 		a.log.Debug("fleet upgrade: status report not delivered", "error", err)
 	}
 	cancel()
@@ -284,9 +285,11 @@ func fleetUpgradeSkip(installed string, offer fleetproto.FleetUpgradeOffer) stri
 }
 
 // status is what the host tells its gateway: its release, whether it applies
-// pushed upgrades, and the latest thing that happened to an upgrade.
-func (a *fleetUpgradeAgent) status(applies bool, receipts []upgrade.Receipt) fleetproto.HostStatus {
-	status := fleetproto.HostStatus{Version: fleetproto.HostStatusVersion, Hostname: a.hostname(), Release: a.installed, AutoUpgrade: applies}
+// pushed upgrades, whether it could take one right now (this report is how it
+// takes its turn: the gateway assigns the offer to a ready host that reports),
+// and the latest thing that happened to an upgrade.
+func (a *fleetUpgradeAgent) status(applies, ready bool, receipts []upgrade.Receipt) fleetproto.HostStatus {
+	status := fleetproto.HostStatus{Version: fleetproto.HostStatusVersion, Hostname: a.hostname(), Release: a.installed, AutoUpgrade: applies, Ready: ready}
 	if len(receipts) > 0 {
 		r := receipts[0]
 		status.Upgrade = &fleetproto.UpgradeResult{Operation: r.ID, Release: r.Release, State: r.State, Outcome: r.Outcome(), Detail: r.Detail, UpdatedAt: r.UpdatedAtUnixMS / 1000}

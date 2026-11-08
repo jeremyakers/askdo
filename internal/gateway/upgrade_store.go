@@ -12,13 +12,13 @@ import (
 	"github.com/jeremyakers/askdo/internal/version"
 )
 
-// UpgradeLeaseTTL is how long the gateway waits for the host it offered the
-// target to report an outcome. The host's helper has 10 minutes to activate and
-// 5 to roll back; this leaves room for its download, the drain before that, and a
-// first report after the restart. When it passes the rollout is paused, not
-// handed to the next host: a host that never reports may be the one a bad release
-// took down.
-const UpgradeLeaseTTL = 45 * time.Minute
+// UpgradeLeaseTTL is how long the gateway waits for the host it assigned the
+// offer to to report an outcome. The host's helper has 10 minutes to activate and
+// 5 to roll back; this leaves room for its download, a retry of a failed
+// download, the drain before the activation, and a first report after the
+// restart. When it passes the rollout is paused, not handed to the next host: a
+// host that never reports may be the one a bad release took down.
+const UpgradeLeaseTTL = time.Hour
 
 // maxNoticeAttempts bounds how often one Telegram notice is retried (once a
 // minute) before it is dropped. A notice informs; nothing else depends on its
@@ -30,11 +30,16 @@ const maxNoticeAttempts = 30
 // opened by the serving gateway and by the operator CLI, which share one file:
 // a target set by the CLI reaches the next catalog without a restart.
 //
-// The rollout is one host at a time. A host that has reported it applies pushed
-// upgrades is offered the target when it asks, if it is older than the target and
-// no other host holds the offer; the offer stays with it until it reports success
-// or failure. A failure pauses the rollout for every host, so one bad release
-// stops at the first host it fails on. Setting the target again starts afresh.
+// The rollout is one host at a time, and a host takes its turn by reporting. A
+// host whose report says it is ready (it applies pushed upgrades and none is
+// running on it) is assigned the offer if it is older than the target, the
+// rollout is not paused and no other host holds the offer; the offer then stays
+// with it until it reports success or failure. Only that host's catalog carries
+// it. Reading a catalog never assigns it: the broker reads the catalog for every
+// job it reviews, and the activation's own probe reads it too, and neither can
+// act on an offer. A failure pauses the rollout for every host, so one bad
+// release stops at the first host it fails on. Setting the target again starts
+// afresh.
 type UpgradeStore struct{ enrollment *EnrollmentStore }
 
 // UpgradeTarget is the release the fleet is to run and where its rollout stands.
@@ -245,11 +250,12 @@ func hostLabel(hostname, hostID string) string {
 	return hostname + " (" + short + ")"
 }
 
-// Record stores what a host reported and acts on it: a new result for the target
-// releases the host's offer, a failed one pauses the rollout, and either queues a
-// notice. A result only counts when it differs from the one the gateway last saw
-// for that host, so receipts written long before the target was set (or before
-// the gateway first heard from the host) are not mistaken for its outcome.
+// Record stores what a host reported and acts on it (see advance): it announces
+// and acts on the host's result, ends or expires the host's turn, and assigns the
+// offer to a host that is ready for it. A result only counts when it differs from
+// the one the gateway last saw for that host, so receipts written long before the
+// target was set (or before the gateway first heard from the host) are not
+// mistaken for its outcome.
 func (s *UpgradeStore) Record(ctx context.Context, hostID string, report fleetproto.HostStatus, now time.Time) error {
 	report = report.Cleaned()
 	tx, err := s.db().BeginTx(ctx, nil)
@@ -279,29 +285,9 @@ func (s *UpgradeStore) Record(ctx context.Context, hostID string, report fleetpr
 		return err
 	}
 	if hasTarget {
-		releaseOffer := false
 		fresh := existed && report.Upgrade != nil && (prev.Operation != result.Operation || prev.State != result.State || prev.UpdatedAt != result.UpdatedAt)
-		if outcome := resultOutcome(result); fresh && outcome != "" && result.Release == target.Release {
-			releaseOffer = true
-			pause := ""
-			if outcome != "succeeded" && target.PausedReason == "" {
-				pause = fmt.Sprintf("%s: upgrade to %s ended %s", hostLabel(report.Hostname, hostID), target.Release, strings.ReplaceAll(outcome, "_", " "))
-				if _, err = tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET paused=? WHERE id=1", pause); err != nil {
-					return err
-				}
-			}
-			if err = queueNotice(ctx, tx, UpgradeNotice{HostID: hostID, Hostname: report.Hostname, Outcome: outcome, Release: result.Release, Running: report.Release, Detail: result.Detail, Paused: pause != ""}, result.Operation, result.UpdatedAt); err != nil {
-				return err
-			}
-		}
-		// A host that now runs the target, or is newer than it, has no turn left.
-		if c, err := version.Compare(report.Release, target.Release); err == nil && c >= 0 {
-			releaseOffer = true
-		}
-		if releaseOffer && target.LeaseHost == hostID {
-			if _, err = tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET lease_host='',lease_expires=0 WHERE id=1 AND lease_host=?", hostID); err != nil {
-				return err
-			}
+		if err = advance(ctx, tx, target, hostID, report, fresh, now); err != nil {
+			return err
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -311,79 +297,101 @@ func (s *UpgradeStore) Record(ctx context.Context, hostID string, report fleetpr
 	return nil
 }
 
+// advance applies one host's report to the rollout of t, in this order:
+//
+//  1. A result for the target that ended (fresh: the gateway had not seen it
+//     before) is announced, and pauses the rollout unless it succeeded.
+//  2. The host's turn ends if it held the offer and has concluded, has opted out,
+//     or runs the target with nothing running on it (it was upgraded some other
+//     way). A host that runs the target while its own upgrade is still being
+//     verified keeps the offer: the next host must not start before that verdict.
+//  3. An offer whose host reported no outcome in time pauses the rollout instead
+//     of moving on: that host may be the one a bad release took down.
+//  4. If nobody holds the offer and the rollout runs, a host that is ready and
+//     older than the target takes it. The compare-and-set keeps it to one host.
+func advance(ctx context.Context, tx *sql.Tx, t UpgradeTarget, hostID string, report fleetproto.HostStatus, fresh bool, now time.Time) error {
+	var result fleetproto.UpgradeResult
+	if report.Upgrade != nil {
+		result = *report.Upgrade
+	}
+	concluded := false
+	if outcome := resultOutcome(result); fresh && outcome != "" && result.Release == t.Release {
+		concluded = true
+		pause := ""
+		if outcome != "succeeded" && t.PausedReason == "" {
+			pause = fmt.Sprintf("%s: upgrade to %s ended %s", hostLabel(report.Hostname, hostID), t.Release, strings.ReplaceAll(outcome, "_", " "))
+			if _, err := tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET paused=? WHERE id=1", pause); err != nil {
+				return err
+			}
+			t.PausedReason = pause
+		}
+		if err := queueNotice(ctx, tx, UpgradeNotice{HostID: hostID, Hostname: report.Hostname, Outcome: outcome, Release: result.Release, Running: report.Release, Detail: result.Detail, Paused: pause != ""}, result.Operation, result.UpdatedAt); err != nil {
+			return err
+		}
+	}
+
+	comparison, comparable := version.Compare(report.Release, t.Release)
+	runsTarget := comparable == nil && comparison >= 0
+	if t.LeaseHost == hostID && (concluded || !report.AutoUpgrade || runsTarget && report.Ready) {
+		if _, err := tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET lease_host='',lease_expires=0 WHERE id=1 AND lease_host=?", hostID); err != nil {
+			return err
+		}
+		t.LeaseHost = ""
+	}
+
+	if t.LeaseHost != "" && t.PausedReason == "" && !t.LeaseExpires.After(now) {
+		reason, err := pauseExpiredLease(ctx, tx, t)
+		if err != nil {
+			return err
+		}
+		t.PausedReason, t.LeaseHost = reason, ""
+	}
+
+	if t.PausedReason == "" && t.LeaseHost == "" && report.AutoUpgrade && report.Ready && comparable == nil && comparison < 0 {
+		if _, err := tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET lease_host=?,lease_expires=? WHERE id=1 AND lease_host='' AND paused=''", hostID, now.Add(UpgradeLeaseTTL).Unix()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func queueNotice(ctx context.Context, tx *sql.Tx, n UpgradeNotice, op string, at int64) error {
 	_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO gateway_upgrade_notices(host_id,hostname,op,outcome,at,release,running,detail,paused) VALUES(?,?,?,?,?,?,?,?,?)", n.HostID, n.Hostname, op, n.Outcome, at, n.Release, n.Running, n.Detail, n.Paused)
 	return err
 }
 
-// Offer returns what the gateway offers hostID right now: the target, when it is
-// older than the target on a host that applies pushed upgrades, the rollout is not
-// paused and no other host holds the offer. Offering it to the first host that
-// asks is what holds it: the offer then stays with that host until it reports.
-// A host that has not reported (any host from before the report existed) is never
-// offered anything, so it never sees a catalog field it does not know.
+// Offer returns what the gateway offers hostID right now: the target, if the
+// rollout is running and the offer is assigned to this host and has not expired.
+// It only reads. Assigning the offer is Record's job, on the report of a host that
+// says it is ready, because the catalog is read by callers that cannot act on an
+// offer (every job review, the activation's own probe). A host that has not
+// reported (any host from before the report existed) is never assigned the offer,
+// so it never sees a catalog field it does not know.
 func (s *UpgradeStore) Offer(ctx context.Context, hostID string, now time.Time) (*fleetproto.FleetUpgradeOffer, error) {
-	tx, err := s.db().BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	target, hasTarget, err := readTarget(ctx, tx)
-	if err != nil || !hasTarget || target.PausedReason != "" {
-		return nil, err
-	}
-	var release string
-	var auto bool
-	err = tx.QueryRowContext(ctx, "SELECT release,auto FROM gateway_host_status WHERE host_id=?", hostID).Scan(&release, &auto)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && !auto {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if c, err := version.Compare(release, target.Release); err != nil || c >= 0 {
-		return nil, nil
-	}
-	switch {
-	case target.LeaseHost == "":
-		if _, err = tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET lease_host=?,lease_expires=? WHERE id=1", hostID, now.Add(UpgradeLeaseTTL).Unix()); err != nil {
-			return nil, err
-		}
-	case !target.LeaseExpires.After(now):
-		if err = s.pauseExpiredLease(ctx, tx, target, now); err != nil {
-			return nil, err
-		}
-		if err = tx.Commit(); err != nil {
-			return nil, err
-		}
-		s.enrollment.changes.notify()
-		return nil, nil
-	case target.LeaseHost != hostID:
-		return nil, nil
-	}
-	if err = tx.Commit(); err != nil {
+	target, hasTarget, err := readTarget(ctx, s.db())
+	if err != nil || !hasTarget || target.PausedReason != "" || target.LeaseHost != hostID || !target.LeaseExpires.After(now) {
 		return nil, err
 	}
 	return &fleetproto.FleetUpgradeOffer{Release: target.Release, ManifestSHA256: target.ManifestSHA256}, nil
 }
 
 // pauseExpiredLease stops the rollout because the host holding the offer never
-// reported an outcome, and queues the notice that says so.
-func (s *UpgradeStore) pauseExpiredLease(ctx context.Context, tx *sql.Tx, target UpgradeTarget, now time.Time) error {
+// reported an outcome, queues the notice that says so and returns the reason.
+func pauseExpiredLease(ctx context.Context, tx *sql.Tx, target UpgradeTarget) (string, error) {
 	var hostname string
 	if err := tx.QueryRowContext(ctx, "SELECT hostname FROM gateway_host_status WHERE host_id=?", target.LeaseHost).Scan(&hostname); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return "", err
 	}
-	reason := fmt.Sprintf("%s was offered %s and reported no outcome within %s", hostLabel(hostname, target.LeaseHost), target.Release, UpgradeLeaseTTL)
+	reason := fmt.Sprintf("%s was offered %s and reported no outcome within %d minutes", hostLabel(hostname, target.LeaseHost), target.Release, int(UpgradeLeaseTTL.Minutes()))
 	if _, err := tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET paused=?,lease_host='',lease_expires=0 WHERE id=1", reason); err != nil {
-		return err
+		return "", err
 	}
-	return queueNotice(ctx, tx, UpgradeNotice{HostID: target.LeaseHost, Hostname: hostname, Outcome: "lease_expired", Release: target.Release, Paused: true}, "", target.LeaseExpires.Unix())
+	return reason, queueNotice(ctx, tx, UpgradeNotice{HostID: target.LeaseHost, Hostname: hostname, Outcome: "lease_expired", Release: target.Release, Paused: true}, "", target.LeaseExpires.Unix())
 }
 
 // ExpireLease pauses the rollout if the host holding the offer has had it for
 // longer than UpgradeLeaseTTL without reporting. The gateway calls it when it is
-// due, so the pause and its notice do not wait for another host to ask.
+// due, so the pause and its notice do not wait for another host to report.
 func (s *UpgradeStore) ExpireLease(ctx context.Context, now time.Time) (bool, error) {
 	tx, err := s.db().BeginTx(ctx, nil)
 	if err != nil {
@@ -394,7 +402,7 @@ func (s *UpgradeStore) ExpireLease(ctx context.Context, now time.Time) (bool, er
 	if err != nil || !hasTarget || target.PausedReason != "" || target.LeaseHost == "" || target.LeaseExpires.After(now) {
 		return false, err
 	}
-	if err = s.pauseExpiredLease(ctx, tx, target, now); err != nil {
+	if _, err = pauseExpiredLease(ctx, tx, target); err != nil {
 		return false, err
 	}
 	if err = tx.Commit(); err != nil {

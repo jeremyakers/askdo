@@ -79,7 +79,7 @@ func setGatewayUpgradeTarget(ctx context.Context, upgrades *gateway.UpgradeStore
 		return err
 	}
 	fmt.Fprintf(out, "fleet upgrade target: %s\nsource commit: %s\nmanifest SHA-256: %s\n", manifest.Tag, manifest.SourceCommit, manifest.Digest)
-	fmt.Fprintln(out, "Hosts that apply pushed upgrades are offered it one at a time, the next when the last reports success. A failed upgrade pauses the rollout and you are told on Telegram; run this command again to resume.")
+	fmt.Fprintln(out, "Hosts that apply pushed upgrades take it one at a time, in the order they report that they are ready; the next after the last reports success. A failed upgrade pauses the rollout and you are told on Telegram; run this command again to resume.")
 	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) {
 		fmt.Fprintf(out, "warning: %s was being offered %s until %s and may still be upgrading; its upgrade is not stopped, and the next host may start before it finishes\n", previous.LeaseHost, previous.Release, previous.LeaseExpires.Local().Format(time.RFC3339))
 	}
@@ -102,7 +102,7 @@ func showGatewayUpgradeTarget(ctx context.Context, upgrades *gateway.UpgradeStor
 	case target.LeaseHost != "":
 		fmt.Fprintf(out, "rollout: running\noffered to: %s until %s\n", target.LeaseHost, target.LeaseExpires.Local().Format(time.RFC3339))
 	default:
-		fmt.Fprintln(out, "rollout: running\noffered to: nobody now (the next host to ask that is older gets it)")
+		fmt.Fprintln(out, "rollout: running\noffered to: nobody now (the next ready host to report that is older gets it)")
 	}
 	return nil
 }

@@ -106,7 +106,7 @@ func base64Replace(t *testing.T, encoded, old, replacement string) string {
 }
 
 func TestHostStatusRoundTripsThroughTheWire(t *testing.T) {
-	want := HostStatus{Version: HostStatusVersion, Hostname: "nas-01", Release: "v1.0.0-rc.34", AutoUpgrade: true, Upgrade: &UpgradeResult{Operation: "up_" + strings.Repeat("0", 32), Release: "v1.0.0-rc.34", State: "succeeded", Detail: "verified", UpdatedAt: 1_700_000_000}}
+	want := HostStatus{Version: HostStatusVersion, Hostname: "nas-01", Release: "v1.0.0-rc.34", AutoUpgrade: true, Ready: true, Upgrade: &UpgradeResult{Operation: "up_" + strings.Repeat("0", 32), Release: "v1.0.0-rc.34", State: "succeeded", Detail: "verified", UpdatedAt: 1_700_000_000}}
 	data, err := MarshalHostStatus(want)
 	if err != nil {
 		t.Fatal(err)
@@ -115,21 +115,21 @@ func TestHostStatusRoundTripsThroughTheWire(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, %v from %s", got, err, data)
 	}
-	// A host that does not know its release reports none; auto_upgrade stays an
-	// explicit false rather than an omitted field.
+	// Only the version is required: a host that says nothing else is a host that
+	// applies nothing and is not ready, and a report that is just that is valid.
 	data, err = MarshalHostStatus(HostStatus{Version: HostStatusVersion})
-	if err != nil || string(data) != `{"version":1,"auto_upgrade":false}` {
+	if err != nil || string(data) != `{"version":1}` {
 		t.Fatalf("minimal report = %s, %v", data, err)
 	}
-	if _, err := ParseHostStatus(data); err != nil {
-		t.Fatal(err)
+	if got, err := ParseHostStatus(data); err != nil || got.AutoUpgrade || got.Ready || got.Release != "" || got.Upgrade != nil {
+		t.Fatalf("minimal report read as %+v, %v", got, err)
 	}
 }
 
 // A host status reports something and asks for nothing, so a field a newer host
 // adds is ignored at any depth rather than costing the gateway the whole report.
 func TestHostStatusIgnoresAdditiveFieldsAtEveryDepth(t *testing.T) {
-	want := HostStatus{Version: HostStatusVersion, Release: "v1.0.0", AutoUpgrade: true, Upgrade: &UpgradeResult{State: "failed", Outcome: "rolled_back"}}
+	want := HostStatus{Version: HostStatusVersion, Release: "v1.0.0", AutoUpgrade: true, Ready: true, Upgrade: &UpgradeResult{State: "failed", Outcome: "rolled_back"}}
 	payload, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
@@ -149,10 +149,10 @@ func TestHostStatusStillRefusesWhatIsNotAReport(t *testing.T) {
 		"null":                   `null`,
 		"no version":             `{"auto_upgrade":true}`,
 		"another version":        `{"version":2,"auto_upgrade":true}`,
-		"no auto_upgrade":        `{"version":1}`,
 		"duplicate key":          `{"version":1,"auto_upgrade":true,"release":"v1.0.0","release":"v1.0.1"}`,
 		"aliased spelling":       `{"version":1,"auto_upgrade":true,"Release":"v1.0.0"}`,
 		"wrong type":             `{"version":1,"auto_upgrade":"yes"}`,
+		"wrong type for ready":   `{"version":1,"ready":1}`,
 		"trailing value":         `{"version":1,"auto_upgrade":true} {}`,
 		"null upgrade result":    `{"version":1,"auto_upgrade":true,"upgrade":null}`,
 		"nul in text":            `{"version":1,"auto_upgrade":true,"hostname":"a\u0000b"}`,

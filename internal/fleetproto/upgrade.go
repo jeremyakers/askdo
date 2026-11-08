@@ -8,11 +8,11 @@ import "strings"
 // of that release's install manifest, and the host still downloads the release
 // from the official repository, checks that digest and never downgrades.
 //
-// The gateway sends the offer only to a host that has reported it applies
-// pushed upgrades (HostStatus.AutoUpgrade), so a host that does not know the
-// field never receives it. Both fields are optional on the wire: a catalog is
-// read whole, and an offer a host cannot act on is ignored, never a reason to
-// refuse the catalog and with it every review.
+// The gateway sends the offer only to the host it has assigned it to, which it
+// does only for a host that reports it is ready for one (HostStatus.Ready), so a
+// host that does not know the field never receives it. Both fields are optional
+// on the wire: a catalog is read whole, and an offer a host cannot act on is
+// ignored, never a reason to refuse the catalog and with it every review.
 type FleetUpgradeOffer struct {
 	Release        string `json:"release,omitempty"`
 	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
@@ -53,9 +53,15 @@ type UpgradeResult struct {
 }
 
 // HostStatus is a host's report to its gateway: which release it runs, whether
-// it applies upgrades the gateway pushes, and how its last upgrade ended. It
-// reports something and asks for nothing, so it is not a request: a field a
-// newer host adds is ignored, as in every other report.
+// it applies upgrades the gateway pushes, whether it could take one now, and how
+// its last upgrade ended. It describes the host and asks for nothing, so it is
+// not a request: a field a newer host adds is ignored, as in every other report.
+// Every field but the version is optional, and an absent flag means no.
+//
+// The report is also how a host takes its turn. The catalog is read by much more
+// than the upgrade agent (every job review, the activation's own probe), so
+// reading it never assigns the offer; the gateway assigns it when a host whose
+// report says Ready reports, and only then shows it in that host's catalog.
 type HostStatus struct {
 	Version int `json:"version"`
 	// Hostname is display-only text for the operator, never an identity.
@@ -63,15 +69,18 @@ type HostStatus struct {
 	// Release is the release this binary was built from; empty when it does not
 	// know (any build that is not a release build).
 	Release string `json:"release,omitempty"`
-	// AutoUpgrade is whether this host will act on an offer: upgrades are not
+	// AutoUpgrade is whether this host applies pushed upgrades: they are not
 	// switched off in its configuration and its release is one it can compare.
-	AutoUpgrade bool           `json:"auto_upgrade"`
-	Upgrade     *UpgradeResult `json:"upgrade,omitempty"`
+	AutoUpgrade bool `json:"auto_upgrade,omitempty"`
+	// Ready is whether the host would act on an offer right now: it applies
+	// pushed upgrades and no upgrade is running on it.
+	Ready   bool           `json:"ready,omitempty"`
+	Upgrade *UpgradeResult `json:"upgrade,omitempty"`
 }
 
 // ParseHostStatus reads a host status report. Duplicate keys, a missing version
-// or auto_upgrade and the size bound are refused like any wire message; fields
-// this build does not define are ignored.
+// and the size bound are refused like any wire message; fields this build does
+// not define are ignored.
 func ParseHostStatus(data []byte) (HostStatus, error) {
 	var status HostStatus
 	if err := strict(data, &status, MaxHostStatusBytes); err != nil {

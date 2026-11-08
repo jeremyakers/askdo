@@ -154,7 +154,7 @@ func (f *upgradeWireFixture) sentTo(t *testing.T, text string, n int) []botSentM
 func TestHostStatusEndpointRecordsTheHostItAuthenticates(t *testing.T) {
 	f := upgradeWire(t, 0)
 	a, b := f.enroll(t), f.enroll(t)
-	good := []byte(`{"version":1,"hostname":"nas-01","release":"v1.0.0","auto_upgrade":true,"host_id":"` + b.id + `","upgrade":{"release":"v1.0.0","state":"succeeded","operation":"up_x","future":1},"future":{"x":1}}`)
+	good := []byte(`{"version":1,"hostname":"nas-01","release":"v1.0.0","auto_upgrade":true,"ready":true,"host_id":"` + b.id + `","upgrade":{"release":"v1.0.0","state":"succeeded","operation":"up_x","future":1},"future":{"x":1}}`)
 	code, body := f.do(t, http.MethodPut, "/v1/host-status", a, good)
 	if code != 200 || string(body) != `{"version":1}` {
 		t.Fatalf("report = %d %s", code, body)
@@ -176,13 +176,13 @@ func TestHostStatusEndpointRecordsTheHostItAuthenticates(t *testing.T) {
 		body []byte
 		want int
 	}{
-		"no credentials":  {enrolledHost{}, good, 401},
-		"wrong bearer":    {enrolledHost{a.id, b.bearer}, good, 401},
-		"unknown host":    {enrolledHost{"host_nobody", a.bearer}, good, 401},
-		"not JSON":        {a, []byte(`{`), 400},
-		"no version":      {a, []byte(`{"auto_upgrade":true}`), 400},
-		"no auto_upgrade": {a, []byte(`{"version":1}`), 400},
-		"too large":       {a, []byte(`{"version":1,"auto_upgrade":true,"hostname":"` + strings.Repeat("a", fleetproto.MaxHostStatusBytes) + `"}`), 400},
+		"no credentials":   {enrolledHost{}, good, 401},
+		"wrong bearer":     {enrolledHost{a.id, b.bearer}, good, 401},
+		"unknown host":     {enrolledHost{"host_nobody", a.bearer}, good, 401},
+		"not JSON":         {a, []byte(`{`), 400},
+		"no version":       {a, []byte(`{"auto_upgrade":true}`), 400},
+		"too large":        {a, []byte(`{"version":1,"auto_upgrade":true,"hostname":"` + strings.Repeat("a", fleetproto.MaxHostStatusBytes) + `"}`), 400},
+		"only the version": {a, []byte(`{"version":1}`), 200},
 	} {
 		if code, body := f.do(t, http.MethodPut, "/v1/host-status", tc.host, tc.body); code != tc.want {
 			t.Errorf("%s: %d %s, want %d", name, code, body, tc.want)
@@ -200,16 +200,32 @@ func TestHostStatusEndpointRecordsTheHostItAuthenticates(t *testing.T) {
 	}
 }
 
-func TestCatalogCarriesTheOfferOnlyToTheHostWhoseTurnItIs(t *testing.T) {
-	f := upgradeWire(t, 0)
-	ctx := context.Background()
-	old := fleetproto.HostStatus{Version: 1, Release: "v1.0.0-rc.34", AutoUpgrade: true}
-	a, b, silent := f.enroll(t), f.enroll(t), f.enroll(t)
-	f.report(t, a, old)
-	f.report(t, b, old)
-	if _, err := f.upgrades(t).SetTarget(ctx, "v1.0.0", upgradeDigest, time.Now()); err != nil {
+// ready is the report of an agent with nothing running and pushed upgrades on.
+func ready(release string) fleetproto.HostStatus {
+	return fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: release, AutoUpgrade: true, Ready: true}
+}
+
+func running(release string, state string, at int64) fleetproto.HostStatus {
+	return fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: release, AutoUpgrade: true, Upgrade: &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.1", State: state, UpdatedAt: at}}
+}
+
+func finished(release, state, outcome string, at int64) fleetproto.HostStatus {
+	return fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: release, AutoUpgrade: true, Ready: true, Upgrade: &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.1", State: state, Outcome: outcome, Detail: "verify responsiveness failed; rolled back to previous release", UpdatedAt: at}}
+}
+
+func (f *upgradeWireFixture) setTarget(t *testing.T, release string) {
+	t.Helper()
+	if _, err := f.upgrades(t).SetTarget(context.Background(), release, upgradeDigest, time.Now()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestCatalogCarriesTheOfferOnlyToTheHostWhoseTurnItIs(t *testing.T) {
+	f := upgradeWire(t, 0)
+	a, b, silent := f.enroll(t), f.enroll(t), f.enroll(t)
+	f.setTarget(t, "v1.0.0")
+	f.report(t, a, ready("v1.0.0-rc.34")) // the first ready host to report takes its turn
+	f.report(t, b, ready("v1.0.0-rc.34"))
 
 	got, payload := f.catalog(t, a)
 	if got.FleetUpgrade == nil || got.FleetUpgrade.Release != "v1.0.0" || got.FleetUpgrade.ManifestSHA256 != upgradeDigest {
@@ -230,9 +246,10 @@ func TestCatalogCarriesTheOfferOnlyToTheHostWhoseTurnItIs(t *testing.T) {
 	if len(got.Profiles) != 1 || got.Route.ChannelID != "default" {
 		t.Fatalf("catalog = %+v", got)
 	}
-	// Host a finishes; host b's turn.
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true, Upgrade: &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.0", State: "verifying", UpdatedAt: 1}})
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true, Upgrade: &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.0", State: "succeeded", UpdatedAt: 2}})
+	// Host a upgrades and finishes; host b takes its turn when it next reports.
+	f.report(t, a, running("v1.0.0", "verifying", 1))
+	f.report(t, a, finished("v1.0.0", "succeeded", "", 2))
+	f.report(t, b, ready("v1.0.0-rc.34"))
 	if catalog, _ := f.catalog(t, b); catalog.FleetUpgrade == nil {
 		t.Fatal("host b was not offered the target after host a finished")
 	}
@@ -246,9 +263,10 @@ func TestCatalogCarriesTheOfferOnlyToTheHostWhoseTurnItIs(t *testing.T) {
 func TestCatalogIsStillServedWhenTheUpgradeStoreFails(t *testing.T) {
 	f := upgradeWire(t, 0)
 	a := f.enroll(t)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true})
-	if _, err := f.upgrades(t).SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
-		t.Fatal(err)
+	f.setTarget(t, "v1.0.1")
+	f.report(t, a, ready("v1.0.0"))
+	if catalog, _ := f.catalog(t, a); catalog.FleetUpgrade == nil {
+		t.Fatal("host a was not offered the target")
 	}
 	if _, err := f.db.db.Exec("DROP TABLE gateway_upgrade_target"); err != nil {
 		t.Fatal(err)
@@ -260,11 +278,12 @@ func TestCatalogIsStillServedWhenTheUpgradeStoreFails(t *testing.T) {
 }
 
 // The operator CLI is another process on the same database: a target it sets
-// reaches the serving gateway's next catalog without a restart.
+// reaches the serving gateway without a restart, and the host takes its turn with
+// its next report.
 func TestATargetSetByAnotherProcessIsOfferedWithoutARestart(t *testing.T) {
 	f := upgradeWire(t, 0)
 	a := f.enroll(t)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true})
+	f.report(t, a, ready("v1.0.0"))
 	if catalog, _ := f.catalog(t, a); catalog.FleetUpgrade != nil {
 		t.Fatal("offer before any target")
 	}
@@ -280,6 +299,7 @@ func TestATargetSetByAnotherProcessIsOfferedWithoutARestart(t *testing.T) {
 	if _, err := cliUpgrades.SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	f.report(t, a, ready("v1.0.0"))
 	if catalog, _ := f.catalog(t, a); catalog.FleetUpgrade == nil || catalog.FleetUpgrade.Release != "v1.0.1" {
 		t.Fatalf("offer = %+v", catalog.FleetUpgrade)
 	}
@@ -288,18 +308,13 @@ func TestATargetSetByAnotherProcessIsOfferedWithoutARestart(t *testing.T) {
 func TestUpgradeNoticesReachEveryRecipientOfTheHostsChannelAsButtonlessMessages(t *testing.T) {
 	f := upgradeWire(t, 0)
 	a, b := f.enroll(t), f.enroll(t)
-	old := fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: "v1.0.0", AutoUpgrade: true}
-	f.report(t, a, old)
-	f.report(t, b, fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true})
-	if _, err := f.upgrades(t).SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	f.catalog(t, a) // host a is offered the target
+	f.setTarget(t, "v1.0.1")
+	f.report(t, a, ready("v1.0.0")) // host a takes its turn
+	f.report(t, b, ready("v1.0.0"))
 	// It tries, fails after stopping the services, and is rolled back.
-	old.Upgrade = &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.1", State: "activating", UpdatedAt: 1}
-	f.report(t, a, old)
-	old.Upgrade = &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.1", State: "failed", Outcome: "rolled_back", Detail: "verify responsiveness failed; rolled back to previous release", UpdatedAt: 2}
-	f.report(t, a, old)
+	f.report(t, a, running("v1.0.0", "activating", 1))
+	failed := finished("v1.0.0", "failed", "rolled_back", 2)
+	f.report(t, a, failed)
 
 	messages := f.sentTo(t, "rolled back", 2)
 	chats := map[int64]bool{}
@@ -318,10 +333,11 @@ func TestUpgradeNoticesReachEveryRecipientOfTheHostsChannelAsButtonlessMessages(
 		t.Fatalf("notice reached chats %v, want both recipients of the channel", chats)
 	}
 	// Reporting the same result again says nothing more.
-	f.report(t, a, old)
+	f.report(t, a, failed)
 	time.Sleep(200 * time.Millisecond)
 	f.sentTo(t, "rolled back", 2)
 	// And the rollout really is paused for the other host.
+	f.report(t, b, ready("v1.0.0"))
 	if catalog, _ := f.catalog(t, b); catalog.FleetUpgrade != nil {
 		t.Fatalf("host b was offered the target on a paused rollout: %+v", catalog.FleetUpgrade)
 	}
@@ -330,12 +346,9 @@ func TestUpgradeNoticesReachEveryRecipientOfTheHostsChannelAsButtonlessMessages(
 func TestASuccessNoticeDoesNotPauseAnything(t *testing.T) {
 	f := upgradeWire(t, 0)
 	a := f.enroll(t)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: "v1.0.0", AutoUpgrade: true})
-	if _, err := f.upgrades(t).SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	f.catalog(t, a)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: "v1.0.1", AutoUpgrade: true, Upgrade: &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.1", State: "succeeded", UpdatedAt: 3}})
+	f.setTarget(t, "v1.0.1")
+	f.report(t, a, ready("v1.0.0"))
+	f.report(t, a, finished("v1.0.1", "succeeded", "", 3))
 	for _, m := range f.sentTo(t, "askdo upgraded", 2) {
 		if strings.Contains(m.Text, "Rollout paused") || len(m.Buttons) != 0 {
 			t.Errorf("success notice = %+v", m)
@@ -348,12 +361,9 @@ func TestASuccessNoticeDoesNotPauseAnything(t *testing.T) {
 func TestAnUndeliveredNoticeIsRetriedWithoutRepeatingToChatsThatHaveIt(t *testing.T) {
 	f := upgradeWire(t, 2) // the second send, to chat 4, fails once
 	a := f.enroll(t)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: "v1.0.0", AutoUpgrade: true})
-	if _, err := f.upgrades(t).SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	f.catalog(t, a)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: "v1.0.1", AutoUpgrade: true, Upgrade: &fleetproto.UpgradeResult{Operation: "up_a", Release: "v1.0.1", State: "succeeded", UpdatedAt: 3}})
+	f.setTarget(t, "v1.0.1")
+	f.report(t, a, ready("v1.0.0"))
+	f.report(t, a, finished("v1.0.1", "succeeded", "", 3))
 	messages := f.sentTo(t, "askdo upgraded", 2) // chat 1 once, chat 4 once (its first try failed)
 	perChat := map[int64]int{}
 	for _, m := range messages {
@@ -376,11 +386,11 @@ func TestAnUndeliveredNoticeIsRetriedWithoutRepeatingToChatsThatHaveIt(t *testin
 func TestAnOfferNeverReportedOnPausesAndTellsTheOperator(t *testing.T) {
 	f := upgradeWire(t, 0)
 	a := f.enroll(t)
-	f.report(t, a, fleetproto.HostStatus{Version: 1, Hostname: "nas-01", Release: "v1.0.0", AutoUpgrade: true})
-	if _, err := f.upgrades(t).SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
-		t.Fatal(err)
+	f.setTarget(t, "v1.0.1")
+	f.report(t, a, ready("v1.0.0")) // host a takes its turn
+	if target, _, _ := f.upgrades(t).Target(context.Background()); target.LeaseHost != a.id {
+		t.Fatalf("host a does not hold the offer: %+v", target)
 	}
-	f.catalog(t, a)
 	// The host holding the offer goes quiet past the allowance. Nothing asks the
 	// gateway anything: its own timer pauses the rollout and says so.
 	if _, err := f.db.db.Exec("UPDATE gateway_upgrade_target SET lease_expires=?", time.Now().Add(-time.Minute).Unix()); err != nil {

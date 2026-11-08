@@ -91,7 +91,7 @@ func TestGatewayRootUpgradeTargetLifecycle(t *testing.T) {
 	if code := call("v1.0.1", "--config", path); code != 0 {
 		t.Fatalf("set: %d %s", code, stderr.String())
 	}
-	for _, want := range []string{"fleet upgrade target: v1.0.1", "manifest SHA-256: " + gatewayTargetDigest, "source commit: " + strings.Repeat("ab", 20), "one at a time", "pauses the rollout"} {
+	for _, want := range []string{"fleet upgrade target: v1.0.1", "manifest SHA-256: " + gatewayTargetDigest, "source commit: " + strings.Repeat("ab", 20), "one at a time", "ready", "pauses the rollout"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("set output lacks %q:\n%s", want, out.String())
 		}
@@ -163,8 +163,8 @@ func TestGatewayRootUpgradeTargetShowsPausesAndWarnsAboutAnOfferInFlight(t *test
 	}
 	ctx := context.Background()
 	now := time.Now()
-	// host_a asks for the target and holds it.
-	if err := upgrades.Record(ctx, "host_a", fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true}, now); err != nil {
+	// host_a reports that it is ready and takes the offer.
+	if err := upgrades.Record(ctx, "host_a", fleetproto.HostStatus{Version: 1, Release: "v1.0.0", AutoUpgrade: true, Ready: true}, now); err != nil {
 		t.Fatal(err)
 	}
 	if offer, err := upgrades.Offer(ctx, "host_a", now); err != nil || offer == nil {

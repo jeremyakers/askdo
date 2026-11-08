@@ -217,7 +217,19 @@ func TestFleetUpgradeRolloutThroughARealGateway(t *testing.T) {
 		t.Fatalf("a host that never reported saw an offer: %+v %v", catalog.FleetUpgrade, err)
 	}
 
-	// Host A is first to ask; B must wait its turn.
+	// Host C's broker reviews a job: it reads the catalog, as it does for every job.
+	// Reading is not taking a turn, so this must not take the offer away from the
+	// host whose agent reports first.
+	reviewClient, err := fleetclient.New(hostC.fleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reviewClient.Close()
+	if catalog, err := reviewClient.Catalogue(ctx, 1000); err != nil || catalog.FleetUpgrade != nil {
+		t.Fatalf("a job review's catalog read was offered an upgrade: %+v %v", catalog.FleetUpgrade, err)
+	}
+
+	// Host A is the first ready host to report; B must wait its turn.
 	hostA.agent.tick(ctx)
 	hostB.agent.tick(ctx)
 	if len(hostA.scheduled) != 1 || len(hostB.scheduled) != 0 {

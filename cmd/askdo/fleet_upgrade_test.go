@@ -267,8 +267,8 @@ func TestFleetUpgradeTickDecidesPerHost(t *testing.T) {
 			}
 			if tc.reports > 0 {
 				report := f.gateway.lastReport(t)
-				if report.Version != fleetproto.HostStatusVersion || report.Hostname != "nas-01" || report.Release != tc.installed || report.AutoUpgrade != tc.applies {
-					t.Fatalf("report = %+v, want release %q auto_upgrade %v", report, tc.installed, tc.applies)
+				if report.Version != fleetproto.HostStatusVersion || report.Hostname != "nas-01" || report.Release != tc.installed || report.AutoUpgrade != tc.applies || report.Ready != tc.applies {
+					t.Fatalf("report = %+v, want release %q auto_upgrade %v ready %v", report, tc.installed, tc.applies, tc.applies)
 				}
 			}
 			if f.gateway.closed != map[bool]int{true: 0, false: 1}[tc.standalone] {
@@ -349,6 +349,11 @@ func TestFleetUpgradeSchedulesTheDownloadedReleaseThroughTheHelper(t *testing.T)
 	report := f.gateway.lastReport(t)
 	if report.Upgrade == nil || report.Upgrade.State != "scheduled" || report.Upgrade.Release != "v1.0.0" || report.Upgrade.Operation != bundle.Operation {
 		t.Fatalf("report while upgrading = %+v", report.Upgrade)
+	}
+	// It still applies pushed upgrades but cannot take another: the gateway assigns
+	// the offer only to a host that reports it is ready.
+	if !report.AutoUpgrade || report.Ready {
+		t.Fatalf("while upgrading the host reports auto_upgrade=%v ready=%v, want true and false", report.AutoUpgrade, report.Ready)
 	}
 	if f.agent.interval() != fleetUpgradeActiveInterval {
 		t.Fatalf("interval while upgrading = %v, want %v", f.agent.interval(), fleetUpgradeActiveInterval)
@@ -501,10 +506,14 @@ func TestFleetUpgradeReportsTheLatestReceiptWhateverStartedIt(t *testing.T) {
 
 	f.tick()
 
-	got := f.gateway.lastReport(t).Upgrade
+	report := f.gateway.lastReport(t)
+	got := report.Upgrade
 	want := &fleetproto.UpgradeResult{Operation: recent.ID, Release: "v1.0.0", State: "failed", Outcome: upgrade.OutcomeRolledBack, Detail: recent.Detail, UpdatedAt: recent.UpdatedAtUnixMS / 1000}
 	if got == nil || *got != *want {
 		t.Fatalf("report = %+v, want %+v", got, want)
+	}
+	if !report.Ready {
+		t.Fatal("a host whose last upgrade ended reports it is not ready")
 	}
 	if f.agent.interval() == fleetUpgradeActiveInterval {
 		t.Fatal("a finished upgrade keeps the host on the short interval")
