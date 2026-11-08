@@ -398,11 +398,13 @@ func (a *fleetUpgradeAgent) clearStaleWork() {
 	}
 }
 
-// runFleetUpgradeBootstrap runs the root bootstrap script exactly as the broker
-// runs an approved one-file bundle: bash, the script, then the operation and the
-// source directory. The script verifies a root-owned copy of the new binary against
-// the plan's digest and runs that binary's `upgrade-helper`, which stages the
-// release and returns once the detached activation has been accepted.
+// runFleetUpgradeBootstrap runs the root bootstrap script with the interpreter,
+// flags and arguments the broker uses for an approved one-file bundle: bash, the
+// script, then the operation and the source directory. The script uses only
+// absolute paths and reads no environment, so it needs no more than the fixed one
+// below. It verifies a root-owned copy of the new binary against the plan's digest
+// and runs that binary's `upgrade-helper`, which stages the release and returns
+// once the detached activation has been accepted.
 func runFleetUpgradeBootstrap(ctx context.Context, bundle fleetUpgradeBundle) error {
 	cmd := exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", bundle.Script, bundle.Operation, bundle.Source)
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
