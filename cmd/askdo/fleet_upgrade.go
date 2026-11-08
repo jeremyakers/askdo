@@ -234,8 +234,10 @@ func (a *fleetUpgradeAgent) tick(ctx context.Context) {
 	if err != nil {
 		a.log.Warn("fleet upgrade: cannot read upgrade receipts", "error", err)
 	}
-	_, inProgress := upgrade.ActiveReceipt(receipts, a.now())
-	a.active = inProgress
+	active, inProgress := upgrade.ActiveReceipt(receipts, a.now())
+	// Reporting is hurried only while an upgrade is moving. One whose outcome is
+	// unknown blocks the host until someone looks at it, and nothing will change.
+	a.active = inProgress && active.Progressing()
 
 	// Not knowing its release makes a host unable to tell newer from older, so it
 	// applies nothing; it says so, and the gateway never offers it anything.

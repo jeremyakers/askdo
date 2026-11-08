@@ -71,6 +71,13 @@ func ListReceipts(root string) ([]Receipt, error) {
 	return receipts, nil
 }
 
+// Progressing reports whether the receipt's upgrade is still moving towards an
+// outcome. An unknown outcome is active, since it refuses every new operation, but
+// nothing advances it: it waits for a person to look at the host.
+func (r Receipt) Progressing() bool {
+	return isActiveReceiptState(r.State) && r.State != stateUnknown
+}
+
 // ActiveReceipt reports an upgrade that is still in progress, which refuses any
 // other operation on the host. A scheduled receipt whose activation never started
 // before its deadline is not in progress: the next operation reconciles it.

@@ -174,3 +174,19 @@ func TestActiveReceiptLeavesAScheduleThatNeverStartedToTheNextOperation(t *testi
 		t.Fatalf("a fresh schedule is not active: %+v %v", got, active)
 	}
 }
+
+func TestReceiptProgressingIsAnUpgradeThatCanStillFinishOnItsOwn(t *testing.T) {
+	for state, want := range map[string]bool{
+		"scheduled": true, "waiting": true, "activating": true, "verifying": true,
+		// Active, but waiting for a person: nothing advances them.
+		"unknown": false,
+		// Ended.
+		"succeeded": false, "failed": false,
+		// Not a state at all.
+		"": false, "bogus": false,
+	} {
+		if got := (Receipt{State: state}).Progressing(); got != want {
+			t.Errorf("%q: Progressing() = %v, want %v", state, got, want)
+		}
+	}
+}

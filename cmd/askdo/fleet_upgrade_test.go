@@ -520,6 +520,38 @@ func TestFleetUpgradeReportsTheLatestReceiptWhateverStartedIt(t *testing.T) {
 	}
 }
 
+// An upgrade whose outcome is unknown blocks the host until someone looks at it. The
+// host is not ready for another and does not read the offer, but it has no reason
+// to report every thirty seconds for as long as it stays that way.
+func TestFleetUpgradeWithAnUnknownOutcomeBlocksTheHostWithoutHurryingIt(t *testing.T) {
+	f := newAgentFixture(t, "v1.0.0", "v1.0.1")
+	stage := filepath.Join(t.TempDir(), "up_00000000000000000000000000000001")
+	if err := os.Mkdir(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stuck := upgrade.Receipt{Version: 1, ID: "up_00000000000000000000000000000001", Release: "v1.0.1", SourceCommit: strings.Repeat("ab", 20), State: "unknown", Stage: stage, Detail: "prior activation interrupted; no effects replayed", UpdatedAtUnixMS: time.Now().UnixMilli()}
+	data, err := json.Marshal(stuck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.receipts, stuck.ID+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f.tick()
+
+	report := f.gateway.lastReport(t)
+	if report.Ready || !report.AutoUpgrade || report.Upgrade == nil || report.Upgrade.State != "unknown" {
+		t.Fatalf("report = %+v", report)
+	}
+	if f.gateway.catalogs != 0 || len(f.scheduled) != 0 {
+		t.Fatalf("a host with an unknown upgrade outcome read the offer (%d) or scheduled (%d)", f.gateway.catalogs, len(f.scheduled))
+	}
+	if got := f.agent.interval(); got == fleetUpgradeActiveInterval {
+		t.Fatalf("a host that can only be freed by a person reports every %v", got)
+	}
+}
+
 func TestFleetUpgradeKeepsReportingWhenTheGatewayCannotBeAsked(t *testing.T) {
 	f := newAgentFixture(t, "v1.0.0", "v1.0.1")
 	f.gateway.reportErr = errors.New("gateway from before the endpoint existed")
