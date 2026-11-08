@@ -114,7 +114,9 @@ func upgradeColumns(h gateway.HostUpgrade, reported bool) string {
 	if !reported {
 		return " name=- release=unknown auto_upgrade=unknown upgrade=none seen=never"
 	}
-	name, release, last := strings.Join(strings.Fields(h.Hostname), "_"), h.Release, "none"
+	// Every value is one token: what a host reported may hold spaces, and must not
+	// be able to pass for another column.
+	name, release, last := strings.Join(strings.Fields(h.Hostname), "_"), strings.Join(strings.Fields(h.Release), "_"), "none"
 	if name == "" {
 		name = "-"
 	}

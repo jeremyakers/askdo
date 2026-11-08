@@ -46,6 +46,8 @@ func TestHostsListColumnsSayWhatEachHostReported(t *testing.T) {
 		{"succeeded", gateway.HostUpgrade{Release: "v1.0.1", Hostname: "nas-01", Auto: true, Seen: seen, Result: &fleetproto.UpgradeResult{State: "succeeded", Release: "v1.0.1"}}, true, " name=nas-01 release=v1.0.1 auto_upgrade=true upgrade=succeeded(v1.0.1) seen=" + seen.Local().Format(time.RFC3339)},
 		{"rolled back", gateway.HostUpgrade{Release: "v1.0.0", Auto: true, Seen: seen, Result: &fleetproto.UpgradeResult{State: "failed", Outcome: "rolled_back", Release: "v1.0.1"}}, true, " name=- release=v1.0.0 auto_upgrade=true upgrade=failed/rolled_back(v1.0.1) seen=" + seen.Local().Format(time.RFC3339)},
 		{"a hostname with spaces stays one token", gateway.HostUpgrade{Release: "v1.0.0", Hostname: "my  laptop", Seen: seen}, true, " name=my_laptop release=v1.0.0 auto_upgrade=false upgrade=none seen=" + seen.Local().Format(time.RFC3339)},
+		{"a reported release cannot pass for another column", gateway.HostUpgrade{Release: "v1.0.0 auto_upgrade=true", Hostname: "nas-01", Seen: seen}, true, " name=nas-01 release=v1.0.0_auto_upgrade=true auto_upgrade=false upgrade=none seen=" + seen.Local().Format(time.RFC3339)},
+		{"a reported result cannot pass for another column", gateway.HostUpgrade{Release: "v1.0.0", Seen: seen, Result: &fleetproto.UpgradeResult{State: "failed seen=never", Release: "v1.0.1 x"}}, true, " name=- release=v1.0.0 auto_upgrade=false upgrade=failed_seen=never(v1.0.1_x) seen=" + seen.Local().Format(time.RFC3339)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := upgradeColumns(tc.host, tc.reported); got != tc.want {
