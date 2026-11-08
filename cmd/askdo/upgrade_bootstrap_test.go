@@ -123,7 +123,7 @@ func TestUpgradeBootstrapStatesVerifiableProvenance(t *testing.T) {
 	for _, want := range []string{
 		"https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.32/askdo-linux-amd64.sha256",
 		"https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.32/install-manifest.v1",
-		"https://github.com/jeremyakers/askdo/blob/051adadd4f526ad23c37dfb22021003531a25b32/docs/upgrade.md",
+		"https://raw.githubusercontent.com/jeremyakers/askdo/051adadd4f526ad23c37dfb22021003531a25b32/docs/upgrade.md",
 		"#   " + plan.CLIDigest,
 		"automatically restores the backed-up binaries",
 	} {

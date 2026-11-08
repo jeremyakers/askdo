@@ -505,6 +505,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 		// Worker stderr and malformed pipe frames may contain provider text,
 		// including echoed credentials. Keep those diagnostics in the root-only
 		// spool, not in the result delivered to an untrusted submitter.
+		j.recordReviewFailure(err)
 		j.fail("reviewer did not complete; see the root-owned reviewer log")
 		return
 	}
@@ -1663,4 +1664,17 @@ func decodeStoredResult(job store.Job) store.Result {
 
 func encode64(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
+}
+
+// recordReviewFailure appends the broker-side reason a review did not complete
+// to the job's root-only reviewer log, which the submitter-facing message points
+// to. Without it a failure detected by the broker (not the worker) left that
+// log empty.
+func (j *jobRuntime) recordReviewFailure(cause error) {
+	f, err := os.OpenFile(j.spool.workerStderr, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = fmt.Fprintf(f, "askdo broker: review did not complete: %v\n", cause)
 }
