@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -94,5 +95,41 @@ func TestFreshGateDoesNotInheritDrainingMarker(t *testing.T) {
 	status, err := Read(path)
 	if err != nil || status.Draining || status.Active != 0 {
 		t.Fatalf("fresh admission: %+v %v", status, err)
+	}
+}
+
+// The acknowledgment only reports a process's drain state, and an upgrade reads
+// it across versions: a field a newer release adds must not make an older reader
+// treat the process as unacknowledged.
+func TestReadIgnoresFieldsAddedByNewerReleases(t *testing.T) {
+	path := Path(filepath.Join(t.TempDir(), "jobs.db"))
+	var gate Gate
+	if err := gate.prepare(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.SetDraining(true); err != nil {
+		t.Fatal(err)
+	}
+	want, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended := append(bytes.TrimRight(data[:len(data)-1], " \n"), []byte(`,"queued":{"jobs":[1,2]}}`)...)
+	if err := os.WriteFile(path, extended, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Read(path); err != nil || got != want {
+		t.Fatalf("status with an additive field: %+v, %v; want %+v", got, err, want)
+	}
+	// What makes an acknowledgment invalid is unchanged.
+	if err := os.WriteFile(path, []byte(`{"version":2,"pid":1,"start_time":1,"draining":true,"active":0,"generation":1,"queued":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read(path); err == nil {
+		t.Fatal("wrong version accepted")
 	}
 }

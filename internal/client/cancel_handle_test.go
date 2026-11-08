@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,5 +78,40 @@ func TestWriteCancelHandleDoesNotFollowDirectorySymlink(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0755 {
 		t.Fatalf("target mode = %04o, want unchanged 0755", info.Mode().Perm())
+	}
+}
+
+// The handle is a private file the client wrote earlier; a client that reads one
+// written by a newer release must still be able to cancel the job it names.
+func TestReadCancelHandleIgnoresFieldsAddedByNewerReleases(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	socket := filepath.Join(t.TempDir(), "broker.sock")
+	path, err := writeCancelHandle(testCanonicalID, testCancelCapability, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := readCancelHandle(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extended := append(bytes.TrimRight(data[:len(bytes.TrimRight(data, "\n"))-1], " "), []byte(`,"expires_unix_ms":1,"labels":["a"]}`+"\n")...)
+	if err := os.WriteFile(path, extended, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readCancelHandle(path); err != nil || got != want {
+		t.Fatalf("handle with an additive field: %+v, %v; want %+v", got, err, want)
+	}
+	// What makes a handle invalid is unchanged.
+	invalid := bytes.Replace(extended, []byte(testCancelCapability), []byte("short"), 1)
+	if err := os.WriteFile(path, invalid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCancelHandle(path); err == nil {
+		t.Fatal("handle with an invalid capability accepted")
 	}
 }

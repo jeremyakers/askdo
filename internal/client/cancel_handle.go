@@ -146,7 +146,6 @@ func readCancelHandle(path string) (cancelHandle, error) {
 		return handle, errors.New("handle is not private")
 	}
 	dec := json.NewDecoder(f)
-	dec.DisallowUnknownFields()
 	if err := dec.Decode(&handle); err != nil {
 		return cancelHandle{}, errors.New("invalid handle")
 	}
