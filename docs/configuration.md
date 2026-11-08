@@ -268,11 +268,11 @@ for the distinction between fixture checks and deployment evidence.
 |---|---|---|---|
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
 | `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. **NO AI REVIEW** requires a human Telegram decision unless an explicitly enabled foreground approval timestamp is valid; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
-| `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. |
-| `timestamp_timeout_users` | no | `{}` (off) | Map of OS login names to numeric **minutes**, matching sudo's `timestamp_timeout` (decimals allowed, 0.5–60). Controls how long one approval is reused on the same terminal, per target user. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse it. Omit or clear a login to disable it. Legacy `approval_timestamp_users` accepts integer **seconds** (30–3600); do not specify both keys. |
-| `account_notes` | no | absent | Additive administrator Markdown context: optional `users` and `groups` maps from OS login / Unix group names to absolute clean file paths. Names resolve at config load; files and membership are read per review. See [reviewer instruction layers and account notes](#reviewer-instruction-layers-and-account-notes). |
-| `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
-| `webfetch_enabled` | no | `false` | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. In fleet mode a gateway `reviewer_webfetch_enabled` value, when its signed catalog carries one, overrides this setting; this value applies otherwise. See [review tools](review-tools.md#optional-webfetch). |
+| `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. On a fleet host the logins in the gateway's `review_defaults.approval_only_users` are exempt as well ([fleet policy defaults](#fleet-policy-defaults)). |
+| `timestamp_timeout_users` | no | `{}` (off) | Map of OS login names to numeric **minutes**, matching sudo's `timestamp_timeout` (decimals allowed, 0.5–60). Controls how long one approval is reused on the same terminal, per target user. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse it. Omit or clear a login to disable it. Legacy `approval_timestamp_users` accepts integer **seconds** (30–3600); do not specify both keys. On a fleet host a login listed here keeps this window whatever the gateway says; a login not listed takes the gateway's default. |
+| `account_notes` | no | absent | Additive administrator Markdown context: optional `users` and `groups` maps from OS login / Unix group names to absolute clean file paths. Names resolve at config load; files and membership are read per review. See [reviewer instruction layers and account notes](#reviewer-instruction-layers-and-account-notes). On a fleet host the gateway's notes for the same account come first and these follow. |
+| `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`, or `0`, which grants nothing and turns off the fleet gateway's grant for that login on this host. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. Where a fleet gateway also grants the login, the **lower** of the two caps applies. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
+| `webfetch_enabled` | no | unset (off) | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. Setting it, to `true` **or** `false`, is this host's own decision and always wins. Leaving it out lets a fleet gateway's `reviewer_webfetch_enabled` apply, and means off where there is none. See [review tools](review-tools.md#optional-webfetch). |
 | `models` | yes | — | Ordered fallback list. May be empty only with explicit `approval_only` or `required` plus nonempty `approval_only_users`; non-exempt/forced-review submitters then fail closed. Adding a model does not itself change `approval_only` policy. |
 | `request_timeout` | no | `"2m"` | Per-request provider timeout; Go duration > 0. |
 | `total_timeout` | no | `"20m"` | Whole-review budget across all fallback choices; > 0 and ≥ `request_timeout`. Becomes the worker's `review_deadline_unix_ms`. |
@@ -338,11 +338,18 @@ Each review has three layers, in this order:
    unless `risk-policy.md` beside the selected daemon config exists
    (`/etc/askdo/risk-policy.md` by default). That file replaces **only** this
    calibration, not layer 1. An absent file keeps the built-in calibration; a
-   present empty file is an empty replacement, not an absent file.
+   present empty file is an empty replacement, not an absent file. On a fleet
+   host whose gateway publishes default guidance
+   ([`review_defaults.risk_policy`](#fleet-policy-defaults)), that text takes the
+   absent file's place; a present file, even an empty one, always replaces it.
 3. **Account notes:** additive Markdown context describing normal work. All
    applicable group notes are appended in **group-name order**, followed by the
    submitter's own user note. They never replace or remove layer 2. With no host
-   file and no applicable notes, the compiled instructions are byte-for-byte unchanged.
+   file and no applicable notes, the compiled instructions are byte-for-byte
+   unchanged. On a fleet host the gateway's notes add to these and come first:
+   its group notes, then the host's group notes, then the gateway's note for the
+   submitter, then the host's own user note, so the host has the last word on an
+   account.
 
 Add `account_notes` inside the existing `review` object, keeping other settings:
 
@@ -397,17 +404,21 @@ fallback models and pending approvals keep that snapshot; file edits affect only
 later reviews. The digest-bound approval manifest has an ordered
 `administrator_layers` list: `scope` (`host_default`, `group`, `user`), `name`
 (empty for the host default), authenticated `subject_uid`, `source` path,
-`sha256`, and exact `text`. It replaces rc.15's single `risk_policy` record.
+`sha256`, and exact `text`; `source` is `gateway` instead of a path for text the
+fleet gateway supplied. It replaces rc.15's single `risk_policy` record.
 The review journal is unchanged. The worker receives text only, not source paths
 or authority to select files.
 
 In fleet mode the host composes and pins the exact first system message, refusing
 substitution, reordered notes or extra system messages. The gateway relays the
-existing model-message shape, with conversation isolation; it does not select
-account context. Administrator text is visible to reviewer providers: do not
-put credentials in it.
+existing model-message shape, with conversation isolation. It can publish default
+text in its signed catalog, but the host alone selects what applies to the
+authenticated submitter and composes the message; the gateway never chooses
+account context for a review. Administrator text is visible to reviewer
+providers: do not put credentials in it.
 
-Files must be UTF-8 without NUL. **Combined** host guidance and notes must fit the
+Files must be UTF-8 without NUL. **Combined** host guidance and notes (and any
+text from the fleet gateway, which counts like a file) must fit the
 existing 64 MiB encoded bootstrap frame limit (checked before worker start; the
 broker stops reading files once their combined size exceeds it) and
 the 1 MiB foreground manifest handoff limit (checked before approval). Detached
@@ -909,9 +920,11 @@ binaries.** A host that uses the optional shared gateway sets
 document; the rules below are what it and the daemon enforce. Mixed mode is
 rejected: a v5 file must **not** contain `telegram` or `review.models` (no
 local provider credentials or bots on a fleet host), and fleet fields are
-forbidden in a v4 file. `inspection`, `limits`, review mode/exemptions,
-auto-approval grants and preferences keep exactly their version 4 meanings
-and remain local — the gateway cannot widen them.
+forbidden in a v4 file. `inspection`, `limits`, the global review `mode`,
+`review.gateway_profiles` and `upgrade_backup_dir` keep exactly their version 4
+meanings and remain local. The gateway can only offer **defaults** for the review
+policy listed under [fleet policy defaults](#fleet-policy-defaults), and a host's
+own setting always takes precedence over them.
 
 ### `fleet`
 
@@ -952,6 +965,88 @@ and does not make a legitimate review request over-budget.
 Example: [`examples/fleet/host-config.example.json`](../examples/fleet/host-config.example.json)
 (installed read-only at `/etc/askdo/examples/host-config.example.json`).
 
+### Fleet policy defaults
+
+The gateway can publish default review policy once, in its signed catalog, instead
+of it being repeated in every host's config. **A host's own setting always
+decides: where the host sets a value, that value is used (for an auto-approval
+cap, the lower of the two); where it sets nothing, it inherits the gateway's
+default; with no gateway value (an older gateway, a gateway that sets none, or a
+standalone host) behavior is exactly as it was.** The one additive setting is the
+exemption list: the gateway can exempt a login from AI review, and a host cannot
+take that back, only add its own exemptions.
+
+| Setting | Gateway key | Host key | Effective value |
+|---|---|---|---|
+| Reviewer `webfetch` | `reviewer_webfetch_enabled` | `review.webfetch_enabled` | The host's value if the host sets it, `true` or `false`; otherwise the gateway's; otherwise off. |
+| Exempt from AI review (human approval only) | `review_defaults.approval_only_users` | `review.approval_only_users`, `review.mode` | A login is exempt if the host exempts it (its list, or global `approval_only`) **or** the gateway lists it. A host cannot un-exempt a login the gateway lists. `--review=yes` still forces a review. |
+| Approval reuse window | `review_defaults.timestamp_timeout_users` | `review.timestamp_timeout_users` | Per login: the host's entry if it has one, otherwise the gateway's. Same limits (0.5–60 minutes). |
+| Auto-approval cap | `review_defaults.auto_approve_grants` | `review.auto_approve_grants` | Per login: the **lower** of the host's and the gateway's cap where both grant it; the gateway's where the host has no grant; the host's where the gateway has none. A host `max_risk` of `0` turns the gateway's grant off. The submitter's own preference still cannot exceed the effective cap. |
+| Risk-scoring guidance | `review_defaults.risk_policy` | `risk-policy.md` beside the daemon config | The host file if it exists (even empty); otherwise the gateway's text; otherwise the compiled default. |
+| Account notes | `review_defaults.account_notes` | `review.account_notes` | Both apply: the gateway's note first, then the host's own for the same account (see [reviewer instruction layers](#reviewer-instruction-layers-and-account-notes)). |
+
+Gateway `review_defaults` example (see the [gateway keys](#gateway-server-config-version-1)
+for the rules; every key is optional, and the names below are examples):
+
+```json
+"reviewer_webfetch_enabled": true,
+"review_defaults": {
+  "approval_only_users": ["alice"],
+  "timestamp_timeout_users": {"alice": 10},
+  "auto_approve_grants": [{"user": "alice", "max_risk": 2}],
+  "risk_policy": {"file": "/etc/askdo-gateway/risk-policy.md"},
+  "account_notes": {
+    "users": {"alice": {"text": "Alice administers the fleet; routine package upgrades are expected."}},
+    "groups": {"deployers": {"file": "/etc/askdo-gateway/notes/deployers.md"}}
+  }
+}
+```
+
+How a host applies them:
+
+- **People are named by login or group name**, and each host resolves the name
+  against its own accounts. A name with no account on a host is ignored there,
+  never an error. Where two names are one account, the shorter window and the
+  lower cap apply, and both names' notes are used.
+- **Values a host could not set itself are ignored**, not applied: a window
+  outside 30–3600 seconds, a cap outside 1–4. Nothing in the defaults can make a
+  review fail on a host except gateway text that the fleet message limits refuse
+  (the same classified risk-policy failure a host's own file would give).
+- **Frozen per review.** The host reads the defaults from the signed catalog it
+  fetched for that review and keeps them for it: reviewer tools, exemption
+  decision, auto-approval cap, timestamp window and the risk-policy and notes
+  snapshot all come from that one catalog. A gateway change reaches the next
+  review, not one already prepared. The final no-human dispatch gate still
+  re-reads the **host's** own grant, so lowering or revoking it at the host
+  blocks an already-reviewed job; the gateway's part of the cap is the one frozen
+  with the review.
+- **Submissions** consult the host's own policy first and ask the gateway only
+  when that would refuse (`askdo -n` without a usable window or grant, `askdo -v`
+  without a timestamp, a submitter who needs a review the host cannot run), so a
+  decision the host makes alone never waits on the gateway. `askdo -l` and
+  `askdo auto-approve` always ask, because they report or bound the effective
+  values. A gateway that cannot be reached in time (a lookup made only for the
+  defaults gives up after three seconds) leaves the host's own answer, or a
+  timeout if the request's own budget ran out, never a grant.
+- **`askdo -l`** shows the effective values and, on a fleet host, whose they are:
+  `(source: host)`, `(source: gateway)`, or `(source: host+gateway)` for an
+  auto-approval cap both grant. It says so when the gateway could not be asked,
+  in which case it shows the host's own settings only.
+- **Authority is unchanged.** The gateway is already the fleet's approval
+  authority, and these defaults only change which submitters skip AI review, how
+  long an approval can be reused and which risk scores can skip a human tap;
+  inspection policy, sensitive masks, dispatch checks, captured-stdin and
+  risk-5 human decisions stay with the host. A host that wants none of a default
+  sets its own value (a lower grant or `max_risk: 0`, its own window,
+  `webfetch_enabled: false`); only an exemption cannot be taken back.
+
+Deploy order: hosts built before unknown-field tolerance
+([unknown fields on the wire](architecture.md#unknown-fields-on-the-wire)) reject
+a signed catalog carrying a field they do not know, so upgrade every fleet host
+before adding `review_defaults` (or `reviewer_webfetch_enabled`) to the gateway.
+Newer hosts ignore what they do not understand and keep working with an older
+gateway.
+
 ## Gateway server config (version 1)
 
 The optional central gateway reads a separate server-only file — default
@@ -972,8 +1067,11 @@ fields rejected at every depth). Example:
 | `profiles` | yes | — | Explicit array (empty means approval-only: human Telegram decisions, no model). At most 128 entries; each entry uses the standalone [`review.models[]`](#reviewmodels) schema. Provider credential files are root:root `0600`. |
 | `bots` | yes | — | 1–128 entries: `name` plus `token_file` (root:root `0600`). One update listener per actual bot-token identity. |
 | `channels` | yes | — | 1–128 entries: `name`, `bot`, `approval_ttl` in **integer seconds** (≥ 30), and 1–8 `recipients` of `chat_id` plus 1–8 `operator_user_ids` — the same routing model as the standalone [named channels](#named-multi-channel-form). |
+| `reviewer_webfetch_enabled` | no | absent | Boolean default for the reviewer's `webfetch` tool on every host that does not set `review.webfetch_enabled` itself. Absent leaves it to each host. |
+| `review_defaults` | no | absent | Object of review-policy defaults published to every host, applied where a host sets nothing ([precedence table](#fleet-policy-defaults)). Keys mirror a host's `review` section and use its units and limits; every key is optional: `approval_only_users` (array of logins, no blanks or duplicates), `timestamp_timeout_users` (login → **minutes**, 0.5–60), `auto_approve_grants` (array of `{"user","max_risk"}`, `max_risk` 1–4, at most 128, no duplicate logins), `risk_policy` and `account_notes` (`{"users":{login: TEXT},"groups":{group: TEXT}}`). Each TEXT is exactly one of `{"text": "..."}` or `{"file": "/abs/clean/path"}`. A file must be a root-owned regular file with no write bits (for example mode `0444`) in root-controlled directories, like the TLS certificate; it is read **once, when the gateway starts**, so edit it and restart the gateway. Text must be UTF-8 of at most 262144 bytes with no control characters other than newline and tab (use LF, not CRLF), and the whole section may publish at most 512 KiB so the signed catalog always stays inside the 1 MiB payload limit hosts enforce. Anything a host would refuse stops the gateway from starting and fails `askdo-config gateway check`. |
 
 Gateway credential and key files are validated at load with the same
 root-ownership rules as host fleet files. Provider configuration is manual
 server-side JSON only; there is no host-side provider upload and no new admin
-UI.
+UI. `reviewer_webfetch_enabled` and `review_defaults` are edited in this file
+directly; no `askdo-config gateway` subcommand sets them.
