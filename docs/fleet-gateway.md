@@ -78,6 +78,11 @@ signed catalog and overrides each host's `review.webfetch_enabled`. If omitted,
 each host's own setting applies (as it does with older gateways).
 Hosts verify the catalog strictly, so hosts older than this release reject a
 catalog that carries the field: upgrade every fleet host before setting it.
+Hosts built with unknown-field tolerance (see
+[unknown fields on the wire](architecture.md#unknown-fields-on-the-wire))
+still verify the whole signed catalog but ignore optional catalog fields they
+do not know, so a later optional catalog field no longer breaks them; such a
+host simply does not apply a setting it does not understand.
 Only permitted evidence reaches the model; the gateway cannot ask for an
 unrestricted directory dump or bypass the local broker's inspection policy.
 

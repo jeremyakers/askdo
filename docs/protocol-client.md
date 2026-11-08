@@ -34,7 +34,15 @@ Every message in both directions is one frame:
   effective limit of `min(64 MiB, limits.max_inspected_bytes + 1 MiB)` and
   checks the advertised length *before* allocating the body.
 - The body must be valid UTF-8 and valid JSON; writers enforce both.
-- Decoding is strict: unknown fields are rejected (`proto.StrictUnmarshal`).
+- Decoding is strict (`proto.StrictUnmarshal`): duplicate keys, NUL in strings,
+  invalid UTF-8 and trailing values are rejected. Requests to the broker
+  (`reserve`, `submit`, `status`, `attach`, `cancel`, `timestamp`,
+  `auto_approval`) also reject fields they do not define. A client ignores
+  fields it does not define in the events a broker sends, so later brokers can
+  add a field to an event; clients built before this behavior still reject
+  such a field, which is why additions such as the creator cancel capability
+  stay opt-in. See
+  [unknown fields on the wire](architecture.md#unknown-fields-on-the-wire).
 - The first frame on a connection must arrive within 10 seconds
   (`frameDeadline`); the deadline is cleared once the request frame is read,
   so long waits afterwards are unlimited.

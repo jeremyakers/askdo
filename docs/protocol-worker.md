@@ -58,9 +58,16 @@ order) uint32 length followed by a UTF-8 JSON body, hard ceiling 64 MiB,
 length checked before allocation. Every body is one JSON object with a `type`
 discriminator, decoded strictly:
 
-- Unknown fields are rejected; required fields must be present and non-null,
-  recursively (required arrays must not be null). Optional `omitempty` fields
-  may be absent.
+- Messages that ask the receiver to act — the worker's `inspect_request`,
+  `model_turn_request` and `decision` (which authorizes dispatch), and every
+  payload inside them — reject fields they do not define. Every other message
+  reports or describes something (`bootstrap`, `inspect_result`,
+  `model_turn_result`, `progress`, `review_complete`, `frozen`, availability and
+  notification messages): fields the receiver does not define are ignored and
+  never kept or forwarded, so a newer peer can add to what it reports. See
+  [unknown fields on the wire](architecture.md#unknown-fields-on-the-wire).
+- Required fields must be present and non-null, recursively (required arrays
+  must not be null). Optional `omitempty` fields may be absent.
 - Every message is direction-validated: a type valid in one direction is
   rejected in the other. Directions below are **B→W** (broker to worker) and
   **W→B** (worker to broker).
@@ -375,8 +382,9 @@ not justify hiding material uncertainty from its warnings/missing context.
   uint32s, empty when disabled. Optional `compatibility` object (omitted, never
   `null`): `path_resolver` enum `"openat2"` | `"os_root"`; booleans
   `terminal_link_follow_supported` and `absolute_path_follow_supported`;
-  `mount_identity_policy` enum `"statx_or_file_handle"`. Unknown fields, other
-  enum spellings and null inside the leaf are rejected at decode time. The
+  `mount_identity_policy` enum `"statx_or_file_handle"`. Other enum spellings
+  and null inside the leaf are rejected at decode time; a field a newer broker
+  adds to the leaf is ignored. The
   leaf reports what the broker's one-time startup probe actually selected
   (`os_root` only where `openat2` answered `ENOSYS`; measured on Linux
   3.10.108, ext4 — not a universal vendor claim); the worker or caller cannot
@@ -467,9 +475,11 @@ job by the `submit_review` tool path.
 strings ≤ 512; optional `suggestions` array ≤ 16 of {`issue` ≤ 512;
 `action` ≤ 512; `actor` enum `"submitter"` | `"administrator"`};
 `reversibility` ≤ 1024; `intent_match` enum `"consistent"` |
-`"inconsistent"` | `"unverified"`. No additional fields are permitted —
-notably no `approved`, no callback data, no provider identity, and no
-coverage object.
+`"inconsistent"` | `"unverified"`. The model's `submit_review` call is a tool
+request and is refused if it carries any other field — notably `approved`,
+callback data, provider identity or a coverage object. A `review_complete` that
+reaches the broker with a field the broker does not define (for example the
+retired `coverage` object) is read as if it were absent and never forwarded.
 
 Suggestions reuse the uncertainty count and existing report-string caps.
 Absent/empty suggestions remain valid and are omitted when serialized, so
@@ -616,7 +626,8 @@ secret-free code (`auth`, `gateway_transport`, `signature`, `protocol`,
 `upstream_quota_rate`, `upstream_transport`, `upstream_timeout`,
 `upstream_invalid_config`, `upstream_malformed_wire`,
 `upstream_codex_relogin`) so infrastructure failures can never masquerade as
-ordinary provider exhaustion.
+ordinary provider exhaustion. A field the worker does not define is ignored, so
+diagnostic text cannot ride along into the worker's errors.
 
 | Field | Type — bounds |
 |---|---|
