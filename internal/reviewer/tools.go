@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jeremyakers/askdo/internal/modelwire"
@@ -196,7 +198,13 @@ const webfetchContentMax = 64 << 10
 // webfetchEncodedMax bounds the JSON-encoded tool result, which is what the
 // fleet message limit applies to. Escaping can expand a byte up to six times
 // (control bytes become \uXXXX), so the raw cap alone is not enough.
-const webfetchEncodedMax = 192 << 10
+const webfetchEncodedMax = 96 << 10
+
+// webfetchReviewBudget bounds all webfetch results in one review together.
+// Every tool message is resent in each later model turn, embedded again as
+// JSON, and the whole fleet turn is capped (fleetproto.MaxPayloadBytes), so
+// independent per-result limits could still add up to an unsendable turn.
+const webfetchReviewBudget = 256 << 10
 
 // webfetchToolError is the fixed model-visible failure payload: a category
 // only, never the URL, credentials, hostnames, addresses, or transport text.
@@ -211,9 +219,12 @@ type webfetchToolError struct {
 // The webfetch tool is optional and gated on the projected
 // review.webfetch_enabled flag.
 type ToolExecutor struct {
-	Broker     BrokerClient
-	Bootstrap  proto.Bootstrap
-	Completion func(proto.ReviewComplete) error
+	// webfetchUsed is the encoded size of webfetch results returned so far
+	// in this review, charged against webfetchReviewBudget.
+	webfetchUsed int
+	Broker       BrokerClient
+	Bootstrap    proto.Bootstrap
+	Completion   func(proto.ReviewComplete) error
 
 	// ModelName is the configured choice this session runs; the zero value
 	// selects the first configured model. PriorHistory carries the concise
@@ -540,19 +551,38 @@ func (e *ToolExecutor) webfetch(ctx context.Context, rawURL string) (any, error)
 		// crosses to the model.
 		return nil, &fetchToolError{category: fetchErrorCategory(err)}
 	}
-	content, truncated := truncateUTF8(result.Content, webfetchContentMax)
+	remaining := webfetchReviewBudget - e.webfetchUsed
+	if remaining < 1024 {
+		return nil, &fetchToolError{category: "review_fetch_budget_exhausted"}
+	}
+	limit := min(webfetchEncodedMax, remaining)
+	content, truncated := truncateUTF8(fleetSafeText(result.Content), webfetchContentMax)
 	out := webfetchToolResult{Status: "ok", FinalURL: result.FinalURL, HTTPStatus: result.Status, Content: content, Truncated: truncated}
 	// Shrink until the encoded result fits; each pass cuts in proportion to
 	// the overshoot, so heavily escaped content converges in a few passes.
 	for {
 		encoded, err := json.Marshal(out)
-		if err != nil || len(encoded) <= webfetchEncodedMax || out.Content == "" {
+		if err != nil || len(encoded) <= limit || out.Content == "" {
+			e.webfetchUsed += len(encoded)
 			return out, nil
 		}
-		keep := len(out.Content) * webfetchEncodedMax / len(encoded) * 9 / 10
+		keep := len(out.Content) * limit / len(encoded) * 9 / 10
 		out.Content, _ = truncateUTF8(out.Content, keep)
 		out.Truncated = true
 	}
+}
+
+// fleetSafeText replaces control characters other than newline and tab with
+// U+FFFD. The fleet model-message contract refuses them, and one stray DEL or
+// C1 byte in a fetched page would otherwise make the next model turn
+// unsendable and fail the review.
+func fleetSafeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
+			return utf8.RuneError
+		}
+		return r
+	}, s)
 }
 
 // truncateUTF8 returns at most limit bytes of s, cut on a rune boundary.

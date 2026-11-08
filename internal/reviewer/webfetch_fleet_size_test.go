@@ -70,3 +70,49 @@ func TestWebfetchEscapeHeavyPageFitsAFleetModelMessage(t *testing.T) {
 		t.Fatalf("truncated=%v len=%d err=%v", decoded.Truncated, len(decoded.Content), err)
 	}
 }
+
+// DEL and C1 characters are valid UTF-8 that json.Marshal leaves as-is, but the
+// fleet message contract refuses them; the result must still be sendable.
+func TestWebfetchControlCharactersAreFleetSafe(t *testing.T) {
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	executor := NewToolExecutor(boot, noBroker{})
+	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		return FetchResult{FinalURL: "https://example.com/", Status: 200, Content: "a\x7fb\u0080c\r\nd\te"}, nil
+	}
+	result, _, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"https://example.com/"}`)})
+	if err != nil || result.IsError || !fleetproto.ValidMessageContent(result.Content) {
+		t.Fatalf("result=%q err=%v", result.Content, err)
+	}
+	var decoded webfetchToolResult
+	if err := json.Unmarshal([]byte(result.Content), &decoded); err != nil || decoded.Content != "a\uFFFDb\uFFFDc\uFFFD\nd\te" {
+		t.Fatalf("content=%q err=%v", decoded.Content, err)
+	}
+}
+
+// Many large fetches in one review must not add up to an unsendable turn:
+// their combined encoded size stays within the review budget, after which
+// further fetches report a fixed budget category instead of more text.
+func TestWebfetchResultsShareOneReviewBudget(t *testing.T) {
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	executor := NewToolExecutor(boot, noBroker{})
+	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		return FetchResult{FinalURL: "https://example.com/", Status: 200, Content: strings.Repeat(`<p class="x">\\</p>`, 20000)}, nil
+	}
+	total, exhausted := 0, false
+	for i := 0; i < 10; i++ {
+		result, _, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"https://example.com/"}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(result.Content, "review_fetch_budget_exhausted") {
+			exhausted = true
+			continue
+		}
+		total += len(result.Content)
+	}
+	if !exhausted || total > webfetchReviewBudget {
+		t.Fatalf("total encoded=%d budget=%d exhausted=%v", total, webfetchReviewBudget, exhausted)
+	}
+}
