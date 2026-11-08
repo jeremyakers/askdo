@@ -160,7 +160,7 @@ func TestStrictSignedPayloads(t *testing.T) {
 	public, private, _ := ed25519.GenerateKey(rand.Reader)
 	ticket, _, _ := fixture(t)
 	good, _ := json.Marshal(ticket)
-	cases := []string{`null`, string(good) + ` {}`, strings.Replace(string(good), `"version":1`, `"version":2`, 1), strings.Replace(string(good), `"kind":"ticket"`, `"kind":"receipt"`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"version":1`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"unknown":true`, 1), strings.Replace(string(good), `,"submitter_uid":0`, "", 1), strings.Replace(string(good), `"summary_parts":1`, `"summary_parts":-1`, 1)}
+	cases := []string{`null`, string(good) + ` {}`, strings.Replace(string(good), `"version":1`, `"version":2`, 1), strings.Replace(string(good), `"kind":"ticket"`, `"kind":"receipt"`, 1), strings.Replace(string(good), `"version":1`, `"version":1,"version":1`, 1), strings.Replace(string(good), `,"submitter_uid":0`, "", 1), strings.Replace(string(good), `"summary_parts":1`, `"summary_parts":-1`, 1)}
 	for i, p := range cases {
 		env := Envelope{Payload: base64.StdEncoding.EncodeToString([]byte(p)), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, append([]byte(SigningDomain), []byte(p)...)))}
 		wire, _ := json.Marshal(env)
@@ -168,11 +168,14 @@ func TestStrictSignedPayloads(t *testing.T) {
 			t.Fatalf("case %d accepted", i)
 		}
 	}
-	for _, wire := range []string{`null`, `{}`, `{"payload":"!","signature":"!"}`, `{"payload":"a","payload":"b","signature":"c"}`, `{"payload":"a","signature":"b","extra":1}`, `{} {}`} {
+	for _, wire := range []string{`null`, `{}`, `{"payload":"!","signature":"!"}`, `{"payload":"a","payload":"b","signature":"c"}`, `{} {}`} {
 		if _, _, err := Verify[Ticket](public, []byte(wire)); err == nil {
 			t.Fatalf("bad envelope %s", wire)
 		}
 	}
+	// A member this build does not define, in the envelope or in the ticket at
+	// any depth, is not one of these violations: additive_test.go shows it is
+	// ignored while the signature still covers every byte of the payload.
 	env := Envelope{Payload: base64.StdEncoding.EncodeToString(good), Signature: base64.StdEncoding.EncodeToString(ed25519.Sign(private, good))}
 	wire, _ := json.Marshal(env)
 	if _, _, err := Verify[Ticket](public, wire); !errors.Is(err, ErrSignature) {

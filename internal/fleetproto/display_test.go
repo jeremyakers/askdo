@@ -208,8 +208,15 @@ func TestDisplayFactBoundsAndStrictShape(t *testing.T) {
 			t.Fatalf("duplicate %s accepted", field)
 		}
 	}
-	bad := strings.Replace(string(data), `"display":{`, `"display":{"purpose":"unknown",`, 1)
-	if _, err := Parse[Ticket]([]byte(bad)); !errors.Is(err, ErrProtocol) {
-		t.Fatal("unknown fact accepted")
+	// A ticket read as a report ignores a display fact this side does not
+	// define, and never keeps it; the same fact inside a host's submission
+	// (a request) is refused (see TestSubmissionCarriesCompleteFrozenSnapshots).
+	extended := strings.Replace(string(data), `"display":{`, `"display":{"purpose":"unknown",`, 1)
+	got, err := Parse[Ticket]([]byte(extended))
+	if err != nil || !reflect.DeepEqual(got, ticket) {
+		t.Fatalf("additive display fact: %v", err)
+	}
+	if encoded, err := json.Marshal(got); err != nil || strings.Contains(string(encoded), "purpose") {
+		t.Fatalf("unknown fact kept: %s, %v", encoded, err)
 	}
 }

@@ -50,6 +50,11 @@ type Plan struct {
 	HelperDigest   string `json:"helper_digest"`
 }
 
+// IsRequest marks the plan as a proto.Request: it is the approved instruction
+// to install exactly these assets, so a field this binary does not know stops
+// the activation instead of being dropped from what was approved.
+func (Plan) IsRequest() {}
+
 // NewPlan freezes the downloaded release binding for the current architecture.
 // Manifest must come from ParseManifest or DownloadRelease, including its digest.
 func NewPlan(id string, manifest Manifest) (Plan, error) {

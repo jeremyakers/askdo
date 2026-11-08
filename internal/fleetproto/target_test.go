@@ -61,14 +61,21 @@ func TestDisplayIdentityBindsTheExecutionTarget(t *testing.T) {
 	}
 }
 
+// legacyIdentity models the display identity of a gateway built before sudo
+// target selection. Gateways of that vintage parsed every payload with a closed
+// shape and knew no target keys, so it is marked as a request to decode the
+// same way here.
+type legacyIdentity struct {
+	Hostname     string `json:"hostname"`
+	Username     string `json:"username"`
+	SubmitterUID uint32 `json:"submitter_uid"`
+}
+
+func (legacyIdentity) IsRequest() {}
+
 func TestLegacyGatewayShapeRejectsTargetedIdentity(t *testing.T) {
 	// A pre-target gateway's closed shape has no target keys: its strict parse
 	// refuses the ticket instead of rendering a non-root job as root.
-	type legacyIdentity struct {
-		Hostname     string `json:"hostname"`
-		Username     string `json:"username"`
-		SubmitterUID uint32 `json:"submitter_uid"`
-	}
 	ticket, _, _ := fixture(t)
 	ticket.Display.Identity.TargetUID, ticket.Display.Identity.TargetUser = 1001, "tyme"
 	encoded, err := json.Marshal(ticket.Display.Identity)

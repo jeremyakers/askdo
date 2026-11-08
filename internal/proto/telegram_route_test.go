@@ -78,6 +78,37 @@ func TestNamedTelegramNotificationAndDecisionValidation(t *testing.T) {
 	}
 }
 
+// A decision authorizes the broker to dispatch a root command, so a field the
+// broker does not define is refused rather than dropped from an approval. The
+// receipts the same worker sends for the cards it posted only report, and keep
+// being read when a newer worker adds to them.
+func TestDecisionFrameRefusesUnknownFieldsWhileReceiptsIgnoreThem(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for name, tc := range map[string]struct {
+		message  any
+		rejected bool
+	}{
+		"decision":             {Decision{Type: "decision", Digest: digest, OperatorUserID: 12, MessageID: 4, Action: "approve", TimeUnixMS: 99}, true},
+		"notification receipt": {NotificationSent{Type: "notification_sent", Digest: digest, ExpiryUnixMS: 100, CardID: 4, MessageIDs: []int64{}}, false},
+		"auto notice receipt":  {AutoNotificationSent{Type: "auto_notification_sent", Digest: digest, TimeUnixMS: 100, NoticeID: 4, MessageIDs: []int64{}}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wire, err := json.Marshal(tc.message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodeWorkerMessage(wire, WorkerToBroker); err != nil {
+				t.Fatalf("exact frame rejected: %v", err)
+			}
+			extended := append(append([]byte{}, wire[:len(wire)-1]...), []byte(`,"expires_unix_ms":5}`)...)
+			_, err = DecodeWorkerMessage(extended, WorkerToBroker)
+			if tc.rejected != (err != nil) {
+				t.Fatalf("frame with an added field: rejected=%v err=%v", err != nil, err)
+			}
+		})
+	}
+}
+
 func TestZeroSummaryNotificationReceipts(t *testing.T) {
 	// Given: positive card/notice receipts, without summary messages.
 	digest := strings.Repeat("a", 64)

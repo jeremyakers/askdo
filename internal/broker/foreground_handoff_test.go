@@ -125,6 +125,8 @@ func TestForegroundClaimCompletion(t *testing.T) {
 		{"original-pid-replaced", helperJSON(t, claim), 0, false, true, false},
 		{"token", helperJSON(t, badToken), 0, false, false, false},
 		{"duplicate", []byte(strings.Replace(string(helperJSON(t, claim)), `"type":"claim"`, `"type":"claim","type":"claim"`, 1)), 0, false, false, false},
+		// A claim asks the broker to launch: a field it does not define is refused.
+		{"unknown-field", []byte(strings.Replace(string(helperJSON(t, claim)), `"type":"claim"`, `"type":"claim","target_uid":0`, 1)), 0, false, false, false},
 		{"oversize-frame", []byte{0, 0, 128, 1}, 0, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,7 +257,7 @@ func TestHelperSocketRemovedOnClose(t *testing.T) {
 }
 
 func TestForegroundCompletionOrAmbiguity(t *testing.T) {
-	for _, outcome := range []string{"missing-completion", "invalid-completion", "shutdown-after-commit", "signal-completion"} {
+	for _, outcome := range []string{"missing-completion", "invalid-completion", "shutdown-after-commit", "signal-completion", "additive-completion", "incomplete-completion"} {
 		t.Run(outcome, func(t *testing.T) {
 			cfg := testConfig()
 			cfg.Review.Mode, cfg.Review.Models = "approval_only", nil
@@ -304,19 +306,33 @@ func TestForegroundCompletionOrAmbiguity(t *testing.T) {
 					if err := proto.WriteFrame(helper, helperJSON(t, foreground.Completion{Type: "signal", JobID: spec.JobID, Signal: 15})); err != nil {
 						t.Fatal(err)
 					}
+				} else if outcome == "additive-completion" {
+					// The completion is the helper's report: a field this
+					// broker does not define must not lose the outcome of a
+					// command that already ran.
+					if err := proto.WriteFrame(helper, []byte(`{"type":"signal","job_id":"`+spec.JobID+`","exit_code":0,"signal":15,"future":{"core":[true]}}`)); err != nil {
+						t.Fatal(err)
+					}
+				} else if outcome == "incomplete-completion" {
+					// An absent exit_code must not be read as the zero value:
+					// that would record success for a command whose outcome
+					// the helper never reported.
+					if err := proto.WriteFrame(helper, []byte(`{"type":"exit","job_id":"`+spec.JobID+`","signal":0}`)); err != nil {
+						t.Fatal(err)
+					}
 				} else {
 					_ = helper.Close()
 				}
 			}
 			want := store.StateUnknown
-			if outcome == "signal-completion" {
+			if outcome == "signal-completion" || outcome == "additive-completion" {
 				want = store.StateFinished
 			}
 			deadline := time.Now().Add(3 * time.Second)
 			for {
 				stored, err := h.daemon.store.GetJob(context.Background(), testUID, req.RequestID)
 				if err == nil && stored.State == want {
-					if outcome == "signal-completion" {
+					if want == store.StateFinished {
 						result := decodeStoredResult(stored)
 						if result.Kind != store.ResultSignal || result.Signal == nil || *result.Signal != 15 {
 							t.Fatalf("signal result: %+v", result)

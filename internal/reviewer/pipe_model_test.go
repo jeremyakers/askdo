@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,7 +220,7 @@ func TestPipeReadLoopRejectsDuplicateMalformedAndClosesWaiters(t *testing.T) {
 				}
 				sendModelFrame(t, rootOut, result)
 			case "malformed":
-				if err := proto.WriteFrame(rootOut, []byte(`{"type":"model_turn_result","request_seq":1,"failure":{"code":"auth","detail":"secret"}}`)); err != nil {
+				if err := proto.WriteFrame(rootOut, []byte(`{"type":"model_turn_result","request_seq":1,"failure":{"code":"secret"}}`)); err != nil {
 					t.Fatal(err)
 				}
 			case "eof":
@@ -256,6 +257,42 @@ func TestPipeReadLoopRejectsDuplicateMalformedAndClosesWaiters(t *testing.T) {
 				t.Fatal("waiters leaked")
 			}
 		})
+	}
+}
+
+// A model result is a report from root. A field the worker does not define (a
+// newer root's diagnostic, say) is ignored: it neither cancels the review nor
+// reaches the error text, and the failure is classified exactly as without it.
+func TestPipeReadLoopIgnoresAdditiveResultFields(t *testing.T) {
+	in, out, rootIn, rootOut := privatePipes(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	broker := newAsyncBroker(ctx, in, out, cancel)
+	model := &pipeModel{broker: broker, choice: fleetBootstrap().ConfigProjection.Models[0], maxOutputTokens: 100}
+	done := make(chan error, 1)
+	go func() {
+		_, err := model.ChatTurn(ctx, ModelRequest{Model: model.choice.Model, Messages: []Message{{Role: "user"}}, Tools: DefinitionsWithWebfetch(false), MaxOutputTokens: 100})
+		done <- err
+	}()
+	request, ok := readPrivateMessage(t, rootIn).(*proto.ModelTurnRequest)
+	if !ok {
+		t.Fatal("no model turn request")
+	}
+	frame := `{"type":"model_turn_result","request_seq":` + strconv.FormatUint(request.RequestSeq, 10) + `,"failure":{"code":"auth","detail":"secret"},"trace":"secret"}`
+	if err := proto.WriteFrame(rootOut, []byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		var failure *proto.ModelFailure
+		if !errors.As(err, &failure) || failure.Code != proto.ModelAuth || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter blocked")
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("additive field canceled the review: %v", context.Cause(ctx))
 	}
 }
 

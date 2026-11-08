@@ -626,3 +626,24 @@ func TestControllerPTYRemoteCancellation(t *testing.T) {
 		})
 	}
 }
+
+// The two halves of the helper steer each other's job control with these
+// frames, so a field the receiver does not define is refused, not dropped.
+func TestReadWrapperRefusesUnknownFields(t *testing.T) {
+	read := func(body string) (wrapperMessage, error) {
+		server, client := net.Pipe()
+		defer server.Close()
+		defer client.Close()
+		go func() { _ = proto.WriteFrame(client, []byte(body)) }()
+		_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
+		return readWrapper(server)
+	}
+	if got, err := read(`{"type":"session","group":42}`); err != nil || got.Type != "session" || got.Group != 42 {
+		t.Fatalf("valid message: %+v, %v", got, err)
+	}
+	for _, body := range []string{`{"type":"suspend","signal":19}`, `{"type":"ready","type":"ready"}`} {
+		if _, err := read(body); err == nil {
+			t.Fatalf("message accepted: %s", body)
+		}
+	}
+}

@@ -28,7 +28,11 @@ func TestSubmissionCarriesCompleteFrozenSnapshots(t *testing.T) {
 		strings.Replace(string(data), `"version":1`, `"version":1,"version":1`, 1),
 		strings.Replace(string(data), `"kind":"ticket_submission"`, `"kind":"ticket"`, 1),
 		strings.Replace(string(data), `"bot_id":9`, `"bot_id":10`, 1),
+		// A submission is a request: a field this side does not define is
+		// refused at any depth, not dropped from what the host asked to deliver.
 		strings.Replace(string(data), `"profiles":[]`, `"profiles":[],"credentials":"no"`, 1),
+		strings.Replace(string(data), `"display":{`, `"display":{"purpose":"unknown",`, 1),
+		strings.Replace(string(data), `"bot_id":9`, `"bot_id":9,"route_note":"x"`, 1),
 	} {
 		if _, err := Parse[TicketSubmission]([]byte(bad)); err == nil {
 			t.Fatal("accepted incomplete or incompatible submission")

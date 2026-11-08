@@ -33,6 +33,10 @@ type HelperClaim struct {
 	CancelControl bool   `json:"cancel_control,omitempty"`
 }
 
+// IsRequest marks the claim as a proto.Request: it asks the broker to launch,
+// so a field the broker does not define is refused rather than dropped.
+func (HelperClaim) IsRequest() {}
+
 // ParseClaim reads only token and digest. The UID and terminal are measured by
 // the helper, not accepted from its caller's stdin.
 func ParseClaim(r io.Reader, sudoUID uint32) (HelperClaim, error) {

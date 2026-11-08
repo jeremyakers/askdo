@@ -166,10 +166,13 @@ func (c *asyncBroker) write(message any) error {
 }
 
 // webfetchArgument is the strict argument shape for the optional webfetch
-// tool: exactly one URL string.
+// tool: exactly one URL string. Like every model tool call it is a request, so
+// an argument it does not define is refused rather than dropped.
 type webfetchArgument struct {
 	URL string `json:"url"`
 }
+
+func (webfetchArgument) IsRequest() {}
 
 // webfetchToolResult is the bounded model-visible success payload. Content is
 // already size-capped by the fetcher; FinalURL is the validated final URL

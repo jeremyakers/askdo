@@ -30,7 +30,7 @@ type AccountNoteFile struct {
 // file being decoded so a migration error can point at the host guidance file
 // the broker actually reads: risk-policy.md beside that config.
 func decodeConfig(data []byte, cfg *Config, configPath string) error {
-	err := proto.StrictUnmarshal(data, cfg)
+	err := proto.StrictRequestUnmarshal(data, cfg)
 	if err != nil {
 		var fields struct {
 			Review map[string]json.RawMessage `json:"review"`

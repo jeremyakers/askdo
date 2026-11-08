@@ -20,6 +20,11 @@ type wrapperMessage struct {
 	Group int    `json:"group,omitempty"`
 }
 
+// IsRequest marks the message as a proto.Request: the two halves of this
+// helper steer each other's job control with it, so a field the receiver does
+// not define is refused rather than dropped.
+func (wrapperMessage) IsRequest() {}
+
 func readWrapper(conn net.Conn) (wrapperMessage, error) {
 	var message wrapperMessage
 	body, err := proto.ReadFrame(conn, 32768)

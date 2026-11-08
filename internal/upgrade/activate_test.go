@@ -745,6 +745,32 @@ func TestPlanConstructorAndWriterRoundTripThroughVerifiedSource(t *testing.T) {
 	}
 }
 
+// The plan is the approved instruction to install exactly these assets. A field
+// this binary does not define could change what is installed, so it stops the
+// activation instead of being dropped (the receipt and activation record, which
+// only report state, tolerate such fields).
+func TestPlanRefusesUnknownFields(t *testing.T) {
+	// Given: the approved plan, then the same plan with an added field.
+	f := newActivationFixture(t, false)
+	path := filepath.Join(f.source, PlanFileName)
+	good, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed := bytes.TrimRight(good, " \n")
+	extended := append(append([]byte{}, trimmed[:len(trimmed)-1]...), []byte(`,"skip_helper":true}`)...)
+	// When / Then: the unmodified plan verifies; the extended one does not.
+	if _, err := verifiedSource(f.source, f.plan.Operation); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, extended, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifiedSource(f.source, f.plan.Operation); err == nil || !strings.Contains(err.Error(), "invalid upgrade plan") {
+		t.Fatalf("plan with an unknown field accepted: %v", err)
+	}
+}
+
 func TestPlanConstructorRejectsInvalidOperationID(t *testing.T) {
 	// Given
 	f := newActivationFixture(t, false)

@@ -18,6 +18,11 @@ type CancelControl struct {
 	Level int    `json:"level"`
 }
 
+// IsRequest marks the control frame as a proto.Request: it instructs the
+// helper to stop a child, so a field the helper does not define is refused.
+// The acknowledgement and completion the helper sends back only report.
+func (CancelControl) IsRequest() {}
+
 type CancelControlAck struct {
 	Type     string `json:"type"`
 	JobID    string `json:"job_id"`

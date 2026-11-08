@@ -92,6 +92,33 @@ func TestCanonicalReservationStrictAndOwnership(t *testing.T) {
 	}
 }
 
+// Each request the broker serves asks it to do something, so at the socket a
+// field the request does not define is refused instead of dropped. The same
+// request without the field is served, so the refusal is owed to that field.
+func TestBrokerRequestsRefuseUnknownFieldsAtTheSocket(t *testing.T) {
+	h := newBrokerHarness(t, nil, nil)
+	id := canonicalReserve(t, h)
+	invalid := func(reply []byte) bool {
+		var event proto.ErrorEvent
+		return json.Unmarshal(reply, &event) == nil && event.Op == "error" && event.Code == "invalid_request"
+	}
+	for _, valid := range []string{
+		`{"op":"timestamp","action":"list"}`,
+		`{"op":"status","request_id":"` + id + `"}`,
+		`{"op":"attach","request_id":"` + id + `"}`,
+		`{"op":"auto_approval","action":"get"}`,
+		`{"op":"cancel","request_id":"` + id + `"}`, // last: it cancels the reservation
+	} {
+		if reply := fencedReply(t, h.socket, json.RawMessage(valid)); invalid(reply) {
+			t.Fatalf("valid request refused: %s -> %s", valid, reply)
+		}
+		extended := strings.TrimSuffix(valid, "}") + `,"future_field":1}`
+		if reply := fencedReply(t, h.socket, json.RawMessage(extended)); !invalid(reply) {
+			t.Fatalf("request with an unknown field served: %s -> %s", extended, reply)
+		}
+	}
+}
+
 func TestCanonicalCancelledReservationIsDurablyVisible(t *testing.T) {
 	h := newBrokerHarness(t, nil, nil)
 	id := canonicalReserve(t, h)

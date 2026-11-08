@@ -43,7 +43,6 @@ func TestModelRetryMetadataIsOptionalBoundAndClosed(t *testing.T) {
 	for _, change := range []string{
 		strings.Replace(string(raw), `"after_ms":250`, `"after_ms":-1`, 1),
 		strings.Replace(string(raw), `"after_ms":250`, `"after_ms":9223372036854775807`, 1),
-		strings.Replace(string(raw), `"after_ms":250`, `"after_ms":250,"url":"secret"`, 1),
 		strings.Replace(string(raw), `"after_ms":250`, `"after_ms":250,"after_ms":1`, 1),
 		strings.Replace(string(raw), `"after_ms":250`, `"After_ms":250`, 1),
 		strings.Replace(string(raw), `"after_ms":250`, `"after_ms":null`, 1),
@@ -54,5 +53,15 @@ func TestModelRetryMetadataIsOptionalBoundAndClosed(t *testing.T) {
 		if _, err := Parse[ModelResult]([]byte(change)); err == nil {
 			t.Fatalf("invalid retry accepted: %s", change)
 		}
+	}
+	// Retry metadata is a report on the gateway's result: a field this side
+	// does not define is ignored and is never kept or forwarded.
+	extended := strings.Replace(string(raw), `"after_ms":250`, `"after_ms":250,"url":"secret"`, 1)
+	got, err := Parse[ModelResult]([]byte(extended))
+	if err != nil || got.Retry == nil || got.Retry.AfterMS != 250 {
+		t.Fatalf("additive retry field: %+v, %v", got, err)
+	}
+	if encoded, err := json.Marshal(got); err != nil || strings.Contains(string(encoded), "secret") {
+		t.Fatalf("unknown retry field forwarded: %s, %v", encoded, err)
 	}
 }
