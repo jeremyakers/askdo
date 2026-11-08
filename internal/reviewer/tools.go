@@ -193,6 +193,11 @@ type webfetchToolResult struct {
 // A longer page returns its leading text with truncated set instead.
 const webfetchContentMax = 64 << 10
 
+// webfetchEncodedMax bounds the JSON-encoded tool result, which is what the
+// fleet message limit applies to. Escaping can expand a byte up to six times
+// (control bytes become \uXXXX), so the raw cap alone is not enough.
+const webfetchEncodedMax = 192 << 10
+
 // webfetchToolError is the fixed model-visible failure payload: a category
 // only, never the URL, credentials, hostnames, addresses, or transport text.
 type webfetchToolError struct {
@@ -536,7 +541,18 @@ func (e *ToolExecutor) webfetch(ctx context.Context, rawURL string) (any, error)
 		return nil, &fetchToolError{category: fetchErrorCategory(err)}
 	}
 	content, truncated := truncateUTF8(result.Content, webfetchContentMax)
-	return webfetchToolResult{Status: "ok", FinalURL: result.FinalURL, HTTPStatus: result.Status, Content: content, Truncated: truncated}, nil
+	out := webfetchToolResult{Status: "ok", FinalURL: result.FinalURL, HTTPStatus: result.Status, Content: content, Truncated: truncated}
+	// Shrink until the encoded result fits; each pass cuts in proportion to
+	// the overshoot, so heavily escaped content converges in a few passes.
+	for {
+		encoded, err := json.Marshal(out)
+		if err != nil || len(encoded) <= webfetchEncodedMax || out.Content == "" {
+			return out, nil
+		}
+		keep := len(out.Content) * webfetchEncodedMax / len(encoded) * 9 / 10
+		out.Content, _ = truncateUTF8(out.Content, keep)
+		out.Truncated = true
+	}
 }
 
 // truncateUTF8 returns at most limit bytes of s, cut on a rune boundary.

@@ -50,3 +50,23 @@ func TestWebfetchSmallPageIsNotTruncated(t *testing.T) {
 		t.Fatalf("result=%s err=%v", result.Content, err)
 	}
 }
+
+// Control bytes are valid UTF-8 but JSON-escape to six bytes each; a page of
+// them under the raw cap must still produce a result that fits a fleet message.
+func TestWebfetchEscapeHeavyPageFitsAFleetModelMessage(t *testing.T) {
+	boot := toolBootstrap()
+	boot.ConfigProjection.Limits.WebfetchEnabled = true
+	page := strings.Repeat("\x01", 60000)
+	executor := NewToolExecutor(boot, noBroker{})
+	executor.Fetch = func(context.Context, string) (FetchResult, error) {
+		return FetchResult{FinalURL: "https://example.com/", Status: 200, Content: page}, nil
+	}
+	result, _, err := executor.Execute(context.Background(), ToolCall{ID: "1", Name: "webfetch", Arguments: json.RawMessage(`{"url":"https://example.com/"}`)})
+	if err != nil || result.IsError || len(result.Content) > fleetproto.MaxMessageContentBytes || !fleetproto.ValidMessageContent(result.Content) {
+		t.Fatalf("encoded result %d bytes err=%v", len(result.Content), err)
+	}
+	var decoded webfetchToolResult
+	if err := json.Unmarshal([]byte(result.Content), &decoded); err != nil || !decoded.Truncated || decoded.Content == "" {
+		t.Fatalf("truncated=%v len=%d err=%v", decoded.Truncated, len(decoded.Content), err)
+	}
+}
