@@ -30,4 +30,15 @@ type TimestampStatusEvent struct {
 	AutoApprovalMaxRisk     int    `json:"auto_approval_max_risk"`
 	AutoApprovalThreshold   int    `json:"auto_approval_threshold"`
 	AutoApprovalEffective   int    `json:"auto_approval_effective"`
+	// Where each effective value comes from on a fleet host: "host" (the
+	// host's own configuration), "gateway" (the fleet gateway's default for a
+	// setting the host leaves unset), or "host+gateway" for an auto-approval
+	// cap both grant, where the lower applies. Empty when nothing configures
+	// the value, and on a host with no fleet.
+	ReviewSource           string `json:"review_source,omitempty"`
+	TimestampTimeoutSource string `json:"timestamp_timeout_source,omitempty"`
+	AutoApprovalSource     string `json:"auto_approval_source,omitempty"`
+	// GatewayUnavailable is set when this fleet host could not ask its gateway
+	// for its defaults, so the values above are the host's own settings only.
+	GatewayUnavailable bool `json:"gateway_unavailable,omitempty"`
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -761,8 +762,22 @@ func (d *daemon) handleAutoApproval(conn *net.UnixConn, uid uint32, request prot
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "current configuration unavailable"})
 		return
 	}
-	cap := cfg.Review.MaxAutoRisk(uid)
 	ctx := context.Background()
+	// On a fleet host the administrator cap includes the gateway's grant for
+	// this login (the lower of the two where the host grants too). A host with
+	// no fleet never calls out. Like a listing, the lookup is abandoned when the
+	// client disconnects so it cannot hold admission for other jobs.
+	lookupCtx := ctx
+	if cfg.Fleet != nil {
+		var cancel context.CancelFunc
+		lookupCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			_, _ = io.Copy(io.Discard, conn)
+			cancel()
+		}()
+	}
+	cap := d.newFleetLookup(lookupCtx, cfg, uid).reviewPolicy().MaxAutoRisk(uid)
 	if request.Action == "set" {
 		threshold := *request.Threshold // validated before entry
 		if threshold != 0 && (cap == 0 || threshold > cap+1) {
@@ -980,8 +995,26 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		return
 	}
 	policy, fleet := d.policy, d.fleet
-	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 {
-		d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
+	// A fleet host's gateway can add to the host's own review policy. It is
+	// asked at most once for this submission, and only where the host's own
+	// policy would refuse, so a decision the host already makes alone never
+	// waits on the gateway.
+	lookup := d.newFleetLookup(admissionCtx, cfg, uid)
+	timedOut := func() bool {
+		if admissionCtx.Err() == nil {
+			return false
+		}
+		d.rejectReservation(conn, uid, request.RequestID, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+		return true
+	}
+	// A gateway lookup that ran out the request budget is a timeout, not an
+	// answer: nothing may refuse on the strength of defaults it never saw. A
+	// refusal reached without any lookup is unaffected.
+	lookupTimedOut := func() bool { return lookup.attempted && timedOut() }
+	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 && lookup.reviewPolicy().TimestampTimeout(uid) == 0 {
+		if !lookupTimedOut() {
+			d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
+		}
 		return
 	}
 	// A stored fleet window hashes the signed catalogue route (the job's
@@ -991,41 +1024,54 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	// must end at the request's own budget, not at the broker's internal
 	// frame deadline.
 	if request.NonInteractive {
-		var valid bool
-		if (request.ValidateTimestamp || !cfg.Review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && cfg.Review.TimestampTimeout(uid) > 0 {
-			key := d.terminalTimestampKey(uid, foreground.tty)
-			stamp, stampErr := d.store.GetApprovalTimestamp(admissionCtx, key)
-			if stampErr != nil {
-				// A missing window is a nil error with a zero stamp; any
-				// error is an unreadable store or an expired request budget,
-				// never proof that authorization is absent.
-				d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "approval timestamp unavailable"})
-				return
+		eligible := false
+		for pass := 0; pass < 2 && !eligible; pass++ {
+			review := &cfg.Review
+			if pass == 1 {
+				// Second look, with the gateway's defaults, only for a fleet
+				// host whose gateway has any.
+				if review = lookup.reviewPolicy(); review == &cfg.Review {
+					break
+				}
 			}
-			// Resolve Fleet authority only for a window that is still live
-			// by its locally stored expiry; an expired row needs no lookup.
-			if stamp.ExpiresAt.After(time.Now()) {
-				authority := d.timestampWindowAuthority(admissionCtx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
-				if admissionCtx.Err() != nil {
-					// The Fleet lookup ran out the request budget: that is a
-					// timeout, not proof that approval is required.
-					d.rejectReservation(conn, uid, request.RequestID, proto.WaitTimeoutEvent{Op: "wait_timeout", RequestID: request.RequestID})
+			var valid bool
+			if (request.ValidateTimestamp || !review.RequiresReview(uid, request.ForceReview)) && foreground != nil && !request.ResetTimestamp && review.TimestampTimeout(uid) > 0 {
+				key := d.terminalTimestampKey(uid, foreground.tty)
+				stamp, stampErr := d.store.GetApprovalTimestamp(admissionCtx, key)
+				if stampErr != nil {
+					// A missing window is a nil error with a zero stamp; any
+					// error is an unreadable store or an expired request budget,
+					// never proof that authorization is absent.
+					d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "approval timestamp unavailable"})
 					return
 				}
-				valid = timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority).After(time.Now())
+				// Resolve Fleet authority only for a window that is still live
+				// by its locally stored expiry; an expired row needs no lookup.
+				if stamp.ExpiresAt.After(time.Now()) {
+					authority := lookup.windowAuthority(!stamp.ApprovedAt.IsZero(), target)
+					if timedOut() {
+						// The Fleet lookup ran out the request budget: that is a
+						// timeout, not proof that approval is required.
+						return
+					}
+					valid = timestampExpiry(stamp, review.TimestampTimeout(uid), authority).After(time.Now())
+				}
 			}
-		}
-		canAuto := false
-		if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && cfg.Review.MaxAutoRisk(uid) > 0 {
-			threshold, preferenceErr := d.store.GetAutoApprovalThreshold(admissionCtx, uid)
-			if preferenceErr != nil {
-				d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
-				return
+			canAuto := false
+			if !request.ValidateTimestamp && review.RequiresReview(uid, request.ForceReview) && request.Lifecycle == proto.LifecycleDetached && request.CapturedStdinBase64 == "" && review.MaxAutoRisk(uid) > 0 {
+				threshold, preferenceErr := d.store.GetAutoApprovalThreshold(admissionCtx, uid)
+				if preferenceErr != nil {
+					d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "broker_error", Message: "auto-approval preference unavailable"})
+					return
+				}
+				canAuto = threshold >= 2
 			}
-			canAuto = threshold >= 2
+			eligible = valid || canAuto
 		}
-		if !valid && !canAuto {
-			d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
+		if !eligible {
+			if !lookupTimedOut() {
+				d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "approval_required", Message: "askdo: a Telegram approval is required"})
+			}
 			return
 		}
 	}
@@ -1058,8 +1104,10 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 			}
 		}
 	}
-	if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) {
-		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "review_unavailable", Message: "AI review required but no review models are configured"})
+	if !request.ValidateTimestamp && cfg.Review.RequiresReview(uid, request.ForceReview) && len(cfg.Review.Models) == 0 && (cfg.Fleet == nil || len(cfg.Review.GatewayProfiles) == 0) && lookup.reviewPolicy().RequiresReview(uid, request.ForceReview) {
+		if !lookupTimedOut() {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "review_unavailable", Message: "AI review required but no review models are configured"})
+		}
 		return
 	}
 	if !d.queue.reserve() {

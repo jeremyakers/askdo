@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -424,10 +425,11 @@ func TestConfigVersionStill4(t *testing.T) {
 	}
 }
 
-// review.webfetch_enabled is an optional v4 boolean that defaults to false.
-// Omitted and explicit-false both leave the tool disabled; only an explicit
-// true enables it. A non-boolean value is rejected by the strict decoder.
-func TestLoadWebfetchEnabledDefaultFalse(t *testing.T) {
+// review.webfetch_enabled is an optional v4 boolean. Omitted (nil) differs from
+// an explicit false: omitted leaves the choice to a fleet gateway and is off
+// without one, while false is this host saying no whatever its gateway says. A
+// non-boolean value is rejected by the strict decoder.
+func TestLoadWebfetchEnabledDistinguishesOmittedFromFalse(t *testing.T) {
 	restore := stubCredentialChecks(t)
 	defer restore()
 	root := t.TempDir()
@@ -435,15 +437,17 @@ func TestLoadWebfetchEnabledDefaultFalse(t *testing.T) {
 	body := func(field string) string {
 		return `{"config_version":4,"inspection":{"read_roots":["` + root + `"],"trusted_executable_roots":[]},"review":{"models":[{"name":"local","api":"openai_chat","base_url":"http://localhost:11434","model":"m","data_boundary":"local"}]` + field + `},"limits":{},"telegram":{"token_file":"/keys/token","operator_user_id":1,"chat_id":-1}}`
 	}
+	yes, no := true, false
 	cases := []struct {
 		name  string
 		field string
-		want  bool
+		want  *bool
 		bad   bool
 	}{
-		{name: "omitted", field: "", want: false},
-		{name: "explicit false", field: `,"webfetch_enabled":false`, want: false},
-		{name: "explicit true", field: `,"webfetch_enabled":true`, want: true},
+		{name: "omitted", field: "", want: nil},
+		{name: "null", field: `,"webfetch_enabled":null`, want: nil},
+		{name: "explicit false", field: `,"webfetch_enabled":false`, want: &no},
+		{name: "explicit true", field: `,"webfetch_enabled":true`, want: &yes},
 		{name: "non-boolean", field: `,"webfetch_enabled":"yes"`, bad: true},
 	}
 	for _, tc := range cases {
@@ -461,10 +465,42 @@ func TestLoadWebfetchEnabledDefaultFalse(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if cfg.Review.WebfetchEnabled != tc.want {
-				t.Fatalf("WebfetchEnabled=%v, want %v", cfg.Review.WebfetchEnabled, tc.want)
+			if got := cfg.Review.WebfetchEnabled; (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
+				t.Fatalf("WebfetchEnabled=%v, want %v", got, tc.want)
+			}
+			// A save must not turn an explicit false into an omitted setting,
+			// which would hand the choice back to the gateway.
+			saved, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var review struct {
+				Review map[string]json.RawMessage `json:"review"`
+			}
+			if err := json.Unmarshal(saved, &review); err != nil {
+				t.Fatal(err)
+			}
+			raw, present := review.Review["webfetch_enabled"]
+			if present != (tc.want != nil) || present && string(raw) != strconv.FormatBool(*tc.want) {
+				t.Fatalf("saved webfetch_enabled=%s present=%v, want %v", raw, present, tc.want)
 			}
 		})
+	}
+}
+
+// A fleet (version 5) document saves the same way: an explicit false stays in
+// the file, because dropping it would hand the choice back to the gateway.
+func TestFleetConfigSaveKeepsAnExplicitWebfetchFalse(t *testing.T) {
+	no := false
+	cfg := Config{ConfigVersion: 5, Fleet: &FleetConfig{URL: "https://gateway.example", HostID: "host", ApprovalTTL: 60}, Review: ReviewConfig{GatewayProfiles: []string{}, WebfetchEnabled: &no}}
+	saved, err := json.Marshal(cfg)
+	if err != nil || !strings.Contains(string(saved), `"webfetch_enabled":false`) {
+		t.Fatalf("explicit false lost on a fleet save: %s (%v)", saved, err)
+	}
+	cfg.Review.WebfetchEnabled = nil
+	saved, err = json.Marshal(cfg)
+	if err != nil || strings.Contains(string(saved), "webfetch_enabled") {
+		t.Fatalf("an unset setting was written: %s (%v)", saved, err)
 	}
 }
 

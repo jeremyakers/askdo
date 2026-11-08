@@ -33,6 +33,11 @@ func (review *ReviewConfig) ResolveApprovalTimestampUsers() error {
 
 // TimestampTimeout returns the foreground approval timestamp TTL for peerUID.
 // Missing policy or a config not resolved at load/startup leaves it disabled.
+// An entry for the UID in the host's own configuration is final; only a UID the
+// host does not mention takes a fleet gateway's default.
 func (review *ReviewConfig) TimestampTimeout(peerUID uint32) time.Duration {
-	return review.timestampUIDs[peerUID]
+	if timeout, set := review.timestampUIDs[peerUID]; set || review.gateway == nil {
+		return timeout
+	}
+	return review.gateway.timestamp[peerUID]
 }

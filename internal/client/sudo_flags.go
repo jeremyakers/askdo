@@ -170,9 +170,21 @@ func runTimestamp(ctx context.Context, action, target string, options Options) i
 		return timestampFailure(ctx, options, "askdo: invalid timestamp response")
 	}
 	if action == "list" {
-		fmt.Fprintf(options.Stdout, "askdo group membership: %t\nAI review mode: %s; required: %t; exempt: %t\nTimestamp timeout: %ds; remaining on this terminal: %ds\nAuto-approval: cap %d, preference %d, effective %d (0 = off)\n", event.AskdoGroup, event.ReviewMode, event.ReviewRequired, !event.ReviewRequired, event.TimestampTimeoutSeconds, event.RemainingSeconds, event.AutoApprovalMaxRisk, event.AutoApprovalThreshold, event.AutoApprovalEffective)
+		fmt.Fprintf(options.Stdout, "askdo group membership: %t\nAI review mode: %s; required: %t; exempt: %t%s\nTimestamp timeout: %ds%s; remaining on this terminal: %ds\nAuto-approval: cap %d%s, preference %d, effective %d (0 = off)\n", event.AskdoGroup, event.ReviewMode, event.ReviewRequired, !event.ReviewRequired, policySource(event.ReviewSource), event.TimestampTimeoutSeconds, policySource(event.TimestampTimeoutSource), event.RemainingSeconds, event.AutoApprovalMaxRisk, policySource(event.AutoApprovalSource), event.AutoApprovalThreshold, event.AutoApprovalEffective)
+		if event.GatewayUnavailable {
+			fmt.Fprintln(options.Stdout, "Fleet gateway defaults: unavailable; the values above are this host's own settings only")
+		}
 	}
 	return 0
+}
+
+// policySource annotates a listed value with whose setting it is on a fleet
+// host (see proto.TimestampStatusEvent); a standalone host has none to show.
+func policySource(source string) string {
+	if source == "" {
+		return ""
+	}
+	return " (source: " + source + ")"
 }
 
 // timestampFailure reports an administrative timestamp exchange that could not

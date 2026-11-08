@@ -165,6 +165,26 @@ func (j *jobRuntime) configuration() *config.Config {
 	return j.daemon.cfg
 }
 
+// reviewPolicy is the review policy that applies to this job: the host's own
+// configuration and, in a fleet review, the defaults from the signed gateway
+// catalogue frozen for it (see prepareFleet). Every review-mode, timestamp,
+// auto-approval and account-note decision for the job reads it rather than the
+// host configuration directly, so a gateway default reaches each of them.
+func (j *jobRuntime) reviewPolicy() *config.ReviewConfig {
+	host := &j.configuration().Review
+	if j.fleet == nil {
+		return host
+	}
+	if j.fleet.review != nil {
+		return j.fleet.review
+	}
+	if defaults := j.fleet.selection.Catalog.ReviewDefaults; defaults != nil {
+		merged := host.WithGatewayDefaults(defaults)
+		return &merged
+	}
+	return host
+}
+
 func (j *jobRuntime) inspectionPolicy() *inspection.Policy {
 	if j.cfg != nil {
 		return j.policy
@@ -430,6 +450,8 @@ func (j *jobRuntime) run(ctx context.Context) {
 			j.fail("prepare fleet review")
 			return
 		}
+		// The signed catalogue's gateway defaults may exempt the submitter.
+		approvalOnly = j.req.ValidateTimestamp || !j.reviewPolicy().RequiresReview(j.uid, j.req.ForceReview)
 	} else if !approvalOnly {
 		var modelsErr error
 		models, preflight, modelsErr = j.projectModelsWithFailures(ctx)
@@ -533,7 +555,7 @@ func (j *jobRuntime) run(ctx context.Context) {
 		history := []proto.AvailabilityFailure{}
 		if j.req.ValidateTimestamp {
 			reason = "Validate approval timestamp only; no command will run"
-		} else if j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
+		} else if j.reviewPolicy().RequiresReview(j.uid, j.req.ForceReview) {
 			reason = "AI review unavailable for all configured models"
 			history = j.orderedAvailabilityHistory(unavailable)
 		} else if len(preflight) != 0 {
@@ -737,16 +759,24 @@ func (j *jobRuntime) run(ctx context.Context) {
 	j.consumeDecision(ctx, decision)
 }
 
-// autoPlanFor selects a broker-authored plan only for a validated reviewed
-// report. A zero cap or preference always preserves the human approval path.
+// currentAutoRisk re-reads the host's own grant at the final no-human dispatch
+// gate, so revoking or lowering it still blocks an already-reviewed job. A
+// gateway grant is not re-fetched here: it is the one frozen with the
+// review's catalogue, so a change at the gateway applies to later reviews.
 func (j *jobRuntime) currentAutoRisk() (int, error) {
 	cfg, err := j.daemon.currentConfig()
 	if err != nil {
 		return 0, err
 	}
-	return cfg.Review.MaxAutoRisk(j.uid), nil
+	review := cfg.Review
+	if j.fleet != nil {
+		review = review.WithGatewayDefaults(j.fleet.selection.Catalog.ReviewDefaults)
+	}
+	return review.MaxAutoRisk(j.uid), nil
 }
 
+// autoPlanFor selects a broker-authored plan only for a validated reviewed
+// report. A zero cap or preference always preserves the human approval path.
 func (j *jobRuntime) autoPlanFor(report proto.ReviewReport) (*proto.AutoApprovalPlan, error) {
 	if j.req.Lifecycle == proto.LifecycleForeground || j.req.CapturedStdinBase64 != "" {
 		return nil, nil
@@ -755,7 +785,7 @@ func (j *jobRuntime) autoPlanFor(report proto.ReviewReport) (*proto.AutoApproval
 	if err != nil || score < 1 || score > 4 {
 		return nil, nil
 	}
-	cap := j.configuration().Review.MaxAutoRisk(j.uid)
+	cap := j.reviewPolicy().MaxAutoRisk(j.uid)
 	if cap < score || cap < 1 || cap > 4 {
 		return nil, nil
 	}
