@@ -111,6 +111,9 @@ type Catalog struct {
 	// Absent (nil) from older gateways or when unconfigured, in which case
 	// the host's own review.webfetch_enabled applies.
 	ReviewerWebfetchEnabled *bool `json:"reviewer_webfetch_enabled,omitempty"`
+	// FleetUpgrade offers THIS host the gateway's target release. Absent unless
+	// the gateway has a target and it is this host's turn (see upgrade.go).
+	FleetUpgrade *FleetUpgradeOffer `json:"fleet_upgrade,omitempty"`
 }
 
 type ReviewReport = proto.ReviewReport
