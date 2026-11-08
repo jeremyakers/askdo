@@ -30,6 +30,10 @@ func (s *Server) handleHostStatus(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, 400, fleetproto.ErrCodeProtocol)
 		return
 	}
+	if s.upgrades == nil {
+		writeFailure(w, 503, fleetproto.ErrCodeTransport)
+		return
+	}
 	if err := s.upgrades.Record(r.Context(), host.HostID, status, time.Now()); err != nil {
 		writeFailure(w, 500, fleetproto.ErrCodeTransport)
 		return

@@ -105,6 +105,10 @@ CREATE TABLE IF NOT EXISTS gateway_upgrade_notices (
  UNIQUE(host_id,op,outcome,at));
 CREATE TABLE IF NOT EXISTS gateway_upgrade_sends (notice INTEGER NOT NULL,chat INTEGER NOT NULL,PRIMARY KEY(notice,chat));`
 
+// openUpgradeStore is what the serving gateway opens the store with; a test
+// replaces it to show that the gateway still starts without the store.
+var openUpgradeStore = NewUpgradeStore
+
 // NewUpgradeStore adds the upgrade tables to the enrollment database if it does
 // not have them. The database version is unchanged, so a gateway from before this
 // store opens the same file and ignores the tables.

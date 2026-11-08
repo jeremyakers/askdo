@@ -354,13 +354,13 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 		if e != nil {
 			return e
 		}
-		upgrades, e := gateway.NewUpgradeStore(store)
-		if e != nil {
-			return e
-		}
-		reported, e := upgrades.Statuses(ctx)
-		if e != nil {
-			return e
+		// What hosts reported about upgrades is extra: listing the enrollments never
+		// depends on it, so a database that cannot give it just lists "unknown".
+		reported := map[string]gateway.HostUpgrade{}
+		if upgrades, e := gateway.NewUpgradeStore(store); e == nil {
+			if statuses, e := upgrades.Statuses(ctx); e == nil {
+				reported = statuses
+			}
 		}
 		for _, h := range hosts {
 			if _, e = fleetproto.ParseID(h.HostID); e != nil {

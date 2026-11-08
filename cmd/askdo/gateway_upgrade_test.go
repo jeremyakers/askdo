@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -241,5 +242,39 @@ func TestGatewayRootHostsListShowsReleaseAndLastUpgrade(t *testing.T) {
 	}
 	if !strings.HasSuffix(silent, " name=- release=unknown auto_upgrade=unknown upgrade=none seen=never") {
 		t.Errorf("host that never reported: %q", silent)
+	}
+}
+
+// What hosts reported about upgrades is an extra on `hosts list`: when the
+// database cannot give it (a gateway from before the tables, an unreadable
+// table), the enrollments are still listed, exactly as before.
+func TestGatewayRootHostsListDoesNotDependOnWhatHostsReported(t *testing.T) {
+	dir, path := gatewayOperatorFixture(t)
+	var out, stderr bytes.Buffer
+	if code := runGateway([]string{"hosts", "add", "--config", path, "--output", filepath.Join(dir, "one.json"), "--channel", "default", "--default-channel", "default"}, &out, &stderr); code != 0 {
+		t.Fatalf("add: %s", stderr.String())
+	}
+	id := strings.Fields(out.String())[1]
+	cfg, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", cfg.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// A table by that name that cannot answer the query.
+	if _, err := db.Exec("CREATE TABLE gateway_host_status (host_id TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	stderr.Reset()
+	if code := runGateway([]string{"hosts", "list", "--config", path}, &out, &stderr); code != 0 {
+		t.Fatalf("list failed because of the optional upgrade columns: %s", stderr.String())
+	}
+	line := strings.TrimSpace(out.String())
+	if !strings.HasPrefix(line, id+" enabled=true ") || !strings.HasSuffix(line, " name=- release=unknown auto_upgrade=unknown upgrade=none seen=never") {
+		t.Fatalf("list = %q", line)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -112,9 +113,12 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	// The ticket poll's one transaction also ingests join callbacks, so the
 	// join inbox shares the ticket store from here on.
 	s.tickets.joins = s.joins
-	s.upgrades, err = NewUpgradeStore(store)
-	if err != nil {
-		return fail(err)
+	// Pushed upgrades are optional. A gateway that cannot set up their tables still
+	// serves every approval and review: it just offers no upgrades and takes no
+	// host reports.
+	if s.upgrades, err = openUpgradeStore(store); err != nil {
+		slog.Warn("fleet upgrade state unavailable; running without pushed upgrades", "error", err)
+		s.upgrades = nil
 	}
 	var option dispatcherOptions
 	if len(options) > 0 {

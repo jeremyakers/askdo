@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -436,5 +437,28 @@ func TestANoticeForAHostThatIsGoneIsDroppedNotRetriedForever(t *testing.T) {
 		if strings.Contains(m.Text, "askdo upgraded") {
 			t.Fatalf("a notice was sent for a host with no channel: %+v", m)
 		}
+	}
+}
+
+// Pushed upgrades are optional: a gateway that cannot set up their tables still
+// serves every review and approval, and answers a host's report with a transport
+// failure the host ignores rather than a crash.
+func TestGatewayStillServesWhenItsUpgradeStateCannotBeSetUp(t *testing.T) {
+	old := openUpgradeStore
+	openUpgradeStore = func(*EnrollmentStore) (*UpgradeStore, error) { return nil, errors.New("disk full") }
+	t.Cleanup(func() { openUpgradeStore = old })
+	f := upgradeWire(t, 0) // newServer must not fail for an optional feature
+	a := f.enroll(t)
+
+	catalog, payload := f.catalog(t, a)
+	if catalog.FleetUpgrade != nil || strings.Contains(payload, "fleet_upgrade") || len(catalog.Profiles) != 1 {
+		t.Fatalf("catalog = %s", payload)
+	}
+	data, err := fleetproto.MarshalHostStatus(ready("v1.0.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.do(t, http.MethodPut, "/v1/host-status", a, data); code != 503 {
+		t.Fatalf("report without an upgrade store = %d %s, want a transport failure", code, body)
 	}
 }
