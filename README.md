@@ -302,8 +302,9 @@ askdo upgrade
 ```
 
 It downloads and verifies a release, asks for Telegram approval, then activates
-and verifies it. No sudo password is needed. See [upgrading and recovery](docs/upgrade.md)
-for exact releases, reconnecting after a restart and backup handling.
+and verifies it, rolling back to the previous release if activation fails. No
+sudo password is needed. See [upgrading and recovery](docs/upgrade.md) for exact
+releases, reconnecting after a restart, rollback and backup handling.
 
 ## Review a script before you run it
 

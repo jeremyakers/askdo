@@ -115,6 +115,11 @@ type ActivationHost interface {
 	SetDraining(context.Context, Layout, string, Unit, bool) error
 	LegacyDraining(string) bool
 	Stop(context.Context, string, Unit) error
+	// Halt stops a unit whatever its state (running, restarting or failed) and
+	// clears any failed state so that Start can run again. Unlike Stop it is
+	// bound to no drained process identity: only a rollback uses it, on the
+	// services of a release it is abandoning.
+	Halt(context.Context, string) error
 	Start(context.Context, string) error
 	BackupDatabase(context.Context, string, string) error
 	Verify(context.Context, Layout) error
@@ -132,6 +137,9 @@ type Helper struct {
 	CheckDirectoryACL func(string) error
 	Now               func() time.Time
 	Wait              func(context.Context) error
+	// Tests substitute Rename to fail the steps that commit or undo a rollback's
+	// restore of a file.
+	Rename func(oldpath, newpath string) error
 }
 
 type activationRecord struct {
@@ -169,6 +177,13 @@ func (h Helper) now() time.Time {
 		return h.Now()
 	}
 	return time.Now()
+}
+
+func (h Helper) rename(oldpath, newpath string) error {
+	if h.Rename != nil {
+		return h.Rename(oldpath, newpath)
+	}
+	return os.Rename(oldpath, newpath)
 }
 
 func (h Helper) wait(ctx context.Context) error {
@@ -444,7 +459,9 @@ func verifiedSourceWithPlan(dir, id string, data []byte) (verifiedRelease, error
 }
 
 // Activate issues effects at most once. An interrupted intent is evidence for
-// an unknown result, never permission to replay stop/install/start or rollback.
+// an unknown result, never permission to replay stop/install/start or to roll
+// back from disk. A failure this call observes after live effects began is
+// rolled back in-process, under the same operation lock, from the stage backup.
 func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	h.BackupRoot = filepath.Dir(stage)
 	id := filepath.Base(stage)
@@ -502,18 +519,21 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	phase, effects := "preflight", false
 	succeeded, recoveryFailed := false, false
 	backup := filepath.Join(stage, "backup")
+	var undo undoLog
 	defer func() {
 		if err != nil && !succeeded {
-			state := stateFailed
-			if effects && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-				state = stateUnknown
+			cause, outcome := phase+" failed", ""
+			switch {
+			case !effects && !recoveryFailed:
+				err = errors.Join(err, h.failUnchanged(r, cause))
+			case !effects:
+				err = errors.Join(err, update(stateFailed, cause+"; admission recovery failed; manual recovery required; backup retained at stage/backup"))
+			default:
+				var rollbackErr error
+				outcome, rollbackErr = h.rollBackActivation(update, &undo, cause)
+				err = errors.Join(err, rollbackErr)
 			}
-			if !effects && !recoveryFailed {
-				err = errors.Join(err, h.failUnchanged(r, phase+" failed"))
-			} else {
-				err = errors.Join(err, update(state, phase+" failed; no automatic rollback; backup retained at stage/backup"))
-			}
-			err = fmt.Errorf("upgrade %s (stage %s; backup %s): %w", phase, stage, backup, err)
+			err = fmt.Errorf("upgrade %s (stage %s; backup %s%s): %w", phase, stage, backup, outcome, err)
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -546,9 +566,9 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		return err
 	}
 	// Activation stops the services before installing binaries and repairing
-	// the multicall link, and a failed activation performs no automatic
-	// restart. A conflicting link target must fail this preflight, before any
-	// drain, stop, or install effect, never at the install step.
+	// the multicall link. A conflicting link target must fail this preflight,
+	// before any drain, stop, or install effect, not cost a stop and a rollback
+	// at the install step.
 	if err := h.preflightConfigLink(layout.CLI); err != nil {
 		return err
 	}
@@ -570,6 +590,7 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		}
 		before[name] = u
 	}
+	undo.layout, undo.units, undo.before = layout, units, before
 	var drainAttempts []string
 	drained := make(map[string]Unit, len(units))
 	defer func() {
@@ -614,6 +635,7 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 		return err
 	}
 	running := make(map[string]string, len(units))
+	undo.backup, undo.running = backup, running
 	for _, name := range units {
 		u, err := h.Host.Observe(ctx, name)
 		if err != nil {
@@ -683,27 +705,27 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	if err := h.waitQuiet(ctx, layout, drained); err != nil {
 		return err
 	}
-	for _, file := range [][2]string{{layout.Config, "config.json"}, {layout.CLI, "askdo"}, {layout.Launch, "askdo-launch"}, {layout.GatewayConfig, "gateway-config.json"}} {
+	// Each capture also records what a rollback needs to prove and reverse it.
+	for _, file := range [][3]string{{layout.Config, "config.json", ""}, {layout.CLI, "askdo", p.CLIDigest}, {layout.Launch, "askdo-launch", p.HelperDigest}, {layout.GatewayConfig, "gateway-config.json", ""}} {
 		if file[0] != "" {
-			if err := copyPrivate(file[0], filepath.Join(backup, file[1]), 0); err != nil {
+			kept, err := preserveFile(file[0], filepath.Join(backup, file[1]), file[2])
+			if err != nil {
 				return err
 			}
+			undo.files = append(undo.files, kept)
 		}
 	}
 	for _, db := range [][2]string{{layout.JobsDB, "jobs.sqlite3"}, {layout.GatewayDB, "gateway.sqlite3"}} {
 		if db[0] != "" {
-			path := filepath.Join(backup, db[1])
-			if err := h.Host.BackupDatabase(ctx, db[0], path); err != nil {
-				return err
-			}
-			f, err := openRegular(path)
+			kept, err := h.preserveDatabase(ctx, db[0], filepath.Join(backup, db[1]))
 			if err != nil {
 				return err
 			}
-			if err := errors.Join(f.Sync(), f.Close()); err != nil {
-				return err
-			}
+			undo.files = append(undo.files, kept)
 		}
+	}
+	if undo.link, err = captureLink(configLinkPath(layout.CLI)); err != nil {
+		return err
 	}
 	if err := syncDirectory(backup); err != nil {
 		return err
@@ -715,8 +737,10 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	if err := update(stateActivating, "install-intent; stopped backups durable at stage/backup"); err != nil {
 		return err
 	}
-	// Separate same-filesystem renames, not a multi-file transaction. Never
-	// disguise a partial replacement as success or roll it back automatically.
+	// Separate same-filesystem renames, not a multi-file transaction. A partial
+	// replacement is never reported as success: the failure handler rolls it
+	// back from the stopped backups just taken.
+	undo.installing = true
 	for _, file := range [][3]string{{p.CLIAsset, layout.CLI, p.CLIDigest}, {p.HelperAsset, layout.Launch, p.HelperDigest}} {
 		if err := installCandidate(candidate.assets[file[0]], file[1], file[2]); err != nil {
 			return err
@@ -725,66 +749,33 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	if err := ensureConfigLink(layout.CLI); err != nil {
 		return err
 	}
-	for _, name := range units {
-		phase = "start " + name
-		if err := update(stateVerifying, "start-intent "+name); err != nil {
+	images := make([]unitImage, len(units))
+	for i, name := range units {
+		images[i] = unitImage{name, p.CLIDigest}
+	}
+	for _, want := range images {
+		phase = "start " + want.name
+		if err := update(stateVerifying, "start-intent "+want.name); err != nil {
 			return err
 		}
-		if err := h.Host.Start(ctx, name); err != nil {
+		undo.started = true // publication succeeded; Host.Start can now issue effects.
+		if err := h.Host.Start(ctx, want.name); err != nil {
 			return err
 		}
 		// Starting is never retried. Only observations may repeat while the
 		// service finishes startup, bounded by the operation's fixed deadline.
-		for {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			u, err := h.Host.Observe(ctx, name)
-			if err != nil {
-				return err
-			}
-			if u.ActiveState == "failed" {
-				return fmt.Errorf("%s entered failed state", name)
-			}
-			if u.MainPID > 0 && u.ActiveState == "active" && u.SubState == "running" {
-				digest, err := sha256HexFile(filepath.Join(layout.ProcRoot, strconv.Itoa(u.MainPID), "exe"))
-				if err == nil && digest == p.CLIDigest {
-					break
-				}
-			}
-			if err := h.wait(ctx); err != nil {
-				return err
-			}
+		if err := h.awaitRunning(ctx, layout, want); err != nil {
+			return err
 		}
 	}
 	phase = "verify responsiveness"
-	var verificationErr error
-	for {
-		if err := ctx.Err(); err != nil {
-			return errors.Join(err, verificationErr)
-		}
-		verificationErr = h.Host.Verify(ctx, layout)
-		if verificationErr == nil {
-			break
-		}
-		if err := h.wait(ctx); err != nil {
-			return errors.Join(err, verificationErr)
-		}
+	if err := h.awaitResponsive(ctx, layout); err != nil {
+		return err
 	}
 	// The gateway can restart while the broker starts. Reobserve every unit
 	// after the response probes rather than succeeding on an earlier PID/hash.
-	for _, name := range units {
-		u, err := h.Host.Observe(ctx, name)
-		if err != nil {
-			return err
-		}
-		if u.MainPID <= 0 || u.ActiveState != "active" || u.SubState != "running" {
-			return fmt.Errorf("%s no longer running after verification", name)
-		}
-		got, err := sha256HexFile(filepath.Join(layout.ProcRoot, strconv.Itoa(u.MainPID), "exe"))
-		if err != nil || got != p.CLIDigest {
-			return errors.New("running image changed during responsiveness verification")
-		}
+	if err := h.confirmRunning(ctx, layout, images); err != nil {
+		return err
 	}
 	const success = "running executable hashes and broker/gateway responsiveness verified; backup retained at stage/backup"
 	if err := update(stateSucceeded, success); err != nil {
@@ -793,6 +784,70 @@ func (h Helper) Activate(parent context.Context, stage string) (err error) {
 	succeeded = true
 	if err := h.pruneSuccessfulStages(stage); err != nil {
 		return errors.Join(err, update(stateSucceeded, success+"; older stage cleanup failed; inspect activation log"))
+	}
+	return nil
+}
+
+// awaitRunning observes a started unit until it runs the expected image. It
+// never starts anything: only observations repeat, bounded by ctx. Activation
+// and rollback verify a start the same way.
+func (h Helper) awaitRunning(ctx context.Context, layout Layout, want unitImage) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		u, err := h.Host.Observe(ctx, want.name)
+		if err != nil {
+			return err
+		}
+		if u.ActiveState == "failed" {
+			return fmt.Errorf("%s entered failed state", want.name)
+		}
+		if isRunning(u) {
+			digest, err := sha256HexFile(filepath.Join(layout.ProcRoot, strconv.Itoa(u.MainPID), "exe"))
+			if err == nil && digest == want.digest {
+				return nil
+			}
+		}
+		if err := h.wait(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+// awaitResponsive repeats the host's broker and gateway probes until they pass
+// or ctx ends, and reports the last probe failure with the reason it stopped.
+func (h Helper) awaitResponsive(ctx context.Context, layout Layout) error {
+	var verificationErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(err, verificationErr)
+		}
+		verificationErr = h.Host.Verify(ctx, layout)
+		if verificationErr == nil {
+			return nil
+		}
+		if err := h.wait(ctx); err != nil {
+			return errors.Join(err, verificationErr)
+		}
+	}
+}
+
+// confirmRunning observes every unit once more after the response probes: a
+// unit can restart while another starts, so an earlier PID or hash proves nothing.
+func (h Helper) confirmRunning(ctx context.Context, layout Layout, want []unitImage) error {
+	for _, image := range want {
+		u, err := h.Host.Observe(ctx, image.name)
+		if err != nil {
+			return err
+		}
+		if !isRunning(u) {
+			return fmt.Errorf("%s no longer running after verification", image.name)
+		}
+		got, err := sha256HexFile(filepath.Join(layout.ProcRoot, strconv.Itoa(u.MainPID), "exe"))
+		if err != nil || got != image.digest {
+			return errors.New("running image changed during responsiveness verification")
+		}
 	}
 	return nil
 }
@@ -949,15 +1004,6 @@ func writePrivate(dir, name string, data []byte) error {
 	return copyFrom(bytes.NewReader(data), filepath.Join(dir, name), int64(len(data)))
 }
 
-func copyPrivate(src, dst string, max int64) error {
-	f, err := openRegular(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return copyFrom(f, dst, max)
-}
-
 func copyFrom(src io.Reader, dst string, max int64) error {
 	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -985,10 +1031,10 @@ func configLinkPath(cli string) string {
 }
 
 // configLinkConflict reports a path that ensureConfigLink can never replace.
-// The link is repaired at the install step, after services are stopped, and a
-// failed activation performs no automatic restart, so a conflicting regular
-// file or directory must be refused earlier, while activation still has no
-// live effects. A symlink of any target is repairable and is not a conflict.
+// The link is repaired at the install step, after services are stopped, so a
+// conflicting regular file or directory must be refused earlier, while
+// activation still has no live effects, rather than stop the services only to
+// roll back. A symlink of any target is repairable and is not a conflict.
 func configLinkConflict(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {

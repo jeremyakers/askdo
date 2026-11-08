@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -24,7 +23,7 @@ func bootstrapFixture(t *testing.T) (string, upgrade.Plan, []byte) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte(candidate))
-	plan := upgrade.Plan{Operation: operation, CLIAsset: asset, CLIDigest: hex.EncodeToString(digest[:])}
+	plan := upgrade.Plan{Operation: operation, Release: "v1.0.0-rc.32", SourceCommit: "051adadd4f526ad23c37dfb22021003531a25b32", CLIAsset: asset, CLIDigest: hex.EncodeToString(digest[:])}
 	return source, plan, []byte(`{"version":1}`)
 }
 
@@ -34,8 +33,7 @@ func runBootstrap(t *testing.T, source string, plan upgrade.Plan, captured []byt
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-s", plan.Operation, source)
-	cmd.Stdin = bytes.NewReader(script)
+	cmd := bundleBootstrapCommand(t, script, plan.Operation, source)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -78,8 +76,7 @@ func TestUpgradeBootstrapRejectsReplacedCandidateBeforeExecution(t *testing.T) {
 	}
 
 	// When the mutable source is replaced before the root bootstrap runs.
-	cmd := exec.Command("/bin/sh", "-s", plan.Operation, source)
-	cmd.Stdin = bytes.NewReader(script)
+	cmd := bundleBootstrapCommand(t, script, plan.Operation, source)
 	output, err := cmd.CombinedOutput()
 
 	// Then digest verification fails and the replacement never executes.
@@ -112,4 +109,43 @@ func TestUpgradeBootstrapRejectsUntrustedBootstrapRoot(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(source, "executed")); !os.IsNotExist(statErr) {
 		t.Fatalf("candidate executed: %v", statErr)
 	}
+}
+
+func TestUpgradeBootstrapStatesVerifiableProvenance(t *testing.T) {
+	// Given an approved upgrade plan.
+	_, plan, captured := bootstrapFixture(t)
+	script, err := upgradeBootstrapScript(plan, captured, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Then the reviewer-visible script names the official checksum and docs for
+	// the exact release and commit, next to the digest it enforces.
+	for _, want := range []string{
+		"https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.32/askdo-linux-amd64.sha256",
+		"https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.32/install-manifest.v1",
+		"https://github.com/jeremyakers/askdo/blob/051adadd4f526ad23c37dfb22021003531a25b32/docs/upgrade.md",
+		"#   " + plan.CLIDigest,
+		"automatically restores the backed-up binaries",
+	} {
+		if !strings.Contains(string(script), want) {
+			t.Errorf("bootstrap script lacks %q", want)
+		}
+	}
+	// And a release identity that could break the header is refused.
+	bad := plan
+	bad.Release = "v1\nrm -rf /"
+	if _, err := upgradeBootstrapScript(bad, captured, t.TempDir()); err == nil {
+		t.Fatal("unsafe release tag accepted")
+	}
+}
+
+// bundleBootstrapCommand runs the bootstrap the way the broker runs a one-file
+// bundle entry: /bin/bash --noprofile --norc ENTRY ARGS.
+func bundleBootstrapCommand(t *testing.T, script []byte, args ...string) *exec.Cmd {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), upgradeBootstrapFile)
+	if err := os.WriteFile(path, script, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return exec.Command("/bin/bash", append([]string{"--noprofile", "--norc", path}, args...)...)
 }

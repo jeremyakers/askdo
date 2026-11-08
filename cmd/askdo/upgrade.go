@@ -134,41 +134,33 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		fmt.Fprintf(stdout, "Upgrade operation: %s\nRelease: %s\nSource commit: %s\nManifest SHA-256: %s\n", *operation, plan.Release, plan.SourceCommit, plan.ManifestDigest)
 		reason := fmt.Sprintf("Upgrade askdo and any installed gateway to %s from source %s with manifest SHA-256 %s (operation %s). Stage the verified release and activate it after this scheduling job finishes.", plan.Release, plan.SourceCommit, plan.ManifestDigest, *operation)
 		// Explicit detached execution never invokes the foreground sudo helper.
-		// The captured bootstrap verifies a root-owned candidate copy before
-		// executing it with the embedded approved plan. The broker freezes the
-		// complete script, so neither mutable source bytes nor obsolete installed
-		// helper behavior can select the scheduling or activation path. Captured
-		// stdin is always human-only, including on older brokers.
+		// The bootstrap is submitted as a one-file bundle (--script): the broker
+		// freezes its complete bytes, the reviewer reads them, and the job follows
+		// the host's normal approval policy, including risk-based auto-approval.
+		// The script verifies a root-owned candidate copy before executing it
+		// with the embedded approved plan, so neither mutable source bytes nor
+		// obsolete installed helper behavior can select the scheduling or
+		// activation path.
 		bootstrap, err := upgradeBootstrapScript(plan, capturedPlan, defaultUpgradeBootstrapRoot)
 		if err != nil {
 			fmt.Fprintln(stderr, "upgrade bootstrap; no command submitted:", err)
 			return 125
 		}
-		stdin, err := os.CreateTemp(source, ".captured-plan-")
-		if err != nil {
-			fmt.Fprintln(stderr, "upgrade stdin; no command submitted:", err)
-			return 125
-		}
-		defer stdin.Close()
-		if err = os.Remove(stdin.Name()); err == nil {
-			_, err = stdin.Write(bootstrap)
-		}
-		if err == nil {
-			_, err = stdin.Seek(0, io.SeekStart)
-		}
-		if err != nil {
-			fmt.Fprintln(stderr, "upgrade captured plan; no command submitted:", err)
+		script := filepath.Join(source, upgradeBootstrapFile)
+		if err := os.WriteFile(script, bootstrap, 0o600); err != nil {
+			fmt.Fprintln(stderr, "upgrade bootstrap; no command submitted:", err)
 			return 125
 		}
 		if options.runClient == nil {
 			options.runClient = client.Run
 		}
-		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--", "/bin/sh", "-s", *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Stdin: stdin, Interrupt: make(chan os.Signal)})
+		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--script", script, *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Interrupt: make(chan os.Signal)})
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
 	// The root operation's activation budget starts only after scheduling, not
 	// while the user is downloading, reviewing or waiting for human approval.
-	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+2*time.Minute)
+	// It can end in a rollback, which has its own allowance after the deadline.
+	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute)
 	defer cancel()
 	lastState := ""
 	for {
@@ -196,9 +188,9 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			fmt.Fprintf(stdout, "askdo %s is installed and verified.\n", receipt.Release)
 			return 0
 		case "failed", "unknown":
+			// The detail says what was restored, or that recovery is manual.
 			fmt.Fprintf(stderr, "%s\nStage: %s\nBackup: %s\n", receipt.Detail, receipt.Stage, filepath.Join(receipt.Stage, "backup"))
 			if receipt.State == "failed" {
-				fmt.Fprintln(stderr, "No automatic rollback was attempted.")
 				return 1
 			}
 			fmt.Fprintln(stderr, "Recovery: inspect the stage and compatible binary/DB backups before manual recovery; do not resubmit or automatically roll back.")
@@ -212,6 +204,9 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		}
 	}
 }
+
+// upgradeBootstrapFile is the bundle entry name the reviewer and card show.
+const upgradeBootstrapFile = "askdo-upgrade-bootstrap.sh"
 
 func upgradeResumeHint(stderr io.Writer, operation string) {
 	fmt.Fprintf(stderr, "Resume observation without resubmitting: askdo upgrade --operation %s\n", operation)

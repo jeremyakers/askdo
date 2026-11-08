@@ -29,7 +29,12 @@ const cliUpgradeID = "up_12121212121212121212121212121212"
 
 func writeCLIReceipt(t *testing.T, root, id, release, state string) {
 	t.Helper()
-	r := upgrade.Receipt{Version: 1, ID: id, Release: release, SourceCommit: strings.Repeat("ab", 20), State: state, Stage: "/var/backups/askdo/" + id, Detail: "fixture recovery detail", UpdatedAtUnixMS: time.Now().UnixMilli()}
+	writeCLIReceiptDetail(t, root, id, release, state, "fixture recovery detail")
+}
+
+func writeCLIReceiptDetail(t *testing.T, root, id, release, state, detail string) {
+	t.Helper()
+	r := upgrade.Receipt{Version: 1, ID: id, Release: release, SourceCommit: strings.Repeat("ab", 20), State: state, Stage: "/var/backups/askdo/" + id, Detail: detail, UpdatedAtUnixMS: time.Now().UnixMilli()}
 	data, err := json.Marshal(r)
 	if err != nil {
 		t.Fatal(err)
@@ -115,16 +120,17 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				flags := flag.NewFlagSet("fake client", flag.ContinueOnError)
 				detach := flags.Bool("detach", false, "")
 				reason := flags.String("reason", "", "")
+				script := flags.String("script", "", "")
 				if err := flags.Parse(args); err != nil {
 					t.Fatal(err)
 				}
 				argv := flags.Args()
-				if len(argv) != 4 || !*detach {
-					t.Fatalf("not a detached captured bootstrap invocation: %q", args)
+				if len(argv) != 2 || !*detach || *script == "" {
+					t.Fatalf("not a detached bootstrap bundle invocation: %q", args)
 				}
-				operation, source = argv[2], argv[3]
-				if want := []string{"/bin/sh", "-s", cliUpgradeID, source}; !reflect.DeepEqual(argv, want) {
-					t.Fatalf("bootstrap argv=%q want=%q", argv, want)
+				operation, source = argv[0], argv[1]
+				if want := []string{cliUpgradeID, source}; !reflect.DeepEqual(argv, want) || *script != filepath.Join(source, upgradeBootstrapFile) {
+					t.Fatalf("bootstrap argv=%q script=%q", argv, *script)
 				}
 				info, err := os.Stat(source)
 				if err != nil || info.Mode().Perm() != 0o700 {
@@ -148,8 +154,8 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 						t.Fatalf("plan digest for %s: %s", name, digest)
 					}
 				}
-				if options.Stdin == nil || options.Interrupt == nil {
-					t.Fatal("upgrade must supply captured plan stdin and stay detached")
+				if options.Stdin != nil || options.Interrupt == nil {
+					t.Fatal("upgrade must submit the bootstrap as a bundle, not captured stdin")
 				}
 				// A user can replace the local artifact before the broker captures
 				// stdin; it must not change the in-memory plan submitted for approval.
@@ -158,7 +164,7 @@ func TestUpgradeCLIPlanFixedArgvAndHumanApproval(t *testing.T) {
 				if err := upgrade.WritePlan(source, replacement); err != nil {
 					t.Fatal(err)
 				}
-				captured, err := io.ReadAll(options.Stdin)
+				captured, err := os.ReadFile(*script)
 				capturedPlan, _ := json.Marshal(plan)
 				if err != nil || !bytes.Contains(captured, capturedPlan) || !bytes.Contains(captured, []byte(plan.CLIDigest)) || !bytes.Contains(captured, []byte("/usr/bin/sha256sum")) || !bytes.Contains(captured, []byte("upgrade-helper")) {
 					t.Fatalf("stdin is not the pinned bootstrap and approved plan: %s %v", captured, err)
@@ -292,6 +298,27 @@ func TestUpgradeCLIReceiptOutcomesAndMissingReceipt(t *testing.T) {
 	}
 }
 
+func TestUpgradeCLIFailedReceiptReportsRollbackOutcomeWithoutDenyingIt(t *testing.T) {
+	for _, detail := range []string{
+		"start askdo.service failed; rolled back to previous release; services verified; backup retained at stage/backup",
+		"install failed; rollback failed: restore askdo; manual recovery required; backup retained at stage/backup",
+	} {
+		t.Run(detail, func(t *testing.T) {
+			// Given: a failed operation whose receipt says what the rollback did.
+			root := t.TempDir()
+			writeCLIReceiptDetail(t, root, cliUpgradeID, "v3.2.1", "failed", detail)
+			var stdout, stderr bytes.Buffer
+			// When
+			code := runUpgradeWith(t.Context(), []string{"--operation", cliUpgradeID}, upgradeCLIOptions{receiptRoot: root}, &stdout, &stderr)
+			// Then: the receipt's own words are shown, with the backup location,
+			// and the client does not claim that no rollback was attempted.
+			if code != 1 || !strings.Contains(stderr.String(), detail) || !strings.Contains(stderr.String(), "/var/backups/askdo/"+cliUpgradeID+"/backup") || strings.Contains(stderr.String(), "No automatic rollback") {
+				t.Fatalf("failed receipt code=%d stderr=%s", code, &stderr)
+			}
+		})
+	}
+}
+
 func TestUpgradeCLINoReceiptPreservesClientFailureCode(t *testing.T) {
 	for _, clientCode := range []int{1, 125, 126} {
 		t.Run(fmt.Sprint(clientCode), func(t *testing.T) {
@@ -396,8 +423,9 @@ func TestUpgradeCLIOperationWatchIsBounded(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		// When
 		code := runUpgradeWith(t.Context(), []string{"--operation", cliUpgradeID}, upgradeCLIOptions{receiptRoot: root}, &stdout, &stderr)
-		// Then: no real twelve-minute wait or background watcher remains.
-		if code != 125 || time.Since(started) != upgrade.OperationTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+		// Then: no real seventeen-minute wait or background watcher remains. The
+		// watch outlasts the deadline by a full rollback and two minutes.
+		if code != 125 || time.Since(started) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
 			t.Fatalf("watch code=%d elapsed=%s stderr=%s", code, time.Since(started), &stderr)
 		}
 	})
@@ -465,7 +493,7 @@ func TestUpgradeCLISlowApprovalPrecedesObservationDeadline(t *testing.T) {
 		// When: activation itself remains scheduled and never reaches a terminal receipt.
 		code := runUpgradeWith(t.Context(), nil, deps, &stdout, &stderr)
 		// Then: pre-dispatch workflow completes; a NEW bounded watch starts afterward.
-		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
 			t.Fatalf("slow approval: client=%v code=%d observation=%s stderr=%s", clientFinished, code, time.Since(scheduledAt), &stderr)
 		}
 	})

@@ -30,6 +30,8 @@ type activationHost struct {
 	busy            bool
 	events          []string
 	startErr        error
+	haltErr         error
+	backupErr       error
 	verifyErr       error
 	beforeStart     func()
 	afterBackup     func(string, string)
@@ -41,6 +43,7 @@ type activationHost struct {
 	legacy          map[string]bool
 	beforeQuiet     func()
 	beforeStopCheck func(string)
+	afterHalt       func(string)
 }
 
 func (h *activationHost) Layout(context.Context) (Layout, error) { return h.layout, nil }
@@ -110,6 +113,17 @@ func (h *activationHost) Stop(_ context.Context, name string, expected Unit) err
 	h.units[name] = Unit{ActiveState: "inactive", ControlGroup: "/system.slice/" + name}
 	return nil
 }
+func (h *activationHost) Halt(_ context.Context, name string) error {
+	h.events = append(h.events, "halt:"+name)
+	if h.haltErr != nil {
+		return h.haltErr
+	}
+	h.units[name] = Unit{ActiveState: "inactive", ControlGroup: "/system.slice/" + name}
+	if h.afterHalt != nil {
+		h.afterHalt(name) // the stopped release's last writes land as it exits.
+	}
+	return nil
+}
 func (h *activationHost) Start(_ context.Context, name string) error {
 	h.events = append(h.events, "start:"+name)
 	h.draining[name] = false // a new process starts with admission open.
@@ -136,6 +150,9 @@ func (h *activationHost) Start(_ context.Context, name string) error {
 }
 func (h *activationHost) BackupDatabase(_ context.Context, src, dst string) error {
 	h.events = append(h.events, "backup:"+src)
+	if h.backupErr != nil {
+		return h.backupErr
+	}
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
@@ -454,35 +471,40 @@ func TestHelperScheduleManagerRejectionLeavesLiveFilesUntouched(t *testing.T) {
 	}
 }
 
-func TestHelperActivateStartFailurePreservesBackupAndDoesNotRetry(t *testing.T) {
-	// Given: gateway migration begins when its first start is issued.
+func TestHelperActivateStartFailureRollsBackAndNeverRetriesTheNewRelease(t *testing.T) {
+	// Given: gateway migration begins when its first start is issued, and that
+	// start fails. The previous release starts normally.
 	f := newActivationFixture(t, true)
 	f.schedule(t)
-	f.host.startErr = errors.New("start failed")
+	failure := errors.New("start failed")
+	newReleaseStarts := 0
 	f.host.beforeStart = func() {
+		f.host.startErr = nil
+		if !f.newReleaseLive(t) {
+			return
+		}
+		newReleaseStarts++
+		f.host.startErr = failure
 		data, err := os.ReadFile(filepath.Join(f.stage, "backup", "gateway.sqlite3"))
 		if err != nil || string(data) != "gateway before migration" {
 			t.Fatalf("gateway backup must precede migration: %q %v", data, err)
 		}
-		if err := os.WriteFile(f.host.layout.GatewayDB, []byte("migrated"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		f.migrateState(t)
 	}
 	// When
 	err := f.helper.Activate(t.Context(), f.stage)
-	// Then
+	// Then: the new release was started once and never retried; the migrated
+	// state was replaced by the stopped backup and the previous release is back.
 	r := activationReceipt(t, f)
-	starts := 0
-	for _, event := range f.host.events {
-		if strings.HasPrefix(event, "start:") {
-			starts++
-		}
+	if !errors.Is(err, failure) || newReleaseStarts != 1 {
+		t.Fatalf("start failure: %v starts of the new release=%d", err, newReleaseStarts)
 	}
-	if err == nil || r.State != "failed" || starts != 1 || !strings.Contains(r.Detail, "backup") {
-		t.Fatalf("start failure: %v receipt=%+v starts=%d", err, r, starts)
+	if r.State != "failed" || r.Detail != "start askdo-gateway.service failed"+rolledBackDetail {
+		t.Fatalf("receipt after rollback: %+v", r)
 	}
-	if _, err := os.Stat(f.stage); err != nil || strings.Contains(r.Detail, "stage removed") {
-		t.Fatalf("post-stop failure lost recovery stage: %v, receipt=%+v", err, r)
+	assertPreUpgradeState(t, f)
+	if _, err := os.Stat(filepath.Join(f.stage, "backup", "askdo")); err != nil || strings.Contains(r.Detail, "stage removed") {
+		t.Fatalf("rolled-back activation lost its recovery stage: %v, receipt=%+v", err, r)
 	}
 }
 
@@ -544,8 +566,9 @@ func TestHelperScheduleInterruptedManagerAcceptanceIsUnknown(t *testing.T) {
 	}
 }
 
-func TestHelperActivatePartialReplacementRetainsPairBackupWithoutStarting(t *testing.T) {
-	// Given: a local install failure after the first independent rename.
+func TestHelperActivatePartialReplacementThatCannotBeRolledBackRetainsPairWithoutStarting(t *testing.T) {
+	// Given: a local install failure after the first independent rename, with a
+	// directory where the second binary belongs: nothing a rollback may replace.
 	f := newActivationFixture(t, false)
 	f.schedule(t)
 	f.host.afterBackup = func(_, _ string) {
@@ -560,16 +583,22 @@ func TestHelperActivatePartialReplacementRetainsPairBackupWithoutStarting(t *tes
 	}
 	// When
 	err := f.helper.Activate(t.Context(), f.stage)
-	// Then: do not roll back the first rename or lose its compatible preimage.
+	// Then: the rollback refuses before changing anything, so the first rename
+	// and the compatible preimage survive, the mixed installation never starts,
+	// and the receipt says manual recovery is required.
 	cli, cliErr := sha256HexFile(f.host.layout.CLI)
 	helper, helperErr := os.ReadFile(f.host.layout.Launch + ".previous")
 	backup, backupErr := os.ReadFile(filepath.Join(f.stage, "backup", "askdo-launch"))
-	if err == nil || cliErr != nil || helperErr != nil || backupErr != nil || cli != f.plan.CLIDigest || string(helper) != "old helper" || string(backup) != "old helper" || activationReceipt(t, f).State != "failed" {
-		t.Fatalf("partial replacement: %v cli=%s helper=%q backup=%q receipt=%+v", err, cli, helper, backup, activationReceipt(t, f))
+	r := activationReceipt(t, f)
+	if err == nil || cliErr != nil || helperErr != nil || backupErr != nil || cli != f.plan.CLIDigest || string(helper) != "old helper" || string(backup) != "old helper" || r.State != "failed" {
+		t.Fatalf("partial replacement: %v cli=%s helper=%q backup=%q receipt=%+v", err, cli, helper, backup, r)
+	}
+	if r.Detail != "install failed; rollback failed: restore askdo-launch"+manualRecoveryDetail {
+		t.Fatalf("receipt does not require manual recovery: %+v", r)
 	}
 	for _, event := range f.host.events {
-		if strings.HasPrefix(event, "start:") {
-			t.Fatal("started mixed installation")
+		if strings.HasPrefix(event, "start:") || strings.HasPrefix(event, "halt:") {
+			t.Fatalf("rollback acted on a mixed installation it could not restore: %v", f.host.events)
 		}
 	}
 }
@@ -646,7 +675,7 @@ func TestHelperScheduleMakesReceiptDirectoryPublicMetadata(t *testing.T) {
 	}
 }
 
-func TestHelperActivateCancellationAfterStartIntentIsUnknown(t *testing.T) {
+func TestHelperActivateCancellationAfterStartIntentIsRolledBackWithFreshContext(t *testing.T) {
 	// Given: an interruption can race an accepted start and its actual effects.
 	f := newActivationFixture(t, false)
 	f.schedule(t)
@@ -655,10 +684,13 @@ func TestHelperActivateCancellationAfterStartIntentIsUnknown(t *testing.T) {
 	f.host.beforeStart = cancel
 	// When
 	err := f.helper.Activate(ctx, f.stage)
-	// Then
-	if !errors.Is(err, context.Canceled) || activationReceipt(t, f).State != "unknown" {
-		t.Fatalf("interrupted start: %v receipt=%+v", err, activationReceipt(t, f))
+	// Then: the cancelled operation still ends in a verified known state,
+	// because the rollback does not run under the cancelled context.
+	r := activationReceipt(t, f)
+	if !errors.Is(err, context.Canceled) || r.State != "failed" || r.Detail != "start askdo.service failed"+rolledBackDetail {
+		t.Fatalf("interrupted start: %v receipt=%+v", err, r)
 	}
+	assertPreUpgradeState(t, f)
 	if _, err := os.Stat(filepath.Join(f.stage, "backup", "jobs.sqlite3")); err != nil {
 		t.Fatalf("lost stopped database backup: %v", err)
 	}
@@ -886,7 +918,7 @@ func TestHelperDrainRejectsLateAdmissionAndWaitsForExistingWork(t *testing.T) {
 	}
 }
 
-func TestHelperResumesAdmissionOnlyBeforeStopIntent(t *testing.T) {
+func TestHelperReopensAdmissionWhetherFailureIsBeforeOrAfterStopIntent(t *testing.T) {
 	for _, beforeStop := range []bool{true, false} {
 		t.Run(strconv.FormatBool(beforeStop), func(t *testing.T) {
 			// Given: failure either before or after the durable stop intent.
@@ -900,13 +932,30 @@ func TestHelperResumesAdmissionOnlyBeforeStopIntent(t *testing.T) {
 			}
 			// When
 			err := f.helper.Activate(t.Context(), f.stage)
-			// Then: no automatic resume/rollback follows any stop intent.
+			// Then: either way admission is reopened and nothing is left drained.
 			if !errors.Is(err, failure) {
 				t.Fatal(err)
 			}
 			for _, name := range []string{"askdo.service", "askdo-gateway.service"} {
-				if f.host.draining[name] == beforeStop {
-					t.Fatalf("wrong resume behavior beforeStop=%v service=%s events=%v", beforeStop, name, f.host.events)
+				if f.host.draining[name] {
+					t.Fatalf("service %s left drained beforeStop=%v events=%v", name, beforeStop, f.host.events)
+				}
+			}
+			r := activationReceipt(t, f)
+			_, stageErr := os.Lstat(f.stage)
+			if beforeStop {
+				// No live change was issued: the existing cleanup path, unchanged.
+				if !errors.Is(stageErr, os.ErrNotExist) || !strings.Contains(r.Detail, "no live changes; stage removed") {
+					t.Fatalf("pre-effect failure: stage=%v receipt=%+v", stageErr, r)
+				}
+			} else if stageErr != nil || r.Detail != "stop askdo-gateway.service failed"+rolledBackDetail {
+				// A stop was attempted: the stage holds the backup and the receipt
+				// says the previous services were verified.
+				t.Fatalf("post-intent failure: stage=%v receipt=%+v", stageErr, r)
+			}
+			for _, event := range f.host.events {
+				if strings.HasPrefix(event, "halt:") || strings.HasPrefix(event, "start:") {
+					t.Fatalf("untouched services were restarted: %v", f.host.events)
 				}
 			}
 		})
@@ -1001,7 +1050,7 @@ func TestHelperLegacyNoMarkerActivationAndNonquietRetry(t *testing.T) {
 	}
 }
 
-func TestHelperLegacyFailureResumesOnlyBeforeStopIntent(t *testing.T) {
+func TestHelperLegacyFailureThawsEveryFrozenServiceBeforeOrAfterStopIntent(t *testing.T) {
 	for _, preStop := range []bool{true, false} {
 		t.Run(strconv.FormatBool(preStop), func(t *testing.T) {
 			// Given: two frozen legacy services and failure on either side of stop intent.
@@ -1016,16 +1065,17 @@ func TestHelperLegacyFailureResumesOnlyBeforeStopIntent(t *testing.T) {
 			}
 			// When
 			err := f.helper.Activate(t.Context(), f.stage)
-			// Then: post-intent recovery cannot unfreeze the remaining broker.
-			if !errors.Is(err, failure) || f.host.draining["askdo.service"] == preStop {
+			// Then: the broker that never reached its stop is thawed too, by the
+			// rollback after a stop attempt and by admission recovery before one.
+			if !errors.Is(err, failure) || f.host.draining["askdo.service"] || f.host.draining["askdo-gateway.service"] {
 				t.Fatalf("legacy failure recovery: %v events=%v", err, f.host.events)
 			}
-			if !preStop {
-				for _, event := range f.host.events {
-					if event == "continue:askdo.service" {
-						t.Fatal("post-stop failure auto-resumed the legacy broker")
-					}
-				}
+			thawed := false
+			for _, event := range f.host.events {
+				thawed = thawed || event == "continue:askdo.service"
+			}
+			if !thawed {
+				t.Fatalf("frozen legacy broker was never continued: %v", f.host.events)
 			}
 		})
 	}
@@ -1112,10 +1162,11 @@ func TestHelperReplacementAfterFinalQuietCheckIsNotStopped(t *testing.T) {
 	}
 }
 
-func TestHelperStopNotIssuedResumesPeerOnlyBeforeAnyRealStop(t *testing.T) {
+func TestHelperStopNotIssuedKeepsReplacementAndRestartsStoppedPeer(t *testing.T) {
 	for _, first := range []bool{true, false} {
 		t.Run(strconv.FormatBool(first), func(t *testing.T) {
-			// Given: an identity refusal at the first or second unit boundary.
+			// Given: an identity refusal at the first or second unit boundary. The
+			// replacement is a fresh process of the previous release.
 			f := newActivationFixture(t, true)
 			f.schedule(t)
 			refused := "askdo.service"
@@ -1125,9 +1176,20 @@ func TestHelperStopNotIssuedResumesPeerOnlyBeforeAnyRealStop(t *testing.T) {
 			f.host.beforeStopCheck = func(name string) {
 				if name == refused {
 					u := f.host.units[name]
+					previous, err := os.ReadFile(filepath.Join(f.host.layout.ProcRoot, strconv.Itoa(u.MainPID), "exe"))
+					if err != nil {
+						t.Fatal(err)
+					}
 					u.MainPID, u.StartTime = 999, 456
 					f.host.units[name] = u
 					f.host.draining[name] = false // replacement starts with admission open.
+					replacement := filepath.Join(f.host.layout.ProcRoot, "999", "exe")
+					if err := os.MkdirAll(filepath.Dir(replacement), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(replacement, previous, 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			// When
@@ -1144,12 +1206,20 @@ func TestHelperStopNotIssuedResumesPeerOnlyBeforeAnyRealStop(t *testing.T) {
 				if strings.HasPrefix(event, "resume:") {
 					resumes++
 				}
+				if strings.HasPrefix(event, "halt:") {
+					t.Fatalf("a replacement process that may have admitted work was stopped: %v", f.host.events)
+				}
 			}
 			if first && (stops != 0 || resumes != 1 || f.host.draining["askdo.service"]) {
 				t.Fatalf("untouched peer left drained: %v", f.host.events)
 			}
-			if !first && (stops != 1 || resumes != 0) {
-				t.Fatalf("admission restarted after an actual stop: %v", f.host.events)
+			// After a real stop the replacement is already the previous release,
+			// so only the stopped peer is restarted; no admission is touched.
+			if !first && (stops != 1 || resumes != 0 || f.host.units["askdo-gateway.service"].ActiveState != "active" || f.host.units["askdo.service"].MainPID != 999) {
+				t.Fatalf("rollback after an actual stop: %v units=%+v", f.host.events, f.host.units)
+			}
+			if !first && activationReceipt(t, f).Detail != "stop askdo.service failed"+rolledBackDetail {
+				t.Fatalf("receipt: %+v", activationReceipt(t, f))
 			}
 			data, readErr := os.ReadFile(f.host.layout.CLI)
 			if readErr != nil || string(data) != "old cli" {

@@ -14,10 +14,15 @@ askdo upgrade --release v1.0.0-rc.21
 ```
 
 It downloads and verifies the release, shows its operation, source commit and
-manifest digest, and asks for Telegram approval. Approval is mandatory for every
-upgrade; automatic approval is not used for this operation.
+manifest digest, and submits a small root bootstrap script as a one-file bundle.
+That request follows the host's normal approval policy: AI review (when
+required) and Telegram approval, or risk-based auto-approval at the level you
+have enabled. The script begins with a provenance header naming the release,
+source commit, the official published checksum URL for the exact binary it will
+run, and this document at that commit, so the reviewer can check those facts
+independently (with `webfetch` enabled) instead of trusting the request.
 
-After approval, a captured root bootstrap verifies a root-owned candidate copy
+After approval, the root bootstrap verifies a root-owned candidate copy
 and executes it through a pinned file descriptor with the frozen plan, so path
 replacement cannot change the verified inode. The new helper stages and verifies the
 release again before activation. It drains new work while existing jobs finish,
@@ -29,7 +34,9 @@ refuses to replace a non-symlink at that path; a foreign file is never opened,
 followed or overwritten.
 On hosts without `systemd-run`, a detached activation starts a new session and
 moves to the root of each cgroup hierarchy before stopping the broker. The
-result is not called successful until those checks pass.
+result is not called successful until those checks pass. If activation fails
+after the services were stopped, the helper rolls back automatically; see
+[failure and recovery](#failure-and-recovery).
 
 ## Supported topology and timing
 
@@ -42,8 +49,9 @@ gateway's authenticated catalog after restart.
 
 Download, review and human approval use their normal workflow time limits; the
 upgrade observation budget does not cancel them. After the scheduling client
-returns, receipt observation has the activation deadline plus two minutes. If it
-times out, use `--operation` to reconnect without submitting another upgrade.
+returns, receipt observation has the 10 minute activation deadline, the 5 minute
+rollback allowance and two more minutes. If it times out, use `--operation` to
+reconnect without submitting another upgrade.
 
 ## Reconnect to an upgrade
 
@@ -94,8 +102,10 @@ bootstrap artifacts; other unexpected entries still block scheduling.
 When a failure is known to have made no live changes (including manager rejection,
 scheduling cancellation before manager acceptance, or a pre-activation failure),
 the helper removes its stage and records `stage removed` in the receipt detail.
-Failed operations after a stop/install, interrupted manager acceptance, unknown
-outcomes, or incomplete admission recovery retain their stages for inspection.
+Failed operations after a stop/install, whether or not they were rolled back,
+interrupted manager acceptance, unknown outcomes, or incomplete admission
+recovery retain their stages: the stage holds the backup a rollback restores
+from, and the evidence for one that failed.
 After successful activation, the helper keeps the newest **two successful stages**,
 ordered by successful receipt timestamps, and removes older successful stages.
 It only removes trusted `up_<32 lowercase hex digits>` directories whose matching
@@ -109,12 +119,18 @@ retroactively swept.
 - Denial or an expired approval does not schedule activation.
 - A duplicate active operation is refused; a completed release can be upgraded
   again later with a new operation ID.
+- A failure before any service was stopped changes nothing: admission is
+  reopened, the stage is removed and the receipt says `no live changes; stage
+  removed`.
+- A failure once the helper has begun stopping services (a stop, the stopped
+  backups, installation, a start, the post-install verification, or the operation
+  deadline) is rolled back automatically; see
+  [automatic rollback](#automatic-rollback).
 - Failed or uncertain results include the stage and backup path. If the receipt
   says `stage removed`, no recovery backup was needed. Otherwise, use the receipt's
-  actual `stage` path, not an assumed `/var/backups/askdo` location. No automatic
-  rollback is attempted. On detached hosts, inspect `<stage>/activation.log` for
-  retained activation errors. Inspect `<stage>/backup/` before restoring compatible
-  binaries and databases together.
+  actual `stage` path, not an assumed `/var/backups/askdo` location. On detached
+  hosts, inspect `<stage>/activation.log` for retained activation errors. Inspect
+  `<stage>/backup/` before restoring compatible binaries and databases together.
 - The backup directory is root-private. Use normal administrator access to
   inspect it; public receipts never expose its contents.
 - A legacy service that does not support cooperative draining is frozen while
@@ -130,3 +146,78 @@ not replay an ambiguous activation.
 
 For manual recovery, run a downloaded `askdo` from a home directory, not `/tmp`,
 because `/tmp` is often mounted `noexec`.
+
+### Automatic rollback
+
+The root helper that activated the release reverses a failed activation from the
+stage's `backup/`, in the same process and under the same operation lock:
+
+1. **Check first.** Without changing anything, it confirms the rollback can
+   finish: the backup directory is still trusted, each saved copy it would restore
+   still matches the SHA-256 recorded when it was made, each binary it would
+   replace is still the one the upgrade installed (or untouched), and
+   `askdo-config` is still what the upgrade made. If a check fails, the services
+   and files are left as they were and the rollback is recorded as failed.
+2. **Stop what must not run during the restore.** The services of the release
+   being abandoned are stopped, including a crash-looping or failed unit, whose
+   start limit is cleared. A service that is still the pre-upgrade process, or was
+   restarted by systemd from unchanged files, is left running, and its drained
+   admission is reopened.
+3. **Restore, atomically and in this order.** Each file is written to a hashed
+   temporary file beside its destination and renamed into place. First the data,
+   but only if a service of the new release was started: the databases, and any
+   configuration file that differs from the backup. Then `askdo` and
+   `askdo-launch`, with their original permissions and ownership. Last, the
+   `askdo-config` link as it was found: absent, or its previous target.
+4. **Start and verify.** The services that were running are started in their
+   original order and verified as a successful activation verifies a release:
+   each runs the restored executable (by hash), the broker and gateway answer
+   their probes, and every service is observed again afterward.
+
+What step 3 restores is decided after the services stop, not before. The release
+being abandoned can write until it exits, so the checks of step 1 are made again
+once nothing is running, and the restore follows what they find then: a
+configuration file or database it rewrote on its way out is put back, and a
+binary that was replaced in the meantime by something the upgrade did not
+install is refused (step `recheck <file>`) before any file is touched, leaving
+the services stopped. A file is left alone only while its bytes and its recorded
+permissions (and, as root, its owner and group) match the backup, so a release
+whose bytes are identical but that was installed with other permissions is
+restored too.
+
+Restoring a database moves its `-wal`, `-shm` and `-journal` files aside instead
+of deleting them, because replaying them over the older image would corrupt it.
+They are deleted only after the snapshot is in place. If the snapshot cannot be
+put in place they are moved back, leaving the database and the committed
+transactions in its write-ahead log as they were. One that cannot be moved back is
+kept in a `.askdo-rollback-*` directory beside the database, and the activation
+log says where.
+
+Never restored: anything the backup did not capture; a binary that is neither
+the original nor the one the upgrade installed, and a foreign file at
+`askdo-config`, which are never overwritten; a gateway database that did not exist
+before the upgrade, which stays as the new release created it; and database
+changes made after the new release started. The restored database is the
+snapshot taken while the services were stopped, so jobs recorded in that window
+are lost.
+
+The rollback has its own five minute allowance, which begins when it does: the
+deadline expiring is itself a reason to roll back, and a termination signal does
+not cancel it. It is never retried. A step that fails stops it there.
+
+The receipt state is `failed` in both outcomes, and the stage and its backup are
+kept. The detail is one of:
+
+- `<phase> failed; rolled back to previous release; services verified; backup retained at stage/backup`
+- `<phase> failed; rollback failed: <step>; manual recovery required; backup retained at stage/backup`
+
+`<phase>` is the activation step that failed, such as `start askdo.service` or
+`verify responsiveness`; `<step>` is the rollback step, such as `restore askdo`,
+`recheck askdo` (a file changed after the services stopped) or
+`stop askdo.service`. Receipts carry no error text; the cause is in the
+activation log. After `rollback failed`, recover manually from `<stage>/backup/`.
+
+Rollback applies only while the helper that observed the failure is alive. If the
+helper itself dies (killed, or the host loses power), nothing is rolled back from
+disk: a later run finds the receipt in an active state, records `unknown` and
+replays nothing, and the stage's `backup/` is the recovery source.
