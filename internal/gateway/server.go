@@ -36,6 +36,7 @@ type Server struct {
 	done          chan struct{}
 	tickets       *TicketStore
 	joins         *JoinStore
+	upgrades      *UpgradeStore
 	dispatcher    *dispatcher
 	joinCooldowns joinCooldowns
 	lock          *os.File
@@ -111,6 +112,10 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 	// The ticket poll's one transaction also ingests join callbacks, so the
 	// join inbox shares the ticket store from here on.
 	s.tickets.joins = s.joins
+	s.upgrades, err = NewUpgradeStore(store)
+	if err != nil {
+		return fail(err)
+	}
 	var option dispatcherOptions
 	if len(options) > 0 {
 		option = options[0]
@@ -121,7 +126,9 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 		return fail(err)
 	}
 	s.dispatcher.joins = s.joins
+	s.dispatcher.upgrades = s.upgrades
 	s.mux.HandleFunc("GET /v1/catalog", s.handleCatalog)
+	s.mux.HandleFunc("PUT /v1/host-status", s.handleHostStatus)
 	s.mux.HandleFunc("POST /v1/model-turns", s.handleModelTurn)
 	s.mux.HandleFunc("PUT /v1/tickets/{job}", s.handleTicket)
 	s.mux.HandleFunc("GET /v1/tickets/{job}/events", s.handleEvents)
@@ -202,6 +209,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, 403, fleetproto.ErrCodeRevision)
 		return
 	}
+	catalog.FleetUpgrade = s.upgradeOffer(r.Context(), host.HostID)
 	wire, err := fleetproto.Sign(s.key, catalog)
 	if err != nil {
 		writeFailure(w, 500, fleetproto.ErrCodeProtocol)

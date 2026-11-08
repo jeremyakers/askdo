@@ -20,9 +20,10 @@ import (
 // took down.
 const UpgradeLeaseTTL = 45 * time.Minute
 
-// maxNoticeAttempts bounds how often one Telegram notice is retried before it is
-// dropped. A notice informs; nothing else depends on its delivery.
-const maxNoticeAttempts = 10
+// maxNoticeAttempts bounds how often one Telegram notice is retried (once a
+// minute) before it is dropped. A notice informs; nothing else depends on its
+// delivery, and `askdo-config gateway hosts list` shows the same results.
+const maxNoticeAttempts = 30
 
 // UpgradeStore keeps the fleet upgrade target, what each host last reported and
 // the rollout between them, in the gateway database beside the enrollments. It is
