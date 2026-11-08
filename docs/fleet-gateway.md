@@ -34,11 +34,15 @@ Workstations ─┘                 └─ Telegram
 | Model API proxying | Reviewer loop and local inspection tools |
 | Approval cards and one update listener per bot token | Auto-approval ceiling and submitter's local preference |
 | Authenticated approval results and delivery receipts | Durable job state, one-use dispatch and retained output |
+| The release the fleet should run, who is offered it next, and when to pause | Downloading, verifying, activating and rolling back its own upgrade, and its opt-out |
 
 The gateway does not need fleet SSH keys, sudo access, a general remote-command
 API or direct access to hosts' filesystems. It is nevertheless a trusted
 approval authority: hosts accept its authenticated decision proof for pending
-requests, subject to their own checks.
+requests, subject to their own checks. It can also name a release for hosts that
+have not opted out to upgrade to (see [Gateway-pushed
+upgrades](#gateway-pushed-upgrades)); that is data in its signed catalog, not a
+command channel.
 
 ## Configuration
 
@@ -135,6 +139,81 @@ Automatic approval remains a **local** policy decision after review. The
 gateway must provide a verified Telegram delivery receipt for the required
 informational notice before the host commits automatic dispatch.
 
+## Gateway-pushed upgrades
+
+The operator names one release for the fleet to run with `askdo-config gateway
+upgrade-target TAG`, on the gateway host, through that host's usual Telegram
+approval: one approval, not one per host (the operator guide is [upgrading a
+fleet](upgrade.md#upgrade-a-fleet-from-the-gateway)). The gateway resolves the
+release's `install-manifest.v1` from the official `jeremyakers/askdo` repository
+when the target is set and keeps the release and the manifest's SHA-256 in its
+database. The target is not a gateway configuration key and needs no restart.
+
+**Trust.** The gateway names a release tag and a manifest digest. It never sends a
+binary, a URL or a command. A host that applies pushed upgrades downloads the
+release itself, only from the official repository, checks that the manifest has
+the digest the gateway signed, installs only a release **newer** than the one it
+runs, and then runs the same staged activation, with automatic rollback, as `askdo
+upgrade`. A compromised gateway can at most make opted-in hosts install an
+existing, newer official release, one at a time, or stall a rollout; it cannot
+downgrade a host, install anything else, or touch a host that set
+`fleet_upgrade.auto` to `false`. This is the one thing the gateway can cause a
+host's root to do, and it is the reason a gateway should be as protected as the
+approvals it already carries.
+
+**Catalog.** The offer travels in the signed catalog as an optional member
+addressed to the asking host:
+
+```json
+"fleet_upgrade": {"release": "v1.0.1", "manifest_sha256": "<64 hex digits>"}
+```
+
+It is omitted when there is no offer, so such a catalog is byte for byte what a
+gateway without the member signs. Its members are optional on the wire as well: an
+offer a host cannot act on is ignored and is never a reason to refuse the catalog,
+and with it every review. The gateway sends it **only to a host that has reported
+that it applies pushed upgrades**, so a host built before the member existed, which
+never reports, never receives it and keeps working unchanged. Hosts built with
+unknown-field tolerance (see [unknown fields on the
+wire](architecture.md#unknown-fields-on-the-wire)) would ignore it in any case.
+
+**Host status.** An enrolled host reports about itself with `PUT /v1/host-status`,
+authenticated like every host request by its own credential; nothing in the body
+can name another host.
+
+```json
+{"version":1,"hostname":"nas-01","release":"v1.0.0","auto_upgrade":true,
+ "upgrade":{"operation":"up_…","release":"v1.0.1","state":"failed",
+            "outcome":"rolled_back","detail":"…","updated_at":1783900000}}
+```
+
+`release` is the release the binary was built from (absent for any other build),
+`auto_upgrade` whether the host will act on an offer, and `upgrade` the latest
+upgrade receipt (or a `refused` result when the host declined an offer before it
+made one). It reports something and asks for nothing, so it is a report under the
+unknown-field rule: a field this gateway does not define is ignored. It is bounded
+to 8 KiB, its text is reduced to bounded printable ASCII before it is kept or
+shown, and the answer, `{"version":1}`, carries nothing a host acts on and is not
+signed. A gateway from before the endpoint answers with an ordinary failure, which
+the host ignores until its next report.
+
+**Rollout.** The offer goes to one host at a time: the first to ask that applies
+pushed upgrades and is older than the target, and it stays with that host until it
+reports that it runs the target or how its upgrade failed. A result for the target
+that is a failure, a rollback, unknown or a refusal pauses the rollout for every
+host; so does a holder that reports no outcome within 45 minutes. A result counts
+only when it differs from the one the gateway last saw from that host, so receipts
+left from before the target was set, or carried in a host's first report, are never
+mistaken for its outcome. Setting the target again starts afresh. The state lives in
+four tables created beside the enrollments with `IF NOT EXISTS`; the database
+version is unchanged, so a gateway from before them opens the same file and ignores
+them.
+
+**Notices.** Each concluded result is sent to the recipients of the reporting
+host's default channel as an informational Telegram message with no buttons: no
+card, no decision, nothing waits on it. It is delivered once per chat and retried
+once a minute for up to thirty attempts.
+
 ## Identity and decision binding
 
 Local job IDs are installation-local, so the gateway identifies a ticket by
@@ -163,6 +242,9 @@ credential masking rules.
   Repeated delivery of a decision cannot cause a second dispatch.
 - Gateway restart recovery needs only approval-ticket/delivery bookkeeping,
   not a copy of every host's execution database or raw reviewer logs.
+- A gateway outage during a rollout fails hosts' reports and catalog reads, which
+  they repeat at their next look. An upgrade already running does not depend on the
+  gateway; its result is reported once the gateway is back.
 
 ## Keep the first version small
 

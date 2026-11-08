@@ -13,6 +13,9 @@ published prerelease when no stable release exists. To choose an exact release:
 askdo upgrade --release v1.0.0-rc.21
 ```
 
+To upgrade every host of a fleet from one decision instead of one approval per
+host, see [Upgrade a fleet from the gateway](#upgrade-a-fleet-from-the-gateway).
+
 It downloads and verifies the release, shows its operation, source commit and
 manifest digest, and submits a small root bootstrap script as a one-file bundle.
 That request follows the host's normal approval policy: AI review (when
@@ -221,3 +224,169 @@ Rollback applies only while the helper that observed the failure is alive. If th
 helper itself dies (killed, or the host loses power), nothing is rolled back from
 disk: a later run finds the receipt in an active state, records `unknown` and
 replays nothing, and the stage's `backup/` is the recovery source.
+
+## Upgrade a fleet from the gateway
+
+`askdo upgrade` asks for one approval per host per release. In a fleet you can
+instead name the release **once**, on the gateway host, and each enrolled host
+upgrades itself, one at a time, with the same staged activation and
+[automatic rollback](#automatic-rollback) as above.
+
+```sh
+askdo-config gateway upgrade-target v1.0.1     # set the target (the one approval)
+askdo-config gateway upgrade-target            # show the target and where the rollout stands
+askdo-config gateway upgrade-target --clear    # stop offering any release
+askdo-config gateway hosts list                # each host's release and last upgrade result
+```
+
+### Before the first push
+
+A host can only be upgraded by push if it runs a release that contains this
+feature **and** was produced by the release build, which embeds the release tag in
+the binary. A binary built any other way does not know which release it is, so it
+cannot tell newer from older and never upgrades by push (`hosts list` shows
+`release=unknown`). Upgrade each host and the gateway once by hand with
+`askdo upgrade` to the first such release; after that, set the target.
+
+Hosts from before this feature keep working unchanged against a gateway that has
+it. They never report, so the gateway never offers them anything and never sends
+them a catalog field they do not know. Upgrade those by hand.
+
+### Setting the target
+
+Run `askdo-config gateway upgrade-target TAG` on the gateway host as yourself, like
+the other root-only `askdo-config` commands: it asks for the usual Telegram
+approval, and that one approval covers the whole rollout. (As root it runs
+directly.) `TAG` must be a release tag of the form `vMAJOR.MINOR.PATCH` with an
+optional `-PRERELEASE`, such as `v1.0.1` or `v1.0.0-rc.35`.
+
+The command fetches that release's `install-manifest.v1` from the official
+`jeremyakers/askdo` repository, once, and stores the manifest's SHA-256 as the
+target in the gateway database. The gateway publishes the release and that digest
+in its signed catalog to the host whose turn it is. The target is not in the
+gateway configuration file, so setting it needs no gateway restart; it reaches the
+next catalog a host fetches. A tag the repository cannot resolve, or one hosts
+could not order against the releases they run, is refused and leaves the current
+target in place.
+
+Setting the target also **starts the rollout afresh**: any pause is cleared, so
+running the command again with the same tag is how you resume after a failure.
+Hosts that already run the target (or something newer) are left alone.
+
+### What each host does
+
+About fifteen seconds after its broker starts, and then every five minutes (every
+thirty seconds while one of its own upgrades is running, so the result reaches the
+gateway soon after the receipt records it), an enrolled host reports to the
+gateway: the release it was built from, whether it applies pushed upgrades, and its
+latest upgrade receipt, whoever started that upgrade. If it applies pushed
+upgrades it then reads the signed catalog. It upgrades itself only when **all** of
+these hold:
+
+- it has not opted out ([below](#opting-a-host-out)) and its binary knows its release;
+- no upgrade of its own is in progress on the host;
+- the offered release is **newer** than the one it runs. It never downgrades:
+  `v1.0.0` is newer than every `v1.0.0-rc.N`, `rc.9` is older than `rc.34`, and an
+  offer of the same or an older release, or of a tag it cannot order, is ignored.
+
+It then does what `askdo upgrade` does after approval, with the same code:
+
+1. It fetches the release's manifest alone and compares its SHA-256 with the digest
+   in the gateway's signed offer. A mismatch installs nothing and downloads no
+   binary: the host refuses, reports `refused` to the gateway, and the rollout pauses.
+2. It downloads the release with the same repository-, host- and redirect-restricted
+   download as `askdo upgrade`, and compares the manifest it actually downloaded
+   with the same digest again, because a release can be republished in between.
+3. It freezes a plan, writes the same root bootstrap script and runs it. The script
+   verifies a root-owned copy of the new binary against the plan and runs that
+   binary's `upgrade-helper`, which stages and re-verifies every asset and starts
+   the activation detached from the broker: a transient `systemd-run` unit, or the
+   detached process on hosts without `systemd-run` such as Synology DSM.
+4. The activation drains the broker (and a local gateway), waits for existing work,
+   backs up, installs, restarts and verifies, and rolls back automatically on any
+   failure, exactly as described [above](#automatic-rollback). The broker never
+   replaces itself: it only schedules, and the activation stops it.
+
+The only thing that replaces a human's approval of this host is the operator's one
+approval of the target. The host still verifies the signed offer, the manifest
+digest and the release's own digests, never downgrades, and runs the unchanged
+activation checks. A refusal, or a failure before activation starts (a failed
+download, or another upgrade operation being active), is not tried again for thirty
+minutes rather than at every look; only the refusal is reported as a result, the
+other is logged.
+The release is downloaded into the root-private `/var/lib/askdo/fleet-upgrade` and
+removed once the helper has staged its own copy; a leftover from a crashed broker
+is removed at the next start.
+
+### One host at a time, and a pause on failure
+
+The gateway offers the target to **one host at a time**: the first host that asks,
+that has reported it applies pushed upgrades and runs an older release. The offer
+stays with that host until it reports that it now runs the target, or how its
+upgrade failed. Then the next host to ask has its turn. Within a rollout the order
+is therefore the order hosts happen to ask in; to have a particular host go first
+(the gateway host, say), upgrade it by hand before setting the target. The gateway
+host is otherwise an ordinary host: its upgrade restarts the gateway, and other
+hosts' looks fail and are retried meanwhile.
+
+The rollout **pauses for every host** as soon as any host reports an upgrade to the
+target that ended in a failure, a rollback, an unknown outcome or a refusal. A bad
+release therefore stops at the first host it fails on. It also pauses if the host
+holding the offer reports no outcome for 45 minutes: that host may be the one a bad
+release took down, so the offer is not passed on. In both cases `askdo-config
+gateway upgrade-target` shows why, and running it with the tag again resumes.
+
+Changing the target while a host holds the offer does not stop that host's upgrade,
+and the next host may then start before it finishes; the command warns you.
+
+### What you are told
+
+Each host result reaches the operator as an informational Telegram message, with no
+buttons, to the recipients of the host's default channel:
+
+- **succeeded**: the host now runs the target;
+- **rolled back**: the upgrade failed and the previous release was restored and
+  verified; the rollout is paused;
+- **rollback failed**: the host needs [manual recovery](#automatic-rollback); the
+  rollout is paused;
+- **failed before changing anything**, **outcome unknown** (the helper was
+  interrupted) or **refused** (the manifest digest differed): the rollout is paused;
+- **not reported**: the host holding the offer reported nothing for 45 minutes; the
+  rollout is paused.
+
+A notice is delivered once per chat and retried once a minute for up to thirty
+attempts; nothing else waits on it, and `askdo-config gateway hosts list` shows the
+same results:
+
+```text
+host_… enabled=true … name=nas-01 release=v1.0.1 auto_upgrade=true upgrade=succeeded(v1.0.1) seen=2026-11-08T16:05:11-06:00
+host_… enabled=true … name=- release=unknown auto_upgrade=unknown upgrade=none seen=never
+```
+
+`release` is what the host reported it runs, `auto_upgrade` whether it applies
+pushed upgrades, `upgrade` its last result (`state/outcome(release)`), and `seen`
+when it last reported, in the gateway host's local time zone. A host that never
+reported says `unknown` and `never`.
+
+### Opting a host out
+
+Set `fleet_upgrade.auto` to `false` in the host's root-owned `/etc/askdo/config.json`
+(see [configuration](configuration.md#fleet_upgrade)). The host keeps reporting, with
+`auto_upgrade=false`, and the gateway never offers it anything. Without the
+section, an enrolled host applies pushed upgrades. The section survives enrolling
+the host again.
+
+### What the gateway can and cannot do
+
+The gateway was already the approval authority its hosts accept Telegram decisions
+from. Pushed upgrades add one thing it can cause: that hosts which apply them
+upgrade themselves, as root, to an official release. It can name only a release
+tag, never a URL, a file or a command; hosts download only from the official
+repository; a host installs only a release **newer** than the one it runs and only
+if its manifest has the digest the gateway published; and the host's own activation
+checks and rollback are unchanged. A compromised gateway can therefore, at most,
+make opted-in hosts install an existing, newer official release, one at a time, or
+stall a rollout. It cannot downgrade a host or install anything else, and a host
+that opted out is unaffected. A host is trusted to report on itself: it can pause
+a rollout by reporting a failure, or hand the offer on by reporting that it has
+finished, and it affects nothing else.

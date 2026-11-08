@@ -931,6 +931,26 @@ broker hard-denies host inspection of them, including original private bundles
 outside a `credentials` directory. Other backups/copies must be explicitly
 protected by the operator; importing one file does not discover every copy.
 
+### `fleet_upgrade`
+
+A top-level object beside `fleet`, optional. It is the host's own say in the
+upgrades its gateway pushes (see [upgrading a
+fleet](upgrade.md#upgrade-a-fleet-from-the-gateway)).
+
+| Field | Required | Default | Rules and meaning |
+|---|---|---|---|
+| `auto` | no | `true` | Boolean. `false` opts this host out: it keeps reporting to its gateway with `auto_upgrade=false`, and the gateway never offers it an upgrade. Absent, `null` or `true` means the host upgrades itself when its gateway names a release newer than the one it runs. |
+
+Without a `fleet` object there is no gateway to push anything and the section has no
+effect. Like every administrator file key it is strict: a misspelled key or a
+non-boolean `auto` stops the file loading rather than leaving a host that you
+believe is opted out still upgrading. It sits outside `fleet` so that enrolling the
+host again, which replaces `fleet`, does not turn it back on. Example:
+
+```json
+"fleet_upgrade": {"auto": false}
+```
+
 ### `review.gateway_profiles`
 
 Replaces `review.models` in fleet mode: an explicit ordered selection of
