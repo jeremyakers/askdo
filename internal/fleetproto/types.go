@@ -111,6 +111,10 @@ type Catalog struct {
 	// Absent (nil) from older gateways or when unconfigured, in which case
 	// the host's own review.webfetch_enabled applies.
 	ReviewerWebfetchEnabled *bool `json:"reviewer_webfetch_enabled,omitempty"`
+	// ReviewDefaults is the gateway's default review policy. Absent from older
+	// gateways or when the gateway configures none, in which case each host's
+	// own settings apply unchanged.
+	ReviewDefaults *ReviewDefaults `json:"review_defaults,omitempty"`
 }
 
 type ReviewReport = proto.ReviewReport
