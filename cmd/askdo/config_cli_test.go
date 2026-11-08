@@ -95,6 +95,8 @@ func TestConfigNonrootApprovalAtRootGates(t *testing.T) {
 		{"inspection", "check", "/etc/hosts"},
 		{"gateway", "init"}, {"gateway", "hosts", "add"}, {"gateway", "hosts", "list"},
 		{"gateway", "hosts", "revoke", "host1"}, {"gateway", "connect"}, {"gateway", "check"},
+		// Setting the fleet upgrade target is the one approval a fleet rollout needs.
+		{"gateway", "upgrade-target", "v1.0.1"}, {"gateway", "upgrade-target"}, {"gateway", "upgrade-target", "--clear"},
 		{"upgrade-helper", "--operation", "test", "--source", "source"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
