@@ -64,6 +64,9 @@ INTENDED_ADDITIONS: Final = {
 ARCHES: Final[Mapping[Architecture, tuple[int, str]]] = {
     'amd64': (62, 'Advanced Micro Devices X86-64'), 'arm64': (183, 'AArch64')}
 MAX_ASSET: Final = 512 * 1024 * 1024
+# The release the binary reports as its own: a fleet host compares it with the
+# release its gateway names before it upgrades itself.
+RELEASE_VARIABLE: Final = 'github.com/jeremyakers/askdo/internal/version.Release'
 
 
 class BuildError(Exception):
@@ -549,14 +552,17 @@ def build(args: BuildOptions) -> None:
             for name in ('askdo', 'askdo-launch'):
                 asset = f'{name}-linux-{arch}'
                 path = assets / asset
-                _ = command(['go', 'build', '-trimpath', '-buildvcs=false', '-o', str(path), './cmd/' + name],
-                        cwd=source, env=env)
+                _ = command(['go', 'build', '-trimpath', '-buildvcs=false', '-ldflags', f'-X {RELEASE_VARIABLE}={tag}',
+                             '-o', str(path), './cmd/' + name], cwd=source, env=env)
                 info = command(['go', 'version', '-m', str(path)]).decode()
                 for setting in ('CGO_ENABLED=0', 'GOOS=linux', 'GOARCH=' + arch):
                     require('\tbuild\t' + setting in info, f'incorrect Go build metadata: {asset} {setting}')
                 require('-tags=' not in info and 'askdo_fleet_fixture' not in info,
                         f'test build tag in release asset: {asset}')
                 binary = path.read_bytes()
+                if name == 'askdo':
+                    # go version -m does not record -ldflags, so look for the tag itself.
+                    require(tag.encode('ascii') in binary, f'release tag was not embedded in {asset}')
                 metadata[asset] = ArtifactRecord(digest(binary), len(binary), elf_metadata(path, arch), info)
                 _ = (assets / (asset + '.sha256')).write_text(f'{digest(path.read_bytes())}  {asset}\n', encoding='ascii')
         expected = set(COMMON) | {'visudo-LICENSE', 'visudo-SOURCE'}
