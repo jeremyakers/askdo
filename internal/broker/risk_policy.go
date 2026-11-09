@@ -29,6 +29,10 @@ const (
 	riskPolicyScopeUser  = "user"         // review.account_notes.users entry for the submitter UID
 	riskPolicyScopeGroup = "group"        // review.account_notes.groups entry for a current group
 	riskPolicyScopeHost  = "host_default" // risk-policy.md beside the selected daemon config
+	// riskPolicySourceGateway is the audit source of a layer whose text came
+	// from the fleet gateway's signed catalogue instead of a host file. Scope
+	// and name say what the text is for; this says it was not read from a path.
+	riskPolicySourceGateway = "gateway"
 )
 
 // Classes of rubric failure. Only the class reaches the submitter; the path and
@@ -125,8 +129,16 @@ func riskPolicyAbsent(path string) bool {
 // loadRiskPolicy reads host calibration, every applicable group note (by name),
 // then the user note. Configured notes are required; any failure discards the
 // whole snapshot, never falling back to fewer layers. Only the host is optional.
+//
+// A fleet gateway's signed catalogue can supply the same layers as text. The
+// host's own risk-policy.md replaces the gateway's default calibration; a host
+// with none uses the gateway's. Notes add: for each of the group notes and the
+// user note, the gateway's text comes first and the host's own file follows, so
+// the host always has the last word on an account. Gateway text shares the
+// frame budget below and is audited like a file, with source "gateway".
 func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 	d := j.daemon
+	review := j.reviewPolicy()
 	snapshot := &riskPolicySnapshot{}
 	// Every layer travels in one bootstrap frame, so the frame limit is shared:
 	// raw bytes only grow when encoded, so any total over it could never be sent.
@@ -146,14 +158,40 @@ func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 		snapshot.layers = append(snapshot.layers, manifestAdministratorLayer{SubjectUID: j.uid, Scope: scope, Name: note.Name, Source: note.Path, Text: string(data), SHA256: hex.EncodeToString(sum[:])})
 		return nil
 	}
+	// appendText is appendLayer for text the gateway supplied: no file, but the
+	// same validity rule and the same shared budget.
+	appendText := func(scope, name, text string) error {
+		if err := (proto.RiskPolicy{Text: text}).Validate(); err != nil {
+			err = fmt.Errorf("%w: %v", errRiskPolicyInvalid, err)
+			slog.Warn("risk policy unusable for review", "request_id", j.req.RequestID, "submitter_uid", j.uid, "scope", scope, "source", riskPolicySourceGateway, "error", err)
+			return err
+		}
+		if int64(len(text)) > remaining {
+			err := fmt.Errorf("%w: administrator text exceeds the protocol frame limit", errRiskPolicyInvalid)
+			slog.Warn("risk policy unusable for review", "request_id", j.req.RequestID, "submitter_uid", j.uid, "scope", scope, "source", riskPolicySourceGateway, "error", err)
+			return err
+		}
+		remaining -= int64(len(text))
+		sum := sha256.Sum256([]byte(text))
+		snapshot.layers = append(snapshot.layers, manifestAdministratorLayer{SubjectUID: j.uid, Scope: scope, Name: name, Source: riskPolicySourceGateway, Text: text, SHA256: hex.EncodeToString(sum[:])})
+		return nil
+	}
 	// Until the optional host file exists, its ancestors need no provenance,
 	// preserving alternate --config layouts that worked before guidance existed.
+	hostGuidance := false
 	if path := d.riskPolicyDefault; path != "" && !riskPolicyAbsent(path) {
+		layers := len(snapshot.layers)
 		if err := appendLayer(riskPolicyScopeHost, config.AccountNoteFile{Path: path}); err != nil {
 			return nil, err
 		}
+		hostGuidance = len(snapshot.layers) > layers
 	}
-	if j.configuration().Review.HasGroupNotes() {
+	if text, ok := review.GatewayRiskPolicy(); ok && !hostGuidance {
+		if err := appendText(riskPolicyScopeHost, "", text); err != nil {
+			return nil, err
+		}
+	}
+	if review.HasGroupNotes() || review.HasGatewayGroupNotes() {
 		lookup := d.accountGroups
 		if lookup == nil {
 			lookup = lookupAccountGroups
@@ -163,13 +201,23 @@ func (j *jobRuntime) loadRiskPolicy() (*riskPolicySnapshot, error) {
 			slog.Warn("risk policy group lookup failed", "request_id", j.req.RequestID, "submitter_uid", j.uid, "error", err)
 			return nil, fmt.Errorf("%w: account groups: %v", errRiskPolicyUnreadable, err)
 		}
-		for _, note := range j.configuration().Review.GroupNotesForGIDs(gids) {
+		for _, note := range review.GatewayGroupNotes(gids) {
+			if err := appendText(riskPolicyScopeGroup, note.Name, note.Text); err != nil {
+				return nil, err
+			}
+		}
+		for _, note := range review.GroupNotesForGIDs(gids) {
 			if err := appendLayer(riskPolicyScopeGroup, note); err != nil {
 				return nil, err
 			}
 		}
 	}
-	if note, ok := j.configuration().Review.UserNoteForUID(j.uid); ok {
+	for _, note := range review.GatewayUserNotes(j.uid) {
+		if err := appendText(riskPolicyScopeUser, note.Name, note.Text); err != nil {
+			return nil, err
+		}
+	}
+	if note, ok := review.UserNoteForUID(j.uid); ok {
 		if err := appendLayer(riskPolicyScopeUser, note); err != nil {
 			return nil, err
 		}

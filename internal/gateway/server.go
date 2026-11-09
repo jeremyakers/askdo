@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -46,6 +47,9 @@ type Server struct {
 	requests      sync.WaitGroup
 	stopping      bool
 	drain         admission.Gate
+	// reviewDefaults is the configured review_defaults, with any files read once
+	// at start, as the catalog publishes it. Never modified after start.
+	reviewDefaults *fleetproto.ReviewDefaults
 	// Private deterministic fixture checkpoint; set before model requests start.
 	beforeModelCompletion func()
 }
@@ -86,8 +90,12 @@ func newServer(cfg Config, store *EnrollmentStore, key ed25519.PrivateKey, ids m
 			return nil, err
 		}
 	}
+	defaults, err := cfg.ReviewDefaults.wire()
+	if err != nil {
+		return nil, fmt.Errorf("review_defaults: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{cfg: cfg, store: store, key: append(ed25519.PrivateKey(nil), key...), botIDs: ids, mux: http.NewServeMux(), sessions: map[sessionKey]*modelSession{}, capacity: capacity, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	s := &Server{cfg: cfg, store: store, key: append(ed25519.PrivateKey(nil), key...), botIDs: ids, mux: http.NewServeMux(), sessions: map[sessionKey]*modelSession{}, capacity: capacity, ctx: ctx, cancel: cancel, done: make(chan struct{}), reviewDefaults: defaults}
 	s.lock, err = serviceLockOwned(store.path, store.owner)
 	if err != nil {
 		cancel()

@@ -199,8 +199,9 @@ value and **forbidden** for every other api value, and the codex
 never appear in any worker message.
 
 **`limits`:** `max_model_calls_per_attempt` 1–128; `max_output_tokens`
-1–200000; optional `webfetch_enabled` bool (omitted/false unless the root-owned
-`review.webfetch_enabled` setting is true); optional `inspection_caps` object
+1–200000; optional `webfetch_enabled` bool (omitted/false unless the review's effective
+root-owned setting is true: the host's `review.webfetch_enabled`, else a fleet
+gateway's default); optional `inspection_caps` object
 with required boolean fields `hash_path_enabled`, `service_status_enabled`,
 `sudo_policy_enabled` (all false when the object is absent). The capability
 object carries no roots, UID lists, credential paths or exclusion patterns.

@@ -168,10 +168,10 @@ type WorkerLimits struct {
 	InspectionCaps          InspectionCapabilities `json:"inspection_caps,omitzero"`
 	MaxModelCallsPerAttempt int                    `json:"max_model_calls_per_attempt"`
 	MaxOutputTokens         int                    `json:"max_output_tokens"`
-	// WebfetchEnabled gates the optional public-web webfetch tool. It is
-	// false unless the root-owned review.webfetch_enabled config is
-	// explicitly true, and the reviewer never offers or executes webfetch
-	// otherwise.
+	// WebfetchEnabled gates the optional public-web webfetch tool. It is the
+	// review's effective root-owned setting: the host's review.webfetch_enabled
+	// when set, else the fleet gateway's default, else false. The reviewer
+	// never offers or executes webfetch unless it is true.
 	WebfetchEnabled bool `json:"webfetch_enabled,omitempty"`
 }
 

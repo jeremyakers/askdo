@@ -88,7 +88,7 @@ func (s *Server) catalog(host AuthenticatedHost, uid uint32) (fleetproto.Catalog
 	if err != nil {
 		return fleetproto.Catalog{}, err
 	}
-	result := fleetproto.Catalog{Version: 1, Kind: fleetproto.KindCatalog, HostID: fleetproto.ID(host.HostID), SubmitterUID: uid, Profiles: []fleetproto.ProfileMetadata{}, ExpiresAt: time.Now().Add(time.Minute).Unix(), ReviewerWebfetchEnabled: s.cfg.ReviewerWebfetchEnabled}
+	result := fleetproto.Catalog{Version: 1, Kind: fleetproto.KindCatalog, HostID: fleetproto.ID(host.HostID), SubmitterUID: uid, Profiles: []fleetproto.ProfileMetadata{}, ExpiresAt: time.Now().Add(time.Minute).Unix(), ReviewerWebfetchEnabled: s.cfg.ReviewerWebfetchEnabled, ReviewDefaults: s.reviewDefaults}
 	for _, p := range s.cfg.Profiles {
 		if host.AllowsProfile(p.Name) {
 			m, err := profileMetadata(p)

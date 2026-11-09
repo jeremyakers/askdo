@@ -313,6 +313,8 @@ type ReviewConfig struct {
 	ApprovalOnlyUsers []string `json:"approval_only_users,omitempty"`
 	// Internally stored in seconds; JSON uses sudo-style minutes under
 	// timestamp_timeout_users, with approval_timestamp_users as a seconds alias.
+	// A login mapped to 0 is off on this host, whatever a fleet gateway offers;
+	// a login with no entry is left to the gateway.
 	ApprovalTimestampUsers  map[string]int `json:"-"`
 	LocalOnly               bool           `json:"local_only"`
 	Models                  []ModelConfig  `json:"models"`
@@ -329,11 +331,13 @@ type ReviewConfig struct {
 	// auto-approval and no submitter-controllable setting.
 	AutoApproveGrants []AutoApproveGrant `json:"auto_approve_grants,omitempty"`
 	// WebfetchEnabled opts the reviewer into the bounded public-web
-	// webfetch tool. It defaults to false when omitted; when true the
-	// broker projects it to the worker and the model may fetch public
-	// http(s) pages as evidence. Private, loopback, link-local, and
-	// metadata destinations are refused by the fetcher regardless.
-	WebfetchEnabled bool `json:"webfetch_enabled,omitempty"`
+	// webfetch tool. When true the broker projects it to the worker and the
+	// model may fetch public http(s) pages as evidence. Private, loopback,
+	// link-local, and metadata destinations are refused by the fetcher
+	// regardless. A pointer so that an explicit false (this host says no, even
+	// where its fleet gateway says yes) differs from omitted, which leaves the
+	// choice to the gateway and is off where the gateway sets none.
+	WebfetchEnabled *bool `json:"webfetch_enabled,omitempty"`
 	// AccountNotes adds administrator context after the host risk guidance.
 	// Names resolve at Load; files and group membership are read per review.
 	AccountNotes     *AccountNotesConfig `json:"account_notes,omitempty"`
@@ -345,6 +349,9 @@ type ReviewConfig struct {
 	usersResolved    bool
 	autoResolved     bool
 	notesResolved    bool
+	// gateway holds a fleet gateway's defaults resolved on this host's
+	// accounts; nil for the host's own configuration (see WithGatewayDefaults).
+	gateway *gatewayDefaults
 }
 
 // AutoApproveGrant is one review.auto_approve_grants entry: the named login
@@ -943,8 +950,10 @@ func validateReviewPolicy(review ReviewConfig) error {
 		if name == "" || strings.TrimSpace(name) != name {
 			return errors.New("review.timestamp_timeout_users contains an invalid login name")
 		}
-		if seconds < 30 || seconds > 3600 {
-			return errors.New("review.timestamp_timeout_users must be 0.5 through 60 minutes (30 through 3600 seconds)")
+		// Zero is an explicit off for this login: it keeps the entry (so it is
+		// not an omitted login) and overrides a fleet gateway's window.
+		if seconds != 0 && (seconds < 30 || seconds > 3600) {
+			return errors.New("review.timestamp_timeout_users must be 0 (off) or 0.5 through 60 minutes (30 through 3600 seconds)")
 		}
 	}
 	if len(review.AutoApproveGrants) > 128 {
@@ -955,8 +964,10 @@ func validateReviewPolicy(review ReviewConfig) error {
 		if grant.User == "" || strings.TrimSpace(grant.User) != grant.User {
 			return errors.New("review.auto_approve_grants contains an invalid login name")
 		}
-		if grant.MaxRisk < 1 || grant.MaxRisk > 4 {
-			return errors.New("review.auto_approve_grants max_risk must be 1 through 4 (risk 5 is never auto-approved)")
+		// Zero turns a fleet gateway's grant off for this login on this host;
+		// it grants nothing where there is no gateway grant.
+		if grant.MaxRisk < 0 || grant.MaxRisk > 4 {
+			return errors.New("review.auto_approve_grants max_risk must be 0 (off) or 1 through 4 (risk 5 is never auto-approved)")
 		}
 		if _, exists := grants[grant.User]; exists {
 			return fmt.Errorf("duplicate review.auto_approve_grants login %q", grant.User)
@@ -1037,22 +1048,32 @@ func (review *ReviewConfig) ResolveAutoApproveGrants() error {
 // disabled for that UID — the default for every UID unless the root-owned
 // configuration grants an explicit threshold. A programmatically built
 // config never resolved through Load has no grants and returns 0, so there
-// is no implicit activation.
+// is no implicit activation. Where a fleet gateway also grants this UID, the
+// lower of the two grants applies: a host may lower or turn off a gateway
+// grant, never raise it.
 func (review *ReviewConfig) MaxAutoRisk(peerUID uint32) int {
-	return review.autoApproveRisk[peerUID]
+	host, hostGrant := review.autoApproveRisk[peerUID]
+	if review.gateway == nil {
+		return host
+	}
+	gateway, gatewayGrant := review.gateway.autoRisk[peerUID]
+	switch {
+	case hostGrant && gatewayGrant:
+		return min(host, gateway)
+	case gatewayGrant:
+		return gateway
+	}
+	return host
 }
 
 // RequiresReview returns the admission decision. ForceReview can only add a
-// review, including for an exempt UID or in global approval_only mode.
+// review, including for an exempt UID or in global approval_only mode. A UID
+// is exempt when the host exempts it or, on a fleet host, its gateway does.
 func (review *ReviewConfig) RequiresReview(peerUID uint32, forceReview bool) bool {
 	if forceReview {
 		return true
 	}
-	if review.Mode == "approval_only" {
-		return false
-	}
-	_, exempt := review.approvalOnlyUIDs[peerUID]
-	return !exempt
+	return review.ExemptionSource(peerUID) == SourceNone
 }
 
 // ValidateTelegramSection checks the telegram section in isolation: an

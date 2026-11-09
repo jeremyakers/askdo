@@ -93,9 +93,12 @@ sanitized sudo-policy metadata when you enable those tools. See
 - **Approve a whole fleet from one phone.** Running several servers? An
   optional shared gateway can hold the model credentials, Codex login and one
   Telegram bot for all of them, while each machine keeps its own inspection
-  rules, auto-approval ceiling and local root execution. Standalone mode —
-  one bot per server, configured on that server — stays the default and is
-  unchanged. See [fleet setup](docs/fleet-setup.md).
+  rules and local root execution. The gateway can also publish review defaults
+  (who skips AI review, approval reuse windows, auto-approval ceilings, risk
+  guidance and notes) that a machine inherits wherever its own configuration
+  sets nothing. Standalone mode — one bot per server, configured on that
+  server — stays the default and is unchanged. See
+  [fleet setup](docs/fleet-setup.md).
 - **Let routine work through automatically.** Opt-in risk-based auto-approval
   can run qualifying AI-reviewed headless jobs with a Telegram notice.
   It's off by default; [you choose the policy](docs/configuration.md).

@@ -32,12 +32,19 @@ import (
 type fleetAuthorityGateway struct {
 	snapshot   fleetproto.RouteSnapshot
 	catalogues atomic.Int32
+	// requests counts every catalogue request received, answered or not, so a
+	// test can tell that the broker never asked.
+	requests atomic.Int32
 	// delayFrom makes that-numbered (1-based) and every later catalogue
 	// answer arrive only after delay, and drops it when the caller gives up
 	// (request context ends) so httptest Close never blocks on a parked
 	// handler. delay itself is guarded by the context too.
 	delayFrom atomic.Int32
 	delay     time.Duration
+	// defaults is the review_defaults the gateway publishes in each catalogue;
+	// down makes the gateway refuse catalogue requests.
+	defaults atomic.Pointer[fleetproto.ReviewDefaults]
+	down     atomic.Bool
 }
 
 func newFleetAuthorityGateway(t *testing.T, cfg *config.Config, uid uint32) *fleetAuthorityGateway {
@@ -58,6 +65,7 @@ func newFleetAuthorityGatewayDelayed(t *testing.T, cfg *config.Config, uid uint3
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		g.requests.Add(1)
 		if threshold := int(g.delayFrom.Load()); threshold > 0 && g.catalogues.Load() >= int32(threshold-1) {
 			select {
 			case <-time.After(g.delay):
@@ -66,7 +74,11 @@ func newFleetAuthorityGatewayDelayed(t *testing.T, cfg *config.Config, uid uint3
 			}
 		}
 		g.catalogues.Add(1)
-		catalog := fleetproto.Catalog{Version: 1, Kind: fleetproto.KindCatalog, HostID: "host", SubmitterUID: uid, Profiles: []fleetproto.ProfileMetadata{}, Route: g.snapshot, ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}
+		if g.down.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		catalog := fleetproto.Catalog{Version: 1, Kind: fleetproto.KindCatalog, HostID: "host", SubmitterUID: uid, Profiles: []fleetproto.ProfileMetadata{}, Route: g.snapshot, ExpiresAt: time.Now().Add(5 * time.Minute).Unix(), ReviewDefaults: g.defaults.Load()}
 		wire, err := fleetproto.Sign(key, catalog)
 		if err != nil {
 			t.Error(err)
@@ -241,7 +253,10 @@ func TestFleetTimestampLocalRouteUnchanged(t *testing.T) {
 }
 
 // An expired stored window is unusable by its local expiry alone; -l must not
-// spend a Fleet catalogue round trip (holding admission) to report zero.
+// spend a Fleet catalogue round trip to resolve its authority and report zero.
+// The listing does ask the gateway once, for the review defaults it reports
+// (see TestListShowsEffectiveValuesAndTheirSource), and that one catalogue also
+// serves the window check: an expired window adds no second lookup.
 func TestFleetTimestampExpiredWindowSkipsCatalogue(t *testing.T) {
 	_, g, h, key, _, _ := fleetTimestampWindow(t)
 	live, err := h.daemon.store.PeekApprovalTimestamp(context.Background(), key)
@@ -259,7 +274,7 @@ func TestFleetTimestampExpiredWindowSkipsCatalogue(t *testing.T) {
 	if err := json.Unmarshal(body, &event); err != nil || event.RemainingSeconds != 0 {
 		t.Fatalf("list=%s err=%v", body, err)
 	}
-	if got := g.catalogues.Load(); got != before {
-		t.Fatalf("expired window triggered %d catalogue lookups", got-before)
+	if got := g.catalogues.Load() - before; got != 1 {
+		t.Fatalf("listing with an expired window made %d catalogue lookups, want the one for the gateway's defaults", got)
 	}
 }

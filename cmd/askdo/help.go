@@ -119,6 +119,8 @@ gateway serve.
 
 timestamp_timeout matches sudo: plain VALUE is minutes (decimals allowed).
 Go durations such as 90s, 10m and 1h also work; the range is 30s through 1h.
+A VALUE of 0 turns reuse off for that user even where a fleet gateway offers a
+window; clear removes the entry instead, so the gateway's default applies again.
 It controls how long one approval is reused on the same terminal, per target
 user. The legacy review timestamp alias still interprets plain values as seconds.
 

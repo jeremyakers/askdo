@@ -107,13 +107,18 @@ type Catalog struct {
 	Profiles     []ProfileMetadata `json:"profiles"`
 	Route        RouteSnapshot     `json:"route"`
 	ExpiresAt    int64             `json:"expires_at"`
-	// ReviewerWebfetchEnabled is the gateway's fleet-wide webfetch policy.
-	// Absent (nil) from older gateways or when unconfigured, in which case
-	// the host's own review.webfetch_enabled applies.
+	// ReviewerWebfetchEnabled is the gateway's fleet-wide webfetch default.
+	// Absent (nil) from older gateways or when unconfigured. A host that sets
+	// review.webfetch_enabled itself keeps its own value; this applies only
+	// where the host leaves it unset.
 	ReviewerWebfetchEnabled *bool `json:"reviewer_webfetch_enabled,omitempty"`
 	// FleetUpgrade offers THIS host the gateway's target release. Absent unless
 	// the gateway has a target and it is this host's turn (see upgrade.go).
 	FleetUpgrade *FleetUpgradeOffer `json:"fleet_upgrade,omitempty"`
+	// ReviewDefaults is the gateway's default review policy. Absent from older
+	// gateways or when the gateway configures none, in which case each host's
+	// own settings apply unchanged.
+	ReviewDefaults *ReviewDefaults `json:"review_defaults,omitempty"`
 }
 
 type ReviewReport = proto.ReviewReport

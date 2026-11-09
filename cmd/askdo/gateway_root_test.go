@@ -198,7 +198,7 @@ func TestGatewayRootConnectPreservesPolicyAndRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(next.Inspection, old.Inspection) || next.Limits != old.Limits || next.Review.LocalOnly != old.Review.LocalOnly || next.Review.MaxOutputTokens != 2345 || next.Review.MaxModelCallsPerAttempt != 5 || next.Review.RequestTimeout != old.Review.RequestTimeout || next.Review.TotalTimeout != old.Review.TotalTimeout || !reflect.DeepEqual(next.Review.AutoApproveGrants, old.Review.AutoApproveGrants) || !next.Review.WebfetchEnabled || next.Fleet.ApprovalTTL != 780 {
+	if !reflect.DeepEqual(next.Inspection, old.Inspection) || next.Limits != old.Limits || next.Review.LocalOnly != old.Review.LocalOnly || next.Review.MaxOutputTokens != 2345 || next.Review.MaxModelCallsPerAttempt != 5 || next.Review.RequestTimeout != old.Review.RequestTimeout || next.Review.TotalTimeout != old.Review.TotalTimeout || !reflect.DeepEqual(next.Review.AutoApproveGrants, old.Review.AutoApproveGrants) || next.Review.WebfetchEnabled == nil || !*next.Review.WebfetchEnabled || next.Fleet.ApprovalTTL != 780 {
 		t.Fatal("connect changed local policy/budgets")
 	}
 	for _, p := range []string{hostPath, next.Fleet.EnrollmentFile, next.Fleet.VerificationKeyFile} {

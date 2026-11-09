@@ -32,7 +32,7 @@ Workstations ─┘                 └─ Telegram
 | One authoritative Codex OAuth login/refresh path | Captured command, working directory and script input |
 | Telegram bot tokens, admins and notification routing | Allowed read roots, deny paths and sensitive-file masks |
 | Model API proxying | Reviewer loop and local inspection tools |
-| Approval cards and one update listener per bot token | Auto-approval ceiling and submitter's local preference |
+| Approval cards and one update listener per bot token | Auto-approval ceiling (a gateway grant can only be a default the host may lower) and submitter's local preference |
 | Authenticated approval results and delivery receipts | Durable job state, one-use dispatch and retained output |
 | The release the fleet should run, who is offered it next, and when to pause | Downloading, verifying, activating and rolling back its own upgrade, and its opt-out |
 
@@ -55,7 +55,7 @@ Each host needs a gateway address, a stable host identity, its own enrollment
 credential, and its local policy. Enrollment credentials must be individually
 revocable; one fleet-wide client key would lose host isolation.
 
-Example policy intent, not a new configuration schema:
+Example policy intent per host:
 
 | Host | Highest automatically approvable security risk |
 |---|---|
@@ -65,9 +65,57 @@ Example policy intent, not a new configuration schema:
 
 The host's root-owned ceiling remains authoritative. A submitter may choose a
 stricter preference, not a higher ceiling. Changing a shared model profile
-must not widen read roots, remove sensitive masks or enable auto-approval.
-Existing always-human cases, including captured scripts and critical risk,
-remain human decisions. Job databases and execution grants are not synced.
+must not widen read roots or remove sensitive masks. The gateway may publish a
+**default** grant for a login (see [policy defaults](#fleet-policy-defaults)),
+which a host without its own grant for that login inherits; where both grant,
+the lower cap applies, and a host can set `max_risk: 0` to turn the gateway's
+grant off. Existing always-human cases, including captured scripts and critical
+risk, remain human decisions. Job databases and execution grants are not synced.
+
+### Fleet policy defaults
+
+The gateway can also centralize the review policy that is the same everywhere:
+which logins skip AI review and go straight to a human decision, how long an
+approval may be reused, per-login auto-approval caps, the reviewer's `webfetch`
+tool, and default risk-scoring guidance and account notes. They are published in
+the signed catalog every enrolled host already fetches for each review, keyed by
+login or group name, which each host resolves against its own accounts.
+
+**A host's own setting decides; where the host sets nothing it inherits the
+gateway's default; with no gateway value everything is as it was.** The
+per-setting rules (including the lower-of-two auto-approval cap, the host file
+overriding the gateway's risk guidance while host notes follow the gateway's, and
+the additive exemption list a host cannot take back) are in the precedence table
+in
+[configuration](configuration.md#fleet-policy-defaults), with the gateway keys.
+The values a host uses come from the signed catalog fetched for that review and
+are frozen with it; the gateway still cannot widen inspection roots, deny paths
+or sensitive masks, execute anything, or bypass the host's dispatch checks.
+
+The gateway config carries them as optional top-level keys, edited directly (no
+`askdo-config gateway` subcommand sets them). Keys, units and limits mirror a
+host's `review` section; each text is `{"text": "..."}` inline or `{"file":
+"/absolute/path"}` read once when the gateway starts:
+
+```json
+"reviewer_webfetch_enabled": true,
+"review_defaults": {
+  "approval_only_users": ["alice"],
+  "timestamp_timeout_users": {"alice": 10},
+  "auto_approve_grants": [{"user": "alice", "max_risk": 2}],
+  "risk_policy": {"file": "/etc/askdo-gateway/risk-policy.md"},
+  "account_notes": {
+    "users": {"alice": {"text": "Alice administers the fleet; routine package upgrades are expected."}},
+    "groups": {"deployers": {"file": "/etc/askdo-gateway/notes/deployers.md"}}
+  }
+}
+```
+
+`askdo-config gateway check` validates the section, reads the files and refuses
+what a host would refuse. Upgrade every fleet host before adding the section:
+hosts older than unknown-field tolerance reject a catalog carrying a field they
+do not know. `alice` and the paths are examples; a name that is not an account on
+a host is simply not applied there.
 
 ## Model review stays attached to the host
 
@@ -77,16 +125,19 @@ tool calls, back to that reviewer.
 
 Filesystem and webfetch tools still execute locally under that host's limits.
 The gateway config may set `"reviewer_webfetch_enabled": true|false` (optional
-top-level boolean) to control webfetch for all hosts; it is published in the
-signed catalog and overrides each host's `review.webfetch_enabled`. If omitted,
-each host's own setting applies (as it does with older gateways).
+top-level boolean) as the webfetch default for all hosts; it is published in the
+signed catalog and applies to each host that does not set
+`review.webfetch_enabled` itself. A host that sets it, to `true` or `false`,
+keeps its own value. If omitted, each host's own setting applies (as it does
+with older gateways).
 Hosts verify the catalog strictly, so hosts older than this release reject a
 catalog that carries the field: upgrade every fleet host before setting it.
 Hosts built with unknown-field tolerance (see
 [unknown fields on the wire](architecture.md#unknown-fields-on-the-wire))
 still verify the whole signed catalog but ignore optional catalog fields they
 do not know, so a later optional catalog field no longer breaks them; such a
-host simply does not apply a setting it does not understand.
+host simply does not apply a setting it does not understand. The same holds for
+`review_defaults`, below.
 Only permitted evidence reaches the model; the gateway cannot ask for an
 unrestricted directory dump or bypass the local broker's inspection policy.
 
@@ -273,8 +324,9 @@ and recovery wire formats that this design called for now live in
 - Two hosts sharing a bot can receive decisions concurrently, including when
   their local job IDs collide. Cross-host decisions and replay are rejected.
 - The same review score yields different permitted automatic behavior under
-  different local ceilings; neither a gateway reply nor a shared profile can
-  raise a host's ceiling or bypass its inspection restrictions.
+  different local ceilings. The gateway may publish a default grant, but the host
+  can lower or turn it off and the lower cap applies where both grant; neither a
+  gateway reply nor a shared profile can bypass a host's inspection restrictions.
 - Concurrent model requests use one authoritative OAuth refresh path without
   stale-token overwrite; local-only routing does not escape to cloud models.
 - One Telegram listener handles multiple tickets and recipient sets without

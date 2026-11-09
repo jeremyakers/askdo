@@ -94,15 +94,22 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 		}
 		for _, name := range names {
 			seconds := review.ApprovalTimestampUsers[name]
-			if legacySeconds {
+			switch {
+			case seconds == 0:
+				fmt.Fprintf(stdout, "  %q: off (explicit; a fleet gateway's window does not apply)\n", name)
+			case legacySeconds:
 				fmt.Fprintf(stdout, "  %q: %d seconds\n", name, seconds)
-			} else {
+			default:
 				fmt.Fprintf(stdout, "  %q: %g minutes (%s; %d seconds)\n", name, float64(seconds)/60, time.Duration(seconds)*time.Second, seconds)
 			}
 		}
 		return 0
 	}
 	name := positional[0]
+	// off is an explicit zero: reuse stays off for this login whatever a fleet
+	// gateway offers, which an omitted login would not. Only the current
+	// spelling can say it; the legacy seconds alias keeps its 30..3600 range.
+	off := false
 	if verb == "set" {
 		var seconds int
 		var err error
@@ -111,11 +118,12 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 		} else {
 			seconds, err = config.ParseTimestampTimeout(positional[1])
 		}
-		if err != nil || seconds < 30 || seconds > 3600 {
+		off = !legacySeconds && err == nil && seconds == 0
+		if err != nil || (!off && (seconds < 30 || seconds > 3600)) {
 			if legacySeconds {
 				fmt.Fprintln(stderr, "review timestamp set: duration must be 30 through 3600 integer seconds")
 			} else {
-				fmt.Fprintln(stderr, "review timestamp_timeout set: value must be 0.5 through 60 minutes or a duration (30s..1h)")
+				fmt.Fprintln(stderr, "review timestamp_timeout set: value must be 0 (off) or 0.5 through 60 minutes or a duration (30s..1h)")
 			}
 			return 125
 		}
@@ -138,7 +146,9 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 		fmt.Fprintf(stderr, "%s: config not written: %v\n", command, err)
 		return 1
 	}
-	if verb == "clear" {
+	// Turning reuse off revokes stored windows like clear does, so lifting the
+	// off later cannot resurrect one.
+	if verb == "clear" || off {
 		if err := clearStoredApprovalTimestamps(path, name); err != nil {
 			fmt.Fprintf(stderr, "%s: policy saved, but stored timestamps could not be revoked: %v\n", command, err)
 			return 1
@@ -146,10 +156,12 @@ func reviewTimestampTimeout(args []string, stdout, stderr io.Writer, legacySecon
 	}
 	if legacySeconds {
 		fmt.Fprintf(stdout, "%s approval timestamp policy for %q\n", verb, name)
+	} else if off {
+		fmt.Fprintf(stdout, "%s timestamp_timeout policy for %q: off (no approval reuse on this host, whatever a fleet gateway offers)\n", verb, name)
 	} else {
 		fmt.Fprintf(stdout, "%s timestamp_timeout policy for %q\n", verb, name)
 	}
-	if verb == "set" {
+	if verb == "set" && !off {
 		fmt.Fprintln(stderr, "WARNING: after the first approval, foreground unreviewed commands from this UID and terminal for the same resolved target UID skip Telegram approval until the sliding timestamp expires. Changing target requires fresh approval. Agents need a distinct OS account.")
 	}
 	return 0

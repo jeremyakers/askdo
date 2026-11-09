@@ -9,7 +9,11 @@ default and are fully supported.
 
 A gateway centralizes **model credentials, Codex OAuth and Telegram
 approvals** — never execution. Each host keeps its own inspection policy,
-auto-approval ceiling, job database and privileged dispatch. The gateway
+job database and privileged dispatch, and applies the review policy the
+gateway offers as defaults (exempt logins, approval reuse windows,
+auto-approval ceilings, `webfetch`, risk guidance) only where its own
+configuration sets nothing; see
+[fleet policy defaults](configuration.md#fleet-policy-defaults). The gateway
 never connects to hosts, never runs commands, and holds no host sudo or SSH
 access.
 
