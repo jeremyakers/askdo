@@ -210,7 +210,7 @@ func TestFleetUpgradeRolloutThroughARealGateway(t *testing.T) {
 	}
 
 	// The operator sets the target once.
-	if _, err := upgrades.SetTarget(ctx, "v1.0.0", release.digest(), time.Now()); err != nil {
+	if _, err := upgrades.SetTarget(ctx, "v1.0.0", release.digest(), time.Now(), ""); err != nil {
 		t.Fatal(err)
 	}
 	if catalog, err := oldClient.Catalogue(ctx, 0); err != nil || catalog.FleetUpgrade != nil {
@@ -275,7 +275,7 @@ func TestFleetUpgradeRolloutThroughARealGateway(t *testing.T) {
 	}
 
 	// The operator sets the target again: the rollout resumes and C goes next.
-	if _, err := upgrades.SetTarget(ctx, "v1.0.0", release.digest(), time.Now()); err != nil {
+	if _, err := upgrades.SetTarget(ctx, "v1.0.0", release.digest(), time.Now(), ""); err != nil {
 		t.Fatal(err)
 	}
 	hostC.agent.tick(ctx)

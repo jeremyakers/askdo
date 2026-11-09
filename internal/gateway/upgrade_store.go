@@ -30,10 +30,11 @@ const maxNoticeAttempts = 30
 // opened by the serving gateway and by the operator CLI, which share one file:
 // a target set by the CLI reaches the next catalog without a restart.
 //
-// The rollout is one host at a time, and a host takes its turn by reporting. A
-// host whose report says it is ready (it applies pushed upgrades and none is
-// running on it) is assigned the offer if it is older than the target, the
-// rollout is not paused and no other host holds the offer; the offer then stays
+// The rollout is one host at a time. Setting a target can designate its first
+// lease; after that a host takes its turn by reporting. A host whose report says
+// it is ready (it applies pushed upgrades and none is running on it) is assigned
+// the offer if it is older than the target, the rollout is not paused and no other
+// host holds the offer; the offer then stays
 // with it until it reports success or failure. Only that host's catalog carries
 // it. Reading a catalog never assigns it: the broker reads the catalog for every
 // job it reviews, and the activation's own probe reads it too, and neither can
@@ -175,12 +176,14 @@ func (s *UpgradeStore) Target(ctx context.Context) (UpgradeTarget, bool, error) 
 // manifest, and starts its rollout afresh: any pause and any offer outstanding
 // for an earlier target are dropped. Naming the target that is already running
 // (same release and digest, not paused) leaves its offer outstanding. It returns the target it replaced, if any,
-// so the caller can say that an offer was outstanding.
+// so the caller can say that an offer was outstanding. A nonempty firstHost is
+// assigned the new target's lease immediately, with the usual expiry; an existing
+// unexpired lease for the same running target is still left alone.
 //
 // Refusing what a host could never act on belongs here, where an operator types
 // it: a tag that cannot be ordered against the releases hosts run, or a digest
 // that is not a SHA-256.
-func (s *UpgradeStore) SetTarget(ctx context.Context, release, manifestSHA256 string, now time.Time) (*UpgradeTarget, error) {
+func (s *UpgradeStore) SetTarget(ctx context.Context, release, manifestSHA256 string, now time.Time, firstHost string) (*UpgradeTarget, error) {
 	if !version.Valid(release) {
 		return nil, fmt.Errorf("%q is not a release tag (vMAJOR.MINOR.PATCH[-PRERELEASE])", release)
 	}
@@ -197,13 +200,17 @@ func (s *UpgradeStore) SetTarget(ctx context.Context, release, manifestSHA256 st
 		return nil, err
 	}
 	if had && previous.Release == release && previous.ManifestSHA256 == manifestSHA256 && previous.PausedReason == "" &&
-		(previous.LeaseHost == "" || previous.LeaseExpires.After(now)) {
+		(previous.LeaseHost != "" && previous.LeaseExpires.After(now) || previous.LeaseHost == "" && firstHost == "") {
 		// The same target again while it runs changes nothing: a host that holds
 		// an unexpired offer keeps it, so no second host starts beside it. An
 		// expired lease falls through and is cleared, restarting the rollout.
 		return &previous, nil
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT OR REPLACE INTO gateway_upgrade_target(id,release,manifest_sha256,set_at,paused,lease_host,lease_expires) VALUES(1,?,?,?,'','',0)", release, manifestSHA256, now.Unix()); err != nil {
+	leaseExpires := int64(0)
+	if firstHost != "" {
+		leaseExpires = now.Add(UpgradeLeaseTTL).Unix()
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT OR REPLACE INTO gateway_upgrade_target(id,release,manifest_sha256,set_at,paused,lease_host,lease_expires) VALUES(1,?,?,?,'',?,?)", release, manifestSHA256, now.Unix(), firstHost, leaseExpires); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -395,11 +402,10 @@ func queueNotice(ctx context.Context, tx *sql.Tx, n UpgradeNotice, op string, at
 
 // Offer returns what the gateway offers hostID right now: the target, if the
 // rollout is running and the offer is assigned to this host and has not expired.
-// It only reads. Assigning the offer is Record's job, on the report of a host that
-// says it is ready, because the catalog is read by callers that cannot act on an
-// offer (every job review, the activation's own probe). A host that has not
-// reported (any host from before the report existed) is never assigned the offer,
-// so it never sees a catalog field it does not know.
+// It only reads. SetTarget can designate the gateway host's initial lease; later
+// assignment is Record's job, on the report of a host that says it is ready,
+// because the catalog is read by callers that cannot act on an offer (every job
+// review, the activation's own probe).
 func (s *UpgradeStore) Offer(ctx context.Context, hostID string, now time.Time) (*fleetproto.FleetUpgradeOffer, error) {
 	target, hasTarget, err := readTarget(ctx, s.db())
 	if err != nil || !hasTarget || target.PausedReason != "" || target.LeaseHost != hostID || !target.LeaseExpires.After(now) {

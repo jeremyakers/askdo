@@ -216,7 +216,7 @@ func finished(release, state, outcome string, at int64) fleetproto.HostStatus {
 
 func (f *upgradeWireFixture) setTarget(t *testing.T, release string) {
 	t.Helper()
-	if _, err := f.upgrades(t).SetTarget(context.Background(), release, upgradeDigest, time.Now()); err != nil {
+	if _, err := f.upgrades(t).SetTarget(context.Background(), release, upgradeDigest, time.Now(), ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -297,7 +297,7 @@ func TestATargetSetByAnotherProcessIsOfferedWithoutARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cliUpgrades.SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now()); err != nil {
+	if _, err := cliUpgrades.SetTarget(context.Background(), "v1.0.1", upgradeDigest, time.Now(), ""); err != nil {
 		t.Fatal(err)
 	}
 	f.report(t, a, ready("v1.0.0"))
