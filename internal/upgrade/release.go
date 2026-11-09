@@ -653,6 +653,16 @@ func releasesAPIURL(base *url.URL) *url.URL {
 	return &api
 }
 
+// ResolveNewestRelease returns the tag DownloadRelease picks when given no tag:
+// the newest published stable release, else the newest prerelease.
+func ResolveNewestRelease(ctx context.Context, client *http.Client, repoBaseURL string) (string, error) {
+	base, err := normalizeRepoBase(repoBaseURL)
+	if err != nil {
+		return "", err
+	}
+	return resolveNewestRelease(ctx, scopedClient(base, client), base)
+}
+
 // resolveNewestRelease scans every release-list page on the owned API URL.
 // Stable publications take priority; otherwise the newest prerelease wins.
 func resolveNewestRelease(ctx context.Context, client *http.Client, base *url.URL) (string, error) {

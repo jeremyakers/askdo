@@ -29,7 +29,6 @@ func writeTopHelp(w io.Writer) {
        askdo cancel --handle-file PATH [--force]
        askdo cancel JOB_ID                 legacy jobs, before dispatch only
        askdo auto-approve status | set N | off
-       askdo upgrade [--release TAG] [--operation ID]
 
 Run COMMAND with privilege after approval. Use -- before COMMAND if its name
 collides with an askdo subcommand (including a legacy operator command) or starts
@@ -64,10 +63,6 @@ omitting -u for root) requires fresh approval and replaces the window on handoff
   askdo -u tyme -i                           target's login shell in its home
   askdo -n /usr/bin/id                       fail if human approval is needed
 
-Upgrade requires human approval and needs no sudo. Without --release, it selects
-the newest stable release, or a prerelease if none exists. --operation resumes
-observing an upgrade without resubmitting.
-
 --script captures only PATH, preserving its basename and bytes, as a one-file
 bundle. Like --bundle, it runs with /bin/bash from the invocation directory;
 ARGs go to the script. No executable bit is required. Sensitive basenames need
@@ -100,6 +95,8 @@ func writeConfigHelp(w io.Writer) {
   askdo-config reviewer add|edit|delete|moveup|movedown|list ...
   askdo-config gateway init|hosts add|hosts list|hosts revoke|upgrade-target|connect|check|serve ...
   askdo-config fleet join https://gateway[:port] [--ca-file PATH]
+  askdo-config upgrade [--release TAG] [--operation ID]
+  askdo-config upgrade-fleet [TAG] | --status | --stop
   askdo-config logs JOB_ID [--uid UID] [--all]
   askdo-config daemon [--config PATH]                 service mode (root only)
 
@@ -123,6 +120,13 @@ A VALUE of 0 turns reuse off for that user even where a fleet gateway offers a
 window; clear removes the entry instead, so the gateway's default applies again.
 It controls how long one approval is reused on the same terminal, per target
 user. The legacy review timestamp alias still interprets plain values as seconds.
+
+upgrade updates this host (newest stable release unless --release); it needs no
+sudo and asks for approval itself. --operation resumes watching an upgrade.
+upgrade-fleet, run on the gateway host, rolls a release (default: newest stable)
+out to every enrolled host, one at a time, on that single approval; --status
+shows each host's release and the rollout, --stop stops offering. The gateway
+host is upgraded too.
 
 Run shell commands and manage your own jobs with askdo; see askdo --help.
 `)

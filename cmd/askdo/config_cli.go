@@ -17,7 +17,7 @@ const configCLIPath = "/usr/local/bin/askdo-config"
 
 func isOperatorCommand(cmd string) bool {
 	switch cmd {
-	case "review", "channel", "config", "auth", "inspection", "reviewer", "gateway", "fleet", "logs", "daemon", "upgrade-helper":
+	case "review", "channel", "config", "auth", "inspection", "reviewer", "gateway", "fleet", "logs", "daemon", "upgrade-helper", "upgrade", "upgrade-fleet":
 		return true
 	}
 	return false
@@ -65,6 +65,11 @@ func runConfigCLI(args []string, runClient func(context.Context, []string, clien
 	if args[0] == "daemon" {
 		return runDaemon(args[1:])
 	}
+	// `upgrade` is what `askdo upgrade` always was: run as yourself, it submits its
+	// own approval (see upgrade.go). Only upgrade-fleet needs the root gate.
+	if args[0] == "upgrade" {
+		return runUpgrade(args[1:], runClient, os.Stdout, os.Stderr)
+	}
 	if args[0] == "fleet" || args[0] == "gateway" && len(args) > 1 && args[1] == "serve" {
 		return runOperatorCommand(args, os.Stderr)
 	}
@@ -105,6 +110,8 @@ func runOperatorCommand(args []string, stderr io.Writer) int {
 		return runFleet(args[1:], os.Stdout, stderr)
 	case "logs":
 		return runLogs(args[1:], os.Stdout, stderr)
+	case "upgrade-fleet":
+		return runUpgradeFleet(args[1:], os.Stdout, stderr)
 	case "upgrade-helper":
 		return runUpgradeHelper(args[1:], os.Stdin, os.Stdout, stderr)
 	}

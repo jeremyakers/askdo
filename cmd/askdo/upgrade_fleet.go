@@ -1,0 +1,238 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/fleetproto"
+	"github.com/jeremyakers/askdo/internal/gateway"
+	"github.com/jeremyakers/askdo/internal/upgrade"
+	"github.com/jeremyakers/askdo/internal/version"
+)
+
+const upgradeFleetUsage = "usage: askdo-config upgrade-fleet [TAG] | --status | --stop   (run on the gateway host; default TAG is the newest stable release)"
+
+// Seams a test replaces so nothing reaches GitHub or schedules a real upgrade.
+var (
+	// fleetNewestRelease resolves the release `askdo upgrade` would pick.
+	fleetNewestRelease = func(ctx context.Context) (string, error) {
+		return upgrade.ResolveNewestRelease(ctx, nil, "https://github.com/"+upgradeRepository)
+	}
+	// upgradeThisHost schedules the staged upgrade of this host from the root
+	// context this command already runs in: the one approval covers it, so it
+	// takes the path a gateway-pushed upgrade takes, not a second approval.
+	upgradeThisHost = func(ctx context.Context, offer fleetproto.FleetUpgradeOffer) (string, error) {
+		bundle, err := newFleetUpgradeAgent(defaultConfigPath).install(ctx, offer)
+		return bundle.Operation, err
+	}
+	// loadHostConfig reads this host's own broker configuration.
+	loadHostConfig = config.Load
+	// installedRelease is the release this binary was built from.
+	installedRelease = func() string { return version.Release }
+)
+
+// runUpgradeFleet rolls a release out to every enrolled host with the one approval
+// this command was given. It is the gateway host's form of `gateway upgrade-target`.
+func runUpgradeFleet(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 1 && isHelpWord(args[0]) {
+		fmt.Fprintln(stdout, upgradeFleetUsage)
+		return 0
+	}
+	if getEUID() != 0 {
+		return rootRequired(stderr, "upgrade-fleet requires root")
+	}
+	err := upgradeFleet(args, stdout)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "upgrade-fleet:", err)
+		return 1
+	}
+	return 0
+}
+
+func upgradeFleet(args []string, out io.Writer) (err error) {
+	f := gatewayFlags("upgrade-fleet")
+	path := f.String("config", defaultGatewayConfig, "gateway configuration")
+	hostPath := f.String("host-config", defaultConfigPath, "this host's configuration")
+	status := f.Bool("status", false, "show each host's release and the rollout")
+	stop := f.Bool("stop", false, "stop offering the release (hosts already upgrading finish)")
+	pos, e := parseGateway(f, args, out)
+	if e != nil {
+		return e
+	}
+	if len(pos) > 1 || *status && *stop || (*status || *stop) && len(pos) != 0 {
+		return errors.New(upgradeFleetUsage)
+	}
+	c, e := loadGatewayOperator(*path)
+	if e != nil {
+		return e
+	}
+	store, e := gateway.OpenEnrollmentStore(c.Database)
+	if e != nil {
+		return e
+	}
+	defer func() { err = errors.Join(err, store.Close()) }()
+	upgrades, e := gateway.NewUpgradeStore(store)
+	if e != nil {
+		return e
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	tag := ""
+	if len(pos) == 1 {
+		tag = pos[0]
+	}
+	return upgradeFleetRun(ctx, store, upgrades, upgradeFleetRequest{tag: tag, status: *status, stop: *stop, hostConfig: *hostPath}, out)
+}
+
+type upgradeFleetRequest struct {
+	tag        string
+	status     bool
+	stop       bool
+	hostConfig string
+}
+
+// The parts of the gateway's database the rollout uses.
+type fleetHosts interface {
+	List(context.Context) ([]gateway.Enrollment, error)
+}
+
+type fleetTargets interface {
+	Target(context.Context) (gateway.UpgradeTarget, bool, error)
+	SetTarget(ctx context.Context, release, manifestSHA256 string, now time.Time) (*gateway.UpgradeTarget, error)
+	ClearTarget(context.Context) error
+	Statuses(context.Context) (map[string]gateway.HostUpgrade, error)
+}
+
+func upgradeFleetRun(ctx context.Context, store fleetHosts, upgrades fleetTargets, req upgradeFleetRequest, out io.Writer) error {
+	var e error
+	switch {
+	case req.stop:
+		if e = upgrades.ClearTarget(ctx); e != nil {
+			return e
+		}
+		fmt.Fprintln(out, "Fleet upgrade stopped; hosts already upgrading finish.")
+		return nil
+	case req.status:
+		return upgradeFleetStatus(ctx, store, upgrades, out)
+	}
+
+	tag := req.tag
+	if tag == "" {
+		if tag, e = fleetNewestRelease(ctx); e != nil {
+			return fmt.Errorf("find the newest release: %w", e)
+		}
+	}
+	manifest, e := gatewayManifest(ctx, tag)
+	if e != nil {
+		return fmt.Errorf("resolve release %s from the official repository: %w", tag, e)
+	}
+	now := time.Now()
+	previous, e := upgrades.SetTarget(ctx, manifest.Tag, manifest.Digest, now)
+	if e != nil {
+		return e
+	}
+	fmt.Fprintf(out, "Upgrading the fleet to %s (manifest SHA-256 %s)\n", manifest.Tag, manifest.Digest)
+	fmt.Fprintln(out, "Hosts take it one at a time; a failure pauses the rollout and is reported on Telegram. Watch: askdo-config upgrade-fleet --status")
+	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) {
+		fmt.Fprintf(out, "warning: %s was being offered %s and may still be upgrading; its upgrade is not stopped\n", previous.LeaseHost, previous.Release)
+	}
+
+	covered, reason, e := gatewayHostIsEnrolled(ctx, store, req.hostConfig)
+	if e != nil {
+		return e
+	}
+	if covered {
+		fmt.Fprintln(out, "This host is enrolled with this gateway and takes the upgrade in its turn.")
+		return nil
+	}
+	if cmp, e := version.Compare(manifest.Tag, installedRelease()); e == nil && cmp <= 0 {
+		fmt.Fprintf(out, "This host already runs %s.\n", installedRelease())
+		return nil
+	}
+	fmt.Fprintf(out, "This host %s; upgrading it now.\n", reason)
+	operation, e := upgradeThisHost(ctx, fleetproto.FleetUpgradeOffer{Release: manifest.Tag, ManifestSHA256: manifest.Digest})
+	if e != nil {
+		return fmt.Errorf("upgrade this host: %w", e)
+	}
+	fmt.Fprintf(out, "Scheduled (operation %s). Watch: askdo-config upgrade --operation %s\n", operation, operation)
+	return nil
+}
+
+// gatewayHostIsEnrolled says whether this host's own broker takes the gateway's
+// pushed upgrade: its configuration names a host ID that this gateway has enabled,
+// and it has not opted out of pushed upgrades. When it does not, reason says why.
+func gatewayHostIsEnrolled(ctx context.Context, store fleetHosts, hostConfig string) (bool, string, error) {
+	cfg, err := loadHostConfig(hostConfig)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return false, "has no fleet enrollment", nil
+	case err != nil:
+		return false, "has no readable fleet enrollment", nil
+	case cfg.Fleet == nil:
+		return false, "is not enrolled with a gateway", nil
+	case !cfg.FleetUpgradeAuto():
+		return false, "does not apply pushed upgrades", nil
+	}
+	hosts, err := store.List(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	for _, h := range hosts {
+		if h.HostID == cfg.Fleet.HostID && h.Enabled {
+			return true, "", nil
+		}
+	}
+	return false, "is not enrolled with this gateway", nil
+}
+
+func upgradeFleetStatus(ctx context.Context, store fleetHosts, upgrades fleetTargets, out io.Writer) error {
+	target, ok, err := upgrades.Target(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Fprintln(out, "No fleet upgrade is being offered.")
+	} else {
+		state := "running"
+		switch {
+		case target.PausedReason != "":
+			state = "paused: " + target.PausedReason + " (run upgrade-fleet again to resume)"
+		case target.LeaseHost != "":
+			state = "running, offered to " + target.LeaseHost
+		}
+		fmt.Fprintf(out, "Fleet upgrade to %s: %s\n", target.Release, state)
+	}
+	hosts, err := store.List(ctx)
+	if err != nil {
+		return err
+	}
+	reported, err := upgrades.Statuses(ctx)
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		s, seen := reported[h.HostID]
+		state := "-"
+		if ok && seen {
+			switch cmp, err := version.Compare(target.Release, s.Release); {
+			case err == nil && cmp <= 0:
+				state = "done"
+			case target.LeaseHost == h.HostID:
+				state = "upgrading"
+			default:
+				state = "waiting"
+			}
+		}
+		fmt.Fprintf(out, "%s enabled=%t rollout=%s%s\n", h.HostID, h.Enabled, state, upgradeColumns(s, seen))
+	}
+	return nil
+}

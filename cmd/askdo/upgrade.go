@@ -37,7 +37,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	flags := flag.NewFlagSet("upgrade", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(stdout, "usage: askdo upgrade [--release TAG] [--operation ID]\n\nDownload and verify a release, request human approval, then follow activation.\nWithout --release, select the newest stable release, or a prerelease if none exists.\n--operation resumes receipt observation only; it never schedules another upgrade.\nRun as an askdo user; no sudo is required.")
+		fmt.Fprintln(stdout, "usage: askdo-config upgrade [--release TAG] [--operation ID]\n\nDownload and verify a release, request human approval, then follow activation.\nWithout --release, select the newest stable release, or a prerelease if none exists.\n--operation resumes receipt observation only; it never schedules another upgrade.\nRun as an askdo user; no sudo is required.")
 	}
 	release := flags.String("release", "", "exact published release tag")
 	operation := flags.String("operation", "", "resume an existing upgrade operation")
@@ -53,7 +53,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		operationSet = operationSet || f.Name == "operation"
 	})
 	if flags.NArg() != 0 || (releaseSet && operationSet) || (releaseSet && *release == "") || (operationSet && *operation == "") {
-		fmt.Fprintln(stderr, "usage: askdo upgrade [--release TAG] [--operation ID] (choose release or resume, not both)")
+		fmt.Fprintln(stderr, "usage: askdo-config upgrade [--release TAG] [--operation ID] (choose release or resume, not both)")
 		return 125
 	}
 	if options.receiptRoot == "" {
@@ -260,7 +260,7 @@ func writeUpgradeBootstrap(plan upgrade.Plan, captured []byte, bootstrapRoot, so
 }
 
 func upgradeResumeHint(stderr io.Writer, operation string) {
-	fmt.Fprintf(stderr, "Resume observation without resubmitting: askdo upgrade --operation %s\n", operation)
+	fmt.Fprintf(stderr, "Resume observation without resubmitting: askdo-config upgrade --operation %s\n", operation)
 }
 
 func waitUpgradeReceipt(ctx context.Context, wait func(context.Context) error) error {
