@@ -908,4 +908,9 @@ func TestFetchReviewURLRefusesHTTPSDowngradeAndDropsReferer(t *testing.T) {
 	if err := fetcher.client.CheckRedirect(req, []*http.Request{via}); !errors.Is(err, ErrFetchInvalidURL) {
 		t.Fatalf("https->http redirect error = %v", err)
 	}
+	// The previous hop decides: http -> https -> http is refused too.
+	start, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+	if err := fetcher.client.CheckRedirect(req, []*http.Request{start, via}); !errors.Is(err, ErrFetchInvalidURL) {
+		t.Fatalf("http->https->http redirect error = %v", err)
+	}
 }

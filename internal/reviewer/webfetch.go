@@ -175,7 +175,7 @@ func newReviewerFetcher(cfg reviewFetchConfig) *reviewerFetcher {
 			// except a downgrade from HTTPS to HTTP, which would let the
 			// network substitute the evidence the reviewer asked to fetch
 			// securely. No Referer is carried to the next host.
-			if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+			if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
 				return ErrFetchInvalidURL
 			}
 			req.Header.Del("Referer")
