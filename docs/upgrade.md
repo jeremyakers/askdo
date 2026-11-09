@@ -1,16 +1,17 @@
 # Upgrade askdo
 
-Run this as an askdo user; no sudo password is needed:
+Run this as an askdo user; no sudo password is needed. (`askdo upgrade` is the
+deprecated old spelling: it still works and prints a notice.)
 
 ```sh
-askdo upgrade
+askdo-config upgrade
 ```
 
 The command selects the newest stable release by publication date, or the newest
 published prerelease when no stable release exists. To choose an exact release:
 
 ```sh
-askdo upgrade --release v1.0.0-rc.21
+askdo-config upgrade --release v1.0.0-rc.21
 ```
 
 To upgrade every host of a fleet from one decision instead of one approval per
@@ -62,7 +63,7 @@ The operation ID is printed before approval. If the client disconnects or the
 broker restarts, resume observation without submitting another upgrade:
 
 ```sh
-askdo upgrade --operation up_0123456789abcdef0123456789abcdef
+askdo-config upgrade --operation up_0123456789abcdef0123456789abcdef
 ```
 
 Receipts in `/var/lib/askdo-upgrade` contain only the operation, release, source
@@ -227,10 +228,24 @@ replays nothing, and the stage's `backup/` is the recovery source.
 
 ## Upgrade a fleet from the gateway
 
-`askdo upgrade` asks for one approval per host per release. In a fleet you can
+`askdo-config upgrade` asks for one approval per host per release. In a fleet you can
 instead name the release **once**, on the gateway host, and each enrolled host
 upgrades itself, one at a time, with the same staged activation and
 [automatic rollback](#automatic-rollback) as above.
+
+```sh
+askdo-config upgrade-fleet                     # newest stable release, one approval
+askdo-config upgrade-fleet v1.0.1              # or an exact release
+askdo-config upgrade-fleet --status            # each host's release, last result, rollout state
+askdo-config upgrade-fleet --stop              # stop offering the release
+```
+
+`upgrade-fleet` sets the gateway's upgrade target (below). It also upgrades the
+gateway host itself: if that host's own broker is enrolled with this gateway (its
+`/etc/askdo/config.json` names a host ID this gateway has enabled, and it has not
+opted out of pushed upgrades), the push covers it and nothing extra happens;
+otherwise, after setting the target, it schedules the upgrade of this host too, on
+the same approval. The underlying admin form stays available:
 
 ```sh
 askdo-config gateway upgrade-target v1.0.1     # set the target (the one approval)
@@ -246,7 +261,7 @@ feature **and** was produced by the release build, which embeds the release tag 
 the binary. A binary built any other way does not know which release it is, so it
 cannot tell newer from older and never upgrades by push (`hosts list` shows
 `release=unknown`). Upgrade each host and the gateway once by hand with
-`askdo upgrade` to the first such release; after that, set the target. (A binary
+`askdo-config upgrade` to the first such release; after that, set the target. (A binary
 you build from source reports a release only if you embed one:
 `go build -ldflags '-X github.com/jeremyakers/askdo/internal/version.Release=v1.0.1' ./cmd/askdo`.)
 
@@ -256,7 +271,7 @@ them a catalog field they do not know. Upgrade those by hand.
 
 ### Setting the target
 
-Run `askdo-config gateway upgrade-target TAG` on the gateway host as yourself, like
+Run `askdo-config upgrade-fleet [TAG]` (or `askdo-config gateway upgrade-target TAG`) on the gateway host as yourself, like
 the other root-only `askdo-config` commands: it asks for the usual Telegram
 approval, and that one approval covers the whole rollout. (As root it runs
 directly.) `TAG` must be a release tag of the form `vMAJOR.MINOR.PATCH` with an
@@ -295,13 +310,13 @@ when **all** of these hold:
   `v1.0.0` is newer than every `v1.0.0-rc.N`, `rc.9` is older than `rc.34`, and an
   offer of the same or an older release, or of a tag it cannot order, is ignored.
 
-It then does what `askdo upgrade` does after approval, with the same code:
+It then does what `askdo-config upgrade` does after approval, with the same code:
 
 1. It fetches the release's manifest alone and compares its SHA-256 with the digest
    in the gateway's signed offer. A mismatch installs nothing and downloads no
    binary: the host refuses, reports `refused` to the gateway, and the rollout pauses.
 2. It downloads the release with the same repository-, host- and redirect-restricted
-   download as `askdo upgrade`, and compares the manifest it actually downloaded
+   download as `askdo-config upgrade`, and compares the manifest it actually downloaded
    with the same digest again, because a release can be republished in between.
 3. It freezes a plan, writes the same root bootstrap script and runs it. The script
    verifies a root-owned copy of the new binary against the plan and runs that
@@ -322,7 +337,7 @@ minutes rather than at every look, which is well inside the gateway's one-hour l
 on the offer, so a dropped download is retried before the rollout gives up on the
 host; only the refusal is reported as a result, the other is logged.
 The release is downloaded into a private temporary directory (under `$TMPDIR`, else
-`/tmp`, as `askdo upgrade` does; on DSM that is RAM-backed, not the small system
+`/tmp`, as `askdo-config upgrade` does; on DSM that is RAM-backed, not the small system
 partition) and removed once the helper has staged its own copy under
 `upgrade_backup_dir`; a leftover from a crashed broker is removed at the next start.
 
