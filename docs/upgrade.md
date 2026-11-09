@@ -277,7 +277,8 @@ Hosts that already run the target (or something newer) are left alone.
 
 ### What each host does
 
-About fifteen seconds after its broker starts, and then every five minutes (every
+About fifteen seconds after its broker starts, and then about every five minutes
+(a little spread, so hosts that started together do not report together; every
 thirty seconds while one of its own upgrades is running, so the result reaches the
 gateway soon after the receipt records it), an enrolled host reports to the
 gateway: the release it was built from, whether it applies pushed upgrades, whether
