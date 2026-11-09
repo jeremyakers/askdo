@@ -282,12 +282,17 @@ func TestConfigAuthPermissionRouting(t *testing.T) {
 
 func TestLegacyOperatorNoticeAndServiceSilence(t *testing.T) {
 	cliIdentity(t, "/usr/local/bin/askdo", 1000)
-	for _, cmd := range []string{"review", "channel", "config", "auth", "inspection", "reviewer", "gateway", "fleet", "logs", "upgrade-helper"} {
+	for _, cmd := range []string{"review", "channel", "config", "auth", "inspection", "reviewer", "gateway", "fleet", "logs"} {
 		_, _, stderr := captureCLI(t, func() int { return runWithClient([]string{cmd, "--help"}, noCLIClient(t)) })
 		want := fmt.Sprintf("askdo: '%s' moved to askdo-config; this form will be removed in a future release\n", cmd)
 		if !strings.HasPrefix(stderr, want) || strings.Count(stderr, "moved to askdo-config") != 1 {
 			t.Errorf("%s: stderr=%q, want notice %q", cmd, stderr, want)
 		}
+	}
+	// The upgrade bootstrap's internal `upgrade-helper` step does not warn
+	// about itself either.
+	if _, _, stderr := captureCLI(t, func() int { return runWithClient([]string{"upgrade-helper", "--help"}, noCLIClient(t)) }); strings.Contains(stderr, "moved to") {
+		t.Errorf("upgrade-helper warned: %q", stderr)
 	}
 	for _, args := range [][]string{{"daemon"}, {"gateway", "serve"}} {
 		code, _, stderr := captureCLI(t, func() int { return runWithClient(args, noCLIClient(t)) })

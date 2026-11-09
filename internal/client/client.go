@@ -36,6 +36,10 @@ type Options struct {
 	// Verbose restores lifecycle diagnostics for interactive foreground jobs.
 	// Detached and other non-interactive jobs always retain them.
 	Verbose bool
+	// Quiet suppresses job lifecycle diagnostics for any lifecycle, for
+	// callers (such as askdo upgrade) that report their own progress. The
+	// review-card prompt and failure details still print.
+	Quiet bool
 	// Stdin overrides the process stdin for capture; only regular files and
 	// pipes are read. The caller retains ownership of this descriptor.
 	Stdin     *os.File
@@ -520,7 +524,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		return 125
 	}
 	options.detached = request.Lifecycle == proto.LifecycleDetached
-	options.quietForeground = !options.Verbose && request.Lifecycle == proto.LifecycleForeground
+	options.quietForeground = options.Quiet || !options.Verbose && request.Lifecycle == proto.LifecycleForeground
 	defer func() {
 		if exitCode != 0 && options.quietForeground && options.cancelHandleFile != "" {
 			if _, err := os.Stat(options.cancelHandleFile); err == nil {

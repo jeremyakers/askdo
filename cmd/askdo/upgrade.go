@@ -120,7 +120,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			upgradeResumeHint(stderr, *operation)
 			return 125
 		}
-		fmt.Fprintf(stdout, "Upgrade operation: %s\nRelease: %s\nSource commit: %s\nManifest SHA-256: %s\n", *operation, plan.Release, plan.SourceCommit, plan.ManifestDigest)
+		fmt.Fprintf(stdout, "Upgrading askdo to %s (operation %s)\n", plan.Release, *operation)
 		reason := fmt.Sprintf("Upgrade askdo and any installed gateway to %s from source %s with manifest SHA-256 %s (operation %s). Stage the verified release and activate it after this scheduling job finishes.", plan.Release, plan.SourceCommit, plan.ManifestDigest, *operation)
 		// Explicit detached execution never invokes the foreground sudo helper.
 		// The bootstrap is submitted as a one-file bundle (--script): the broker
@@ -138,7 +138,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		if options.runClient == nil {
 			options.runClient = client.Run
 		}
-		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--script", script, *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Interrupt: make(chan os.Signal)})
+		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--script", script, *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Quiet: true, Interrupt: make(chan os.Signal)})
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
 	// The root operation's activation budget starts only after scheduling, not
@@ -164,8 +164,16 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		}
 		removeSource = true // Root already copied and re-verified the source.
 		if receipt.State != lastState {
-			fmt.Fprintf(stdout, "Upgrade %s: %s\n", receipt.ID, receipt.State)
+			// One progress line: states are appended as they change.
+			if lastState == "" {
+				fmt.Fprint(stdout, receipt.State)
+			} else {
+				fmt.Fprint(stdout, " → ", receipt.State)
+			}
 			lastState = receipt.State
+			if receipt.State == "succeeded" || receipt.State == "failed" || receipt.State == "unknown" {
+				fmt.Fprintln(stdout)
+			}
 		}
 		switch receipt.State {
 		case "succeeded":

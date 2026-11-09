@@ -244,10 +244,9 @@ func TestUpgradeCLIResumePollsTransitionsWithoutSubmission(t *testing.T) {
 	if code != 0 || waits != len(states) {
 		t.Fatalf("resume code=%d waits=%d stderr=%s", code, waits, &stderr)
 	}
-	for _, state := range []string{"scheduled", "waiting", "activating", "verifying", "succeeded"} {
-		if got := strings.Count(stdout.String(), ": "+state+"\n"); got != 1 {
-			t.Fatalf("transition %s printed %d times: %s", state, got, &stdout)
-		}
+	// Each transition appears once, on one progress line.
+	if !strings.Contains(stdout.String(), "scheduled → waiting → activating → verifying → succeeded\n") {
+		t.Fatalf("progress line: %s", &stdout)
 	}
 }
 
