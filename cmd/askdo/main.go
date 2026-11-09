@@ -110,6 +110,12 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 	}
 }
 
+// The daemon's two long-lived parts, which a test replaces.
+var (
+	runBroker         = broker.Run
+	startUpgradeAgent = startFleetUpgrade
+)
+
 func runDaemon(args []string) int {
 	if getEUID() != 0 {
 		fmt.Fprintln(os.Stderr, "daemon mode requires root")
@@ -120,7 +126,10 @@ func runDaemon(args []string) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return 125
 	}
-	if err := broker.Run(context.Background(), *configPath); err != nil {
+	// An enrolled host also looks for the upgrade its gateway may offer. It runs
+	// beside the broker and never in its way (see fleet_upgrade.go).
+	defer startUpgradeAgent(*configPath)()
+	if err := runBroker(context.Background(), *configPath); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 125
 	}

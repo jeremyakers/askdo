@@ -22,6 +22,8 @@ type dispatcherOptions struct {
 	cosmeticTimeout time.Duration
 	pollWait        func(context.Context, time.Duration) bool
 	logger          *slog.Logger
+	// noticeRetry overrides how long an undelivered upgrade notice waits.
+	noticeRetry time.Duration
 }
 type dispatchBot struct {
 	client *telegram.Client
@@ -57,10 +59,14 @@ type dispatcher struct {
 	pollWait        func(context.Context, time.Duration) bool
 	logger          *slog.Logger
 	gatewayLeafHash [sha256.Size]byte
+	// upgrades and channels let the upgrade notice worker find who to tell.
+	upgrades    *UpgradeStore
+	channels    []ChannelConfig
+	noticeRetry time.Duration
 }
 
 func newDispatcher(ctx context.Context, store *TicketStore, cfg Config, ids map[string]int64, options dispatcherOptions) (*dispatcher, error) {
-	d := &dispatcher{store: store, ctx: ctx, bots: map[string]*dispatchBot{}, aliases: map[string]string{}, cosmetics: make(chan cosmeticJob, cosmeticQueueCapacity), cosmeticTimeout: options.cosmeticTimeout}
+	d := &dispatcher{store: store, ctx: ctx, bots: map[string]*dispatchBot{}, aliases: map[string]string{}, cosmetics: make(chan cosmeticJob, cosmeticQueueCapacity), cosmeticTimeout: options.cosmeticTimeout, channels: cfg.Channels, noticeRetry: options.noticeRetry}
 	d.pollWait, d.logger = options.pollWait, options.logger
 	if len(options.certificate.Certificate) > 0 {
 		d.gatewayLeafHash = sha256.Sum256(options.certificate.Certificate[0])
@@ -85,6 +91,10 @@ func (d *dispatcher) start() {
 	if d.joins != nil {
 		d.wg.Add(1)
 		go func() { defer d.wg.Done(); d.deliverJoinCards() }()
+	}
+	if d.upgrades != nil {
+		d.wg.Add(1)
+		go func() { defer d.wg.Done(); d.deliverUpgradeNotices() }()
 	}
 	for i := 0; i < cosmeticWorkerCount; i++ {
 		d.wg.Add(1)

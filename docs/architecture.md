@@ -267,7 +267,8 @@ private worker pipe, the foreground handoff and the fleet gateway wire:
   implement `proto.Request`; administrator configuration is decoded with
   `proto.StrictRequestUnmarshal`.
 - **Reports ignore unknown fields.** Results, events, catalogs, receipts,
-  capabilities, status, display facts, retry and availability metadata, review
+  capabilities, status (including a host's status report to its gateway),
+  display facts, retry and availability metadata, review
   reports, the helper's acknowledgement and completion, and the broker's
   bootstrap and config projection to the worker are read as if the field were
   absent. An ignored field is never kept or forwarded.

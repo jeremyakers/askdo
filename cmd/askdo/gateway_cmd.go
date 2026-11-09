@@ -27,7 +27,7 @@ import (
 )
 
 const defaultGatewayConfig = "/etc/askdo-gateway/config.json"
-const gatewayUsage = "usage: askdo-config gateway init|hosts add|hosts list|hosts revoke HOST_ID|connect|check|serve [--config PATH]"
+const gatewayUsage = "usage: askdo-config gateway init|hosts add|hosts list|hosts revoke HOST_ID|upgrade-target [TAG|--clear]|connect|check|serve [--config PATH]"
 
 type gatewayStrings []string
 
@@ -52,6 +52,8 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		err = gatewayInit(args[1:], stdout)
 	case "hosts":
 		err = gatewayHosts(args[1:], stdout)
+	case "upgrade-target":
+		err = gatewayUpgradeTarget(args[1:], stdout)
 	case "connect":
 		err = gatewayConnect(args[1:], stdout)
 	case "check", "serve":
@@ -352,11 +354,20 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 		if e != nil {
 			return e
 		}
+		// What hosts reported about upgrades is extra: listing the enrollments never
+		// depends on it, so a database that cannot give it just lists "unknown".
+		reported := map[string]gateway.HostUpgrade{}
+		if upgrades, e := gateway.NewUpgradeStore(store); e == nil {
+			if statuses, e := upgrades.Statuses(ctx); e == nil {
+				reported = statuses
+			}
+		}
 		for _, h := range hosts {
 			if _, e = fleetproto.ParseID(h.HostID); e != nil {
 				return errors.New("invalid stored enrollment identity")
 			}
-			fmt.Fprintf(out, "%s enabled=%t profiles=%s channels=%s default=%s\n", h.HostID, h.Enabled, strings.Join(h.AllowedProfiles, ","), strings.Join(h.AllowedChannels, ","), h.DefaultChannel)
+			status, ok := reported[h.HostID]
+			fmt.Fprintf(out, "%s enabled=%t profiles=%s channels=%s default=%s%s\n", h.HostID, h.Enabled, strings.Join(h.AllowedProfiles, ","), strings.Join(h.AllowedChannels, ","), h.DefaultChannel, upgradeColumns(status, ok))
 		}
 		return nil
 	}

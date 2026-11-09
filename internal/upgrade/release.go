@@ -363,12 +363,7 @@ func DownloadRelease(ctx context.Context, client *http.Client, repoBaseURL, tag,
 		return Manifest{}, fmt.Errorf("release tag %q is not a valid published release tag", tag)
 	}
 
-	manifestURL := base.JoinPath("releases", "download", tag, "install-manifest.v1")
-	data, err := getLimited(ctx, scopedClient(base, client), manifestURL, manifestMaxBytes, "")
-	if err != nil {
-		return Manifest{}, err
-	}
-	manifest, err := ParseManifest(bytes.NewReader(data), tag)
+	manifest, data, err := fetchManifest(ctx, client, base, tag)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -455,6 +450,39 @@ func DownloadRelease(ctx context.Context, client *http.Client, repoBaseURL, tag,
 		committed = append(committed, recordPath)
 	}
 	return manifest, nil
+}
+
+// FetchManifest downloads and parses only the install manifest of one published
+// release of the official repository: no asset is fetched. The manifest's Digest
+// is the one a Plan binds as ManifestDigest, so a caller that was told which
+// digest to expect (a fleet gateway's target) can check it before it downloads
+// anything else. The same repository, host, redirect and size rules as
+// DownloadRelease apply.
+func FetchManifest(ctx context.Context, client *http.Client, repoBaseURL, tag string) (Manifest, error) {
+	base, err := normalizeRepoBase(repoBaseURL)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if !tagFormatRE.MatchString(tag) || forbiddenTag(tag) {
+		return Manifest{}, fmt.Errorf("release tag %q is not a valid published release tag", tag)
+	}
+	manifest, _, err := fetchManifest(ctx, client, base, tag)
+	return manifest, err
+}
+
+// fetchManifest returns the parsed manifest of tag and the exact bytes it was
+// parsed from, which DownloadRelease keeps beside the assets it verified.
+func fetchManifest(ctx context.Context, client *http.Client, base *url.URL, tag string) (Manifest, []byte, error) {
+	manifestURL := base.JoinPath("releases", "download", tag, "install-manifest.v1")
+	data, err := getLimited(ctx, scopedClient(base, client), manifestURL, manifestMaxBytes, "")
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	manifest, err := ParseManifest(bytes.NewReader(data), tag)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	return manifest, data, nil
 }
 
 func verifyAssetBytes(asset Asset, data []byte) error {

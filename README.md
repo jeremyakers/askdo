@@ -307,7 +307,9 @@ askdo upgrade
 It downloads and verifies a release, asks for Telegram approval, then activates
 and verifies it, rolling back to the previous release if activation fails. No
 sudo password is needed. See [upgrading and recovery](docs/upgrade.md) for exact
-releases, reconnecting after a restart, rollback and backup handling.
+releases, reconnecting after a restart, rollback and backup handling. With a fleet
+gateway you can name a release once and have every host upgrade itself, one at a
+time: [upgrade a fleet from the gateway](docs/upgrade.md#upgrade-a-fleet-from-the-gateway).
 
 ## Review a script before you run it
 
