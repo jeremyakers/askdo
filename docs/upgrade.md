@@ -369,7 +369,9 @@ buttons, to the recipients of the host's default channel:
 - **rollback failed**: the host needs [manual recovery](#automatic-rollback); the
   rollout is paused;
 - **failed before changing anything**, **outcome unknown** (the helper was
-  interrupted) or **refused** (the manifest digest differed): the rollout is paused;
+  interrupted), **refused** (the manifest digest differed) or any other **failure**
+  (the receipt's own sentence is shown beneath, for example that admission recovery
+  failed and the host needs manual recovery): the rollout is paused;
 - **not reported**: the host holding the offer reported no outcome for an hour; the
   rollout is paused.
 

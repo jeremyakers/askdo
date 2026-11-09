@@ -16,7 +16,7 @@ func TestUpgradeNoticeSaysWhatHappenedToWhichHost(t *testing.T) {
 		{"rolled_back", []string{"rolled back", "restored and verified", "runs <code>v1.0.0</code> again"}},
 		{"rollback_failed", []string{"so did its rollback", "manual recovery"}},
 		{"no_changes", []string{"upgrade failed", "before it changed anything"}},
-		{"failed", []string{"askdo upgrade", "failed"}},
+		{"failed", []string{"askdo upgrade failed", "Check the host before upgrading it again"}},
 		{"unknown", []string{"outcome unknown", "Inspect the host"}},
 		{"refused", []string{"upgrade refused", "nothing was changed"}},
 		{"lease_expired", []string{"not reported", "reported no outcome"}},

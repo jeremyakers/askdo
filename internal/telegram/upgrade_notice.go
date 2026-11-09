@@ -44,6 +44,9 @@ func RenderUpgradeNotice(in UpgradeNoticeInput) string {
 	case "no_changes":
 		heading = "⚠️ <b>askdo upgrade failed</b>"
 		body = "The upgrade to <code>" + release + "</code> failed before it changed anything on the host."
+	case "failed":
+		heading = "⚠️ <b>askdo upgrade failed</b>"
+		body = "The upgrade to <code>" + release + "</code> failed. Check the host before upgrading it again."
 	case "unknown":
 		heading = "❓ <b>askdo upgrade outcome unknown</b>"
 		body = "The upgrade to <code>" + release + "</code> was interrupted. Inspect the host before upgrading it again."
