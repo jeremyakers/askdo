@@ -615,3 +615,20 @@ func TestNoticeDeliveryIsBookkeptPerChatAndGivenUpOnEventually(t *testing.T) {
 		t.Fatalf("a dropped notice is still pending: %+v", pending)
 	}
 }
+
+func TestSettingTheSameTargetAgainClearsAnExpiredLease(t *testing.T) {
+	s := upgradeFixture(t)
+	ctx := context.Background()
+	setTarget(t, s, "v1.0.1")
+	reportAs(t, s, "host_b", upgradeT0, hostReport("v1.0.0", true, nil))
+	if offerTo(t, s, "host_b", upgradeT0) == nil {
+		t.Fatal("host_b was not given the offer")
+	}
+	held, _, _ := s.Target(ctx)
+	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, held.LeaseExpires.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if after, _, _ := s.Target(ctx); after.LeaseHost != "" {
+		t.Fatalf("an expired lease survived a rerun: %+v", after)
+	}
+}

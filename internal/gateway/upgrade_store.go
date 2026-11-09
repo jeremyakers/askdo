@@ -196,9 +196,11 @@ func (s *UpgradeStore) SetTarget(ctx context.Context, release, manifestSHA256 st
 	if err != nil {
 		return nil, err
 	}
-	if had && previous.Release == release && previous.ManifestSHA256 == manifestSHA256 && previous.PausedReason == "" {
+	if had && previous.Release == release && previous.ManifestSHA256 == manifestSHA256 && previous.PausedReason == "" &&
+		(previous.LeaseHost == "" || previous.LeaseExpires.After(now)) {
 		// The same target again while it runs changes nothing: a host that holds
-		// the offer keeps it until its lease ends, so no second host starts beside it.
+		// an unexpired offer keeps it, so no second host starts beside it. An
+		// expired lease falls through and is cleared, restarting the rollout.
 		return &previous, nil
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT OR REPLACE INTO gateway_upgrade_target(id,release,manifest_sha256,set_at,paused,lease_host,lease_expires) VALUES(1,?,?,?,'','',0)", release, manifestSHA256, now.Unix()); err != nil {
