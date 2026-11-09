@@ -125,6 +125,8 @@ func upgradeFleetRun(ctx context.Context, store fleetHosts, upgrades fleetTarget
 	if e != nil {
 		return fmt.Errorf("resolve release %s from the official repository: %w", tag, e)
 	}
+	// Informational only: a failed lookup never stops the target being set.
+	covered, reason, lookupErr := gatewayHostIsEnrolled(ctx, store, req.hostConfig)
 	now := time.Now()
 	previous, e := upgrades.SetTarget(ctx, manifest.Tag, manifest.Digest, now)
 	if e != nil {
@@ -132,15 +134,13 @@ func upgradeFleetRun(ctx context.Context, store fleetHosts, upgrades fleetTarget
 	}
 	fmt.Fprintf(out, "Upgrading the fleet to %s (manifest SHA-256 %s)\n", manifest.Tag, manifest.Digest)
 	fmt.Fprintln(out, "Hosts take it one at a time; a failure pauses the rollout and is reported on Telegram. Watch: askdo-config upgrade-fleet --status")
-	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) {
+	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) && (previous.Release != manifest.Tag || previous.ManifestSHA256 != manifest.Digest) {
 		fmt.Fprintf(out, "warning: %s was being offered %s and may still be upgrading; its upgrade is not stopped\n", previous.LeaseHost, previous.Release)
 	}
 
-	covered, reason, e := gatewayHostIsEnrolled(ctx, store, req.hostConfig)
-	if e != nil {
-		return e
-	}
-	if covered {
+	if lookupErr != nil {
+		fmt.Fprintf(out, "warning: could not check whether this host is enrolled with this gateway (%v); run `askdo-config upgrade` here if it is not\n", lookupErr)
+	} else if covered {
 		fmt.Fprintln(out, "This host is enrolled with this gateway and takes the upgrade in its turn.")
 	} else {
 		fmt.Fprintf(out, "This host %s, so the push will not upgrade it; run `askdo-config upgrade` on this host.\n", reason)
@@ -203,15 +203,16 @@ func upgradeFleetStatus(ctx context.Context, store fleetHosts, upgrades fleetTar
 	for _, h := range hosts {
 		s, seen := reported[h.HostID]
 		state := "-"
-		if ok && (!h.Enabled || seen && !s.Auto) {
+		if ok && h.Enabled && target.LeaseHost == h.HostID && target.PausedReason == "" {
+			// It may already report the target while it verifies.
+			state = "upgrading"
+		} else if ok && (!h.Enabled || seen && !s.Auto) {
 			// Never offered the release: revoked/disabled, or opted out of pushes.
 			state = "excluded"
 		} else if ok && seen {
 			switch cmp, err := version.Compare(target.Release, s.Release); {
 			case err == nil && cmp <= 0:
 				state = "done"
-			case target.LeaseHost == h.HostID:
-				state = "upgrading"
 			default:
 				state = "waiting"
 			}

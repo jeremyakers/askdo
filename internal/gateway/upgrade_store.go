@@ -173,7 +173,8 @@ func (s *UpgradeStore) Target(ctx context.Context) (UpgradeTarget, bool, error) 
 
 // SetTarget names the release the fleet is to run, with the digest of its install
 // manifest, and starts its rollout afresh: any pause and any offer outstanding
-// for an earlier target are dropped. It returns the target it replaced, if any,
+// for an earlier target are dropped. Naming the target that is already running
+// (same release and digest, not paused) leaves its offer outstanding. It returns the target it replaced, if any,
 // so the caller can say that an offer was outstanding.
 //
 // Refusing what a host could never act on belongs here, where an operator types
@@ -194,6 +195,11 @@ func (s *UpgradeStore) SetTarget(ctx context.Context, release, manifestSHA256 st
 	previous, had, err := readTarget(ctx, tx)
 	if err != nil {
 		return nil, err
+	}
+	if had && previous.Release == release && previous.ManifestSHA256 == manifestSHA256 && previous.PausedReason == "" {
+		// The same target again while it runs changes nothing: a host that holds
+		// the offer keeps it until its lease ends, so no second host starts beside it.
+		return &previous, nil
 	}
 	if _, err = tx.ExecContext(ctx, "INSERT OR REPLACE INTO gateway_upgrade_target(id,release,manifest_sha256,set_at,paused,lease_host,lease_expires) VALUES(1,?,?,?,'','',0)", release, manifestSHA256, now.Unix()); err != nil {
 		return nil, err

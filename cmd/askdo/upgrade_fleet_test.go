@@ -22,9 +22,10 @@ type fakeFleet struct {
 	previous *gateway.UpgradeTarget
 	setTags  []string
 	cleared  int
+	listErr  error
 }
 
-func (f *fakeFleet) List(context.Context) ([]gateway.Enrollment, error) { return f.hosts, nil }
+func (f *fakeFleet) List(context.Context) ([]gateway.Enrollment, error) { return f.hosts, f.listErr }
 func (f *fakeFleet) Target(context.Context) (gateway.UpgradeTarget, bool, error) {
 	if f.target == nil {
 		return gateway.UpgradeTarget{}, false, nil
@@ -150,6 +151,16 @@ func TestUpgradeFleetTellsTheOperatorWhenThePushDoesNotCoverTheGatewayHost(t *te
 	}
 }
 
+func TestUpgradeFleetSetsTheTargetEvenIfTheCoverageLookupFails(t *testing.T) {
+	h := newFleetHarness(t)
+	h.hostCfg = gwHostConfig("host_gw")
+	f := &fakeFleet{listErr: errors.New("database busy")}
+	out, err := rollout(t, f, upgradeFleetRequest{})
+	if err != nil || !reflect.DeepEqual(f.setTags, []string{"v1.2.0"}) || !strings.Contains(out, "warning: could not check") || !strings.Contains(out, "database busy") {
+		t.Fatalf("err=%v set=%v out=%s", err, f.setTags, out)
+	}
+}
+
 func TestUpgradeFleetFailuresLeaveTheTargetAlone(t *testing.T) {
 	h := newFleetHarness(t)
 	h.newestErr = errors.New("rate limited")
@@ -184,6 +195,14 @@ func TestUpgradeFleetStopAndStatus(t *testing.T) {
 			t.Errorf("status lacks %q:\n%s", s, out)
 		}
 	}
+	f.target.LeaseHost, f.target.PausedReason = "", "host_b failed"
+	// The lease holder is upgrading even when it already reports the target.
+	f.statuses["host_b"] = gateway.HostUpgrade{Release: "v1.2.0", Auto: true, Seen: time.Now()}
+	f.target.LeaseHost, f.target.PausedReason = "host_b", ""
+	if out, _ = rollout(t, f, upgradeFleetRequest{status: true}); !strings.Contains(out, "host_b enabled=true rollout=upgrading") {
+		t.Errorf("lease holder on the target release:\n%s", out)
+	}
+	f.statuses["host_b"] = gateway.HostUpgrade{Hostname: "pi", Release: "v1.0.0", Auto: true, Seen: time.Now()}
 	f.target.LeaseHost, f.target.PausedReason = "", "host_b failed"
 	if out, _ = rollout(t, f, upgradeFleetRequest{status: true}); !strings.Contains(out, "paused: host_b failed (resume: askdo-config upgrade-fleet v1.2.0)") || !strings.Contains(out, "host_b enabled=true rollout=waiting") || !strings.Contains(out, "host_d enabled=false rollout=excluded") || !strings.Contains(out, "host_e enabled=true rollout=excluded") {
 		t.Errorf("paused status:\n%s", out)
