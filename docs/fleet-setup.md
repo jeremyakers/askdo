@@ -309,6 +309,29 @@ configuration; it never silently changes a required-review policy. When
 re-enrolling, revoke the old host ID on the gateway after the replacement is
 working; creating a new enrollment does not revoke the old credential.
 
+## Upgrading the fleet
+
+Instead of running `askdo upgrade` on every host, name the release once on the
+gateway host:
+
+```sh
+askdo-config gateway upgrade-target v1.0.1
+```
+
+It asks for the usual Telegram approval (one, for the whole rollout), stores the
+release and the digest of its install manifest in the gateway database (no
+restart), and each enrolled host then upgrades itself, one at a time, with the
+same staged activation and automatic rollback as `askdo upgrade`. A failure pauses
+the rollout; you get a Telegram notice for every host's result; run the command
+again with the tag to resume. `askdo-config gateway upgrade-target` alone shows
+where the rollout stands, and `askdo-config gateway hosts list` shows each host's
+release and last upgrade result (`name`, `release`, `auto_upgrade`, `upgrade`,
+`seen`). A host opts out with `"fleet_upgrade": {"auto": false}` in its own
+configuration. Hosts and gateway must first be upgraded by hand to the first
+release that contains this feature. The full behavior and the trust boundary are in
+[upgrade.md](upgrade.md#upgrade-a-fleet-from-the-gateway) and
+[fleet-gateway.md](fleet-gateway.md#gateway-pushed-upgrades).
+
 ## Revocation and its limits
 
 ```sh
@@ -387,7 +410,8 @@ revoking their enrollment or removing needed credentials. Never revive old jobs.
 ## What the gateway never does
 
 No inbound SSH/command channel to hosts, no execution policy, no job
-replication, no admin web UI, no HA/cluster machinery. Hosts authenticate
+replication, no admin web UI, no HA/cluster machinery. It never installs
+software: it names a release and each host upgrades itself. Hosts authenticate
 outbound over verified HTTPS with individual enrollment credentials; the
 gateway signs catalog, receipts and decisions with its own key, and each
 host's root broker verifies those proofs against its own frozen snapshots

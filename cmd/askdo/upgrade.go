@@ -104,24 +104,13 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			fmt.Fprintln(stderr, "upgrade download failed; no command submitted:", err)
 			return 125
 		}
-		entropy := options.random
-		if entropy == nil {
-			entropy = rand.Reader
-		}
-		var randomID [16]byte
-		if _, err := io.ReadFull(entropy, randomID[:]); err != nil {
+		id, err := newUpgradeOperationID(options.random)
+		if err != nil {
 			fmt.Fprintln(stderr, "upgrade operation ID; no command submitted:", err)
 			return 125
 		}
-		*operation = "up_" + hex.EncodeToString(randomID[:])
-		plan, err := upgrade.NewPlan(*operation, manifest)
-		var capturedPlan []byte
-		if err == nil {
-			capturedPlan, err = json.Marshal(plan)
-		}
-		if err == nil {
-			err = upgrade.WritePlan(source, plan)
-		}
+		*operation = id
+		plan, capturedPlan, err := freezeUpgradePlan(*operation, manifest, source)
 		if err != nil {
 			fmt.Fprintln(stderr, "upgrade plan; no command submitted:", err)
 			return 125
@@ -141,13 +130,8 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		// with the embedded approved plan, so neither mutable source bytes nor
 		// obsolete installed helper behavior can select the scheduling or
 		// activation path.
-		bootstrap, err := upgradeBootstrapScript(plan, capturedPlan, defaultUpgradeBootstrapRoot)
+		script, err := writeUpgradeBootstrap(plan, capturedPlan, defaultUpgradeBootstrapRoot, source)
 		if err != nil {
-			fmt.Fprintln(stderr, "upgrade bootstrap; no command submitted:", err)
-			return 125
-		}
-		script := filepath.Join(source, upgradeBootstrapFile)
-		if err := os.WriteFile(script, bootstrap, 0o600); err != nil {
 			fmt.Fprintln(stderr, "upgrade bootstrap; no command submitted:", err)
 			return 125
 		}
@@ -207,6 +191,53 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 
 // upgradeBootstrapFile is the bundle entry name the reviewer and card show.
 const upgradeBootstrapFile = "askdo-upgrade-bootstrap.sh"
+
+// newUpgradeOperationID draws a fresh operation ID: up_ and 32 hex digits. A nil
+// entropy reader means crypto/rand.
+func newUpgradeOperationID(entropy io.Reader) (string, error) {
+	if entropy == nil {
+		entropy = rand.Reader
+	}
+	var randomID [16]byte
+	if _, err := io.ReadFull(entropy, randomID[:]); err != nil {
+		return "", err
+	}
+	return "up_" + hex.EncodeToString(randomID[:]), nil
+}
+
+// freezeUpgradePlan binds a downloaded release to an operation. It returns the
+// plan and the exact bytes the root helper is given (the in-memory plan, never
+// the file), and leaves plan.json beside the release for the helper's source.
+func freezeUpgradePlan(operation string, manifest upgrade.Manifest, source string) (upgrade.Plan, []byte, error) {
+	plan, err := upgrade.NewPlan(operation, manifest)
+	if err != nil {
+		return upgrade.Plan{}, nil, err
+	}
+	captured, err := json.Marshal(plan)
+	if err != nil {
+		return upgrade.Plan{}, nil, err
+	}
+	if err := upgrade.WritePlan(source, plan); err != nil {
+		return upgrade.Plan{}, nil, err
+	}
+	return plan, captured, nil
+}
+
+// writeUpgradeBootstrap writes the root bootstrap script for plan into source
+// and returns its path. The script verifies a root-owned copy of the new binary
+// against the plan's digest and runs that binary's helper, which stages the
+// release and starts the detached activation.
+func writeUpgradeBootstrap(plan upgrade.Plan, captured []byte, bootstrapRoot, source string) (string, error) {
+	bootstrap, err := upgradeBootstrapScript(plan, captured, bootstrapRoot)
+	if err != nil {
+		return "", err
+	}
+	script := filepath.Join(source, upgradeBootstrapFile)
+	if err := os.WriteFile(script, bootstrap, 0o600); err != nil {
+		return "", err
+	}
+	return script, nil
+}
 
 func upgradeResumeHint(stderr io.Writer, operation string) {
 	fmt.Fprintf(stderr, "Resume observation without resubmitting: askdo upgrade --operation %s\n", operation)
