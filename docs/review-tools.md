@@ -353,8 +353,8 @@ With `review.webfetch_enabled: true`, the reviewer worker can fetch one
 model-chosen public HTTP(S) `url` (≤ 4096 bytes) per call. It returns
 `status: "ok"`, `final_url`, `http_status`, and UTF-8 `content` (≤ 2 MiB
 decompressed); fetch failures return only a fixed error category. The dedicated
-client has a 15-second whole-fetch timeout, at most five redirects to the same
-host, default HTTP(S) ports only, and no inherited proxy, cookies, URL
+client has a 15-second whole-fetch timeout, at most five redirects (each hop is validated like a fresh URL, so a redirect
+to another public host such as a download CDN is followed), default HTTP(S) ports only, and no inherited proxy, cookies, URL
 credentials, or provider tokens. URL, DNS results and dialed address are
 checked against private, loopback, link-local and other non-public networks.
 Fetched text is untrusted evidence: the tool does **not** execute code, follow

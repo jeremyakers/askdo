@@ -456,34 +456,30 @@ func TestFetchReviewURLFollowsOnlySameHostRedirects(t *testing.T) {
 	}
 }
 
-func TestFetchReviewURLRefusesCrossHostRedirect(t *testing.T) {
-	// One server plays both roles: the first request redirects to a
-	// different hostname. The fake resolver would happily resolve that
-	// name to the same public IP, so only the same-host rule stops the
-	// follow. Any second hit proves the redirect was wrongly followed.
-	var hits atomic.Int32
+func TestFetchReviewURLFollowsCrossHostRedirectToPublicHost(t *testing.T) {
+	// A release download redirects from github.com to its CDN host. The
+	// second hop is re-validated and dialed at a validated public address.
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) == 1 {
-			parsed, err := url.Parse(server.URL)
-			if err != nil {
-				t.Error(err)
-				return
-			}
-			w.Header().Set("Location", "http://other.example:"+parsed.Port()+"/")
+		if r.Host != "other.example:"+mustFetchPort(t, server.URL) {
+			parsed, _ := url.Parse(server.URL)
+			w.Header().Set("Location", "http://other.example:"+parsed.Port()+"/asset")
 			w.WriteHeader(http.StatusFound)
 			return
 		}
-		_, _ = io.WriteString(w, "must never be served")
+		_, _ = io.WriteString(w, "checksum")
 	}))
 	t.Cleanup(server.Close)
-	fetcher, _, rawURL := newTestFetcher(t, server, staticLookup(fakePublicIP))
-	_, err := fetcher.fetch(context.Background(), rawURL)
-	if !errors.Is(err, ErrFetchCrossHostRedirect) {
-		t.Fatalf("error = %v, want ErrFetchCrossHostRedirect", err)
+	fetcher, dialer, rawURL := newTestFetcher(t, server, staticLookup(fakePublicIP))
+	result, err := fetcher.fetch(context.Background(), rawURL)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := hits.Load(); got != 1 {
-		t.Fatalf("server hits = %d, want exactly 1 (the redirect must not be followed)", got)
+	if result.Content != "checksum" || !strings.HasPrefix(result.FinalURL, "http://other.example:") {
+		t.Fatalf("result = %+v", result)
+	}
+	if got := len(dialer.dialed()); got != 2 {
+		t.Fatalf("dialed %d times, want one validated dial per hop", got)
 	}
 }
 
