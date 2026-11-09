@@ -324,9 +324,10 @@ restart), and each enrolled host then upgrades itself, one at a time, with the
 same staged activation and automatic rollback as `askdo-config upgrade`. A failure pauses
 the rollout; you get a Telegram notice for every host's result; run the command
 again to resume. `askdo-config upgrade-fleet --status` shows each host's release,
-last upgrade result and rollout state (`--stop` stops offering), and the gateway
-host is upgraded too (the push covers it if it is enrolled with this gateway; if
-not, the command upgrades it directly). `askdo-config gateway hosts list` shows the
+last upgrade result and rollout state (`--stop` stops offering; disabled or opted-out
+hosts show `rollout=excluded`). The gateway host takes the push only if it is
+enrolled with this gateway; if not, the command tells you to run
+`askdo-config upgrade` on it. `askdo-config gateway hosts list` shows the
 raw columns (`name`, `release`, `auto_upgrade`, `upgrade`,
 `seen`). A host opts out with `"fleet_upgrade": {"auto": false}` in its own
 configuration. Hosts and gateway must first be upgraded by hand to the first

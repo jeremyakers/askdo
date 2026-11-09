@@ -125,8 +125,8 @@ upgrade updates this host (newest stable release unless --release); it needs no
 sudo and asks for approval itself. --operation resumes watching an upgrade.
 upgrade-fleet, run on the gateway host, rolls a release (default: newest stable)
 out to every enrolled host, one at a time, on that single approval; --status
-shows each host's release and the rollout, --stop stops offering. The gateway
-host is upgraded too.
+shows each host's release and the rollout, --stop stops offering. A gateway host
+that is not enrolled with its own gateway is not covered: run upgrade on it.
 
 Run shell commands and manage your own jobs with askdo; see askdo --help.
 `)

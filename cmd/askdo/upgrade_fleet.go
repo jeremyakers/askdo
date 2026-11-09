@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
-	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/gateway"
 	"github.com/jeremyakers/askdo/internal/upgrade"
 	"github.com/jeremyakers/askdo/internal/version"
@@ -18,23 +17,14 @@ import (
 
 const upgradeFleetUsage = "usage: askdo-config upgrade-fleet [TAG] | --status | --stop   (run on the gateway host; default TAG is the newest stable release)"
 
-// Seams a test replaces so nothing reaches GitHub or schedules a real upgrade.
+// Seams a test replaces so nothing reaches GitHub or the host.
 var (
 	// fleetNewestRelease resolves the release `askdo upgrade` would pick.
 	fleetNewestRelease = func(ctx context.Context) (string, error) {
 		return upgrade.ResolveNewestRelease(ctx, nil, "https://github.com/"+upgradeRepository)
 	}
-	// upgradeThisHost schedules the staged upgrade of this host from the root
-	// context this command already runs in: the one approval covers it, so it
-	// takes the path a gateway-pushed upgrade takes, not a second approval.
-	upgradeThisHost = func(ctx context.Context, offer fleetproto.FleetUpgradeOffer) (string, error) {
-		bundle, err := newFleetUpgradeAgent(defaultConfigPath).install(ctx, offer)
-		return bundle.Operation, err
-	}
 	// loadHostConfig reads this host's own broker configuration.
 	loadHostConfig = config.Load
-	// installedRelease is the release this binary was built from.
-	installedRelease = func() string { return version.Release }
 )
 
 // runUpgradeFleet rolls a release out to every enrolled host with the one approval
@@ -152,18 +142,9 @@ func upgradeFleetRun(ctx context.Context, store fleetHosts, upgrades fleetTarget
 	}
 	if covered {
 		fmt.Fprintln(out, "This host is enrolled with this gateway and takes the upgrade in its turn.")
-		return nil
+	} else {
+		fmt.Fprintf(out, "This host %s, so the push will not upgrade it; run `askdo-config upgrade` on this host.\n", reason)
 	}
-	if cmp, e := version.Compare(manifest.Tag, installedRelease()); e == nil && cmp <= 0 {
-		fmt.Fprintf(out, "This host already runs %s.\n", installedRelease())
-		return nil
-	}
-	fmt.Fprintf(out, "This host %s; upgrading it now.\n", reason)
-	operation, e := upgradeThisHost(ctx, fleetproto.FleetUpgradeOffer{Release: manifest.Tag, ManifestSHA256: manifest.Digest})
-	if e != nil {
-		return fmt.Errorf("upgrade this host: %w", e)
-	}
-	fmt.Fprintf(out, "Scheduled (operation %s). Watch: askdo-config upgrade --operation %s\n", operation, operation)
 	return nil
 }
 
@@ -205,7 +186,7 @@ func upgradeFleetStatus(ctx context.Context, store fleetHosts, upgrades fleetTar
 		state := "running"
 		switch {
 		case target.PausedReason != "":
-			state = "paused: " + target.PausedReason + " (run upgrade-fleet again to resume)"
+			state = "paused: " + target.PausedReason + " (resume: askdo-config upgrade-fleet " + target.Release + ")"
 		case target.LeaseHost != "":
 			state = "running, offered to " + target.LeaseHost
 		}
@@ -222,7 +203,10 @@ func upgradeFleetStatus(ctx context.Context, store fleetHosts, upgrades fleetTar
 	for _, h := range hosts {
 		s, seen := reported[h.HostID]
 		state := "-"
-		if ok && seen {
+		if ok && (!h.Enabled || seen && !s.Auto) {
+			// Never offered the release: revoked/disabled, or opted out of pushes.
+			state = "excluded"
+		} else if ok && seen {
 			switch cmp, err := version.Compare(target.Release, s.Release); {
 			case err == nil && cmp <= 0:
 				state = "done"

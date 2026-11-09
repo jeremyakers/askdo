@@ -240,12 +240,14 @@ askdo-config upgrade-fleet --status            # each host's release, last resul
 askdo-config upgrade-fleet --stop              # stop offering the release
 ```
 
-`upgrade-fleet` sets the gateway's upgrade target (below). It also upgrades the
-gateway host itself: if that host's own broker is enrolled with this gateway (its
-`/etc/askdo/config.json` names a host ID this gateway has enabled, and it has not
-opted out of pushed upgrades), the push covers it and nothing extra happens;
-otherwise, after setting the target, it schedules the upgrade of this host too, on
-the same approval. The underlying admin form stays available:
+`upgrade-fleet` only sets the gateway's upgrade target (below). The gateway host
+takes the push like any other host if its own broker is enrolled with this gateway
+(its `/etc/askdo/config.json` names a host ID this gateway has enabled, and it has
+not opted out of pushed upgrades). If it is not, the command says so after setting
+the target, and you run `askdo-config upgrade` on this host yourself. While a
+rollout is paused, `--status` prints the exact `askdo-config upgrade-fleet TAG` that
+resumes it, and shows hosts that are disabled or opted out as `rollout=excluded`.
+The underlying admin form stays available:
 
 ```sh
 askdo-config gateway upgrade-target v1.0.1     # set the target (the one approval)

@@ -44,28 +44,21 @@ func (f *fakeFleet) Statuses(context.Context) (map[string]gateway.HostUpgrade, e
 type fleetHarness struct {
 	newest    string
 	newestErr error
-	upgraded  []fleetproto.FleetUpgradeOffer
 	hostCfg   *config.Config
 	hostErr   error
-	installed string
 	asked     *[]string
 }
 
-// harness replaces every seam upgrade-fleet reaches outside the database.
+// newFleetHarness replaces every seam upgrade-fleet reaches outside the database.
 func newFleetHarness(t *testing.T) *fleetHarness {
 	t.Helper()
-	h := &fleetHarness{newest: "v1.2.0", installed: "v1.0.0"}
+	h := &fleetHarness{newest: "v1.2.0"}
 	h.asked = fakeGatewayManifest(t, nil)
-	oldNewest, oldThis, oldLoad, oldInstalled := fleetNewestRelease, upgradeThisHost, loadHostConfig, installedRelease
+	oldNewest, oldLoad := fleetNewestRelease, loadHostConfig
 	fleetNewestRelease = func(context.Context) (string, error) { return h.newest, h.newestErr }
-	upgradeThisHost = func(_ context.Context, o fleetproto.FleetUpgradeOffer) (string, error) {
-		h.upgraded = append(h.upgraded, o)
-		return "up_test", nil
-	}
 	loadHostConfig = func(string) (*config.Config, error) { return h.hostCfg, h.hostErr }
-	installedRelease = func() string { return h.installed }
 	t.Cleanup(func() {
-		fleetNewestRelease, upgradeThisHost, loadHostConfig, installedRelease = oldNewest, oldThis, oldLoad, oldInstalled
+		fleetNewestRelease, loadHostConfig = oldNewest, oldLoad
 	})
 	return h
 }
@@ -81,7 +74,7 @@ func rollout(t *testing.T, f *fakeFleet, req upgradeFleetRequest) (string, error
 	return out.String(), err
 }
 
-func TestUpgradeFleetDefaultsToNewestStableAndUpgradesAnUnenrolledGatewayHost(t *testing.T) {
+func TestUpgradeFleetDefaultsToNewestStableAndTellsAnUncoveredGatewayHost(t *testing.T) {
 	h := newFleetHarness(t)
 	h.hostErr = errors.New("read config: no such file")
 	f := &fakeFleet{}
@@ -92,11 +85,7 @@ func TestUpgradeFleetDefaultsToNewestStableAndUpgradesAnUnenrolledGatewayHost(t 
 	if !reflect.DeepEqual(f.setTags, []string{"v1.2.0"}) || !reflect.DeepEqual(*h.asked, []string{"v1.2.0"}) {
 		t.Fatalf("target %v, manifests asked %v", f.setTags, *h.asked)
 	}
-	want := []fleetproto.FleetUpgradeOffer{{Release: "v1.2.0", ManifestSHA256: gatewayTargetDigest}}
-	if !reflect.DeepEqual(h.upgraded, want) {
-		t.Fatalf("local upgrade %v, want %v", h.upgraded, want)
-	}
-	for _, s := range []string{"Upgrading the fleet to v1.2.0", "upgrading it now", "up_test"} {
+	for _, s := range []string{"Upgrading the fleet to v1.2.0", "run `askdo-config upgrade` on this host"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("output lacks %q:\n%s", s, out)
 		}
@@ -124,12 +113,12 @@ func TestUpgradeFleetEnrolledGatewayHostIsCoveredByThePush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(h.upgraded) != 0 || !strings.Contains(out, "takes the upgrade in its turn") {
-		t.Fatalf("upgraded=%v out=%s", h.upgraded, out)
+	if !strings.Contains(out, "takes the upgrade in its turn") || strings.Contains(out, "askdo-config upgrade`") {
+		t.Fatalf("out=%s", out)
 	}
 }
 
-func TestUpgradeFleetUpgradesTheGatewayHostWhenThePushDoesNotCoverIt(t *testing.T) {
+func TestUpgradeFleetTellsTheOperatorWhenThePushDoesNotCoverTheGatewayHost(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		cfg    *config.Config
@@ -149,21 +138,15 @@ func TestUpgradeFleetUpgradesTheGatewayHostWhenThePushDoesNotCoverIt(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			h := newFleetHarness(t)
 			h.hostCfg = tc.cfg
-			out, err := rollout(t, &fakeFleet{hosts: tc.hosts}, upgradeFleetRequest{})
-			if err != nil || len(h.upgraded) != 1 || !strings.Contains(out, tc.reason) {
-				t.Fatalf("err=%v upgraded=%v out=%s", err, h.upgraded, out)
+			f := &fakeFleet{hosts: tc.hosts}
+			out, err := rollout(t, f, upgradeFleetRequest{})
+			if err != nil || !strings.Contains(out, tc.reason) || !strings.Contains(out, "run `askdo-config upgrade` on this host") || strings.Count(out, "this host") != 1 {
+				t.Fatalf("err=%v out=%s", err, out)
+			}
+			if len(f.setTags) != 1 {
+				t.Fatalf("target not set: %v", f.setTags)
 			}
 		})
-	}
-}
-
-func TestUpgradeFleetDoesNotReinstallTheReleaseThisHostRuns(t *testing.T) {
-	h := newFleetHarness(t)
-	h.hostErr = errors.New("none")
-	h.installed = "v1.2.0"
-	out, err := rollout(t, &fakeFleet{}, upgradeFleetRequest{})
-	if err != nil || len(h.upgraded) != 0 || !strings.Contains(out, "already runs v1.2.0") {
-		t.Fatalf("err=%v upgraded=%v out=%s", err, h.upgraded, out)
 	}
 }
 
@@ -175,20 +158,21 @@ func TestUpgradeFleetFailuresLeaveTheTargetAlone(t *testing.T) {
 		t.Fatalf("err=%v set=%v", err, f.setTags)
 	}
 	fakeGatewayManifest(t, errors.New("404"))
-	if _, err := rollout(t, f, upgradeFleetRequest{tag: "v9.9.9"}); err == nil || len(f.setTags) != 0 || len(h.upgraded) != 0 {
-		t.Fatalf("err=%v set=%v upgraded=%v", err, f.setTags, h.upgraded)
+	if _, err := rollout(t, f, upgradeFleetRequest{tag: "v9.9.9"}); err == nil || len(f.setTags) != 0 {
+		t.Fatalf("err=%v set=%v", err, f.setTags)
 	}
 }
 
 func TestUpgradeFleetStopAndStatus(t *testing.T) {
-	h := newFleetHarness(t)
+	newFleetHarness(t)
 	soon := time.Now().Add(time.Hour)
 	f := &fakeFleet{
-		hosts:  []gateway.Enrollment{{HostID: "host_a", Enabled: true}, {HostID: "host_b", Enabled: true}, {HostID: "host_c", Enabled: true}},
+		hosts:  []gateway.Enrollment{{HostID: "host_a", Enabled: true}, {HostID: "host_b", Enabled: true}, {HostID: "host_c", Enabled: true}, {HostID: "host_d", Enabled: false}, {HostID: "host_e", Enabled: true}},
 		target: &gateway.UpgradeTarget{Release: "v1.2.0", LeaseHost: "host_b", LeaseExpires: soon},
 		statuses: map[string]gateway.HostUpgrade{
 			"host_a": {Hostname: "nas", Release: "v1.2.0", Auto: true, Seen: time.Now(), Result: &fleetproto.UpgradeResult{State: "succeeded", Release: "v1.2.0"}},
 			"host_b": {Hostname: "pi", Release: "v1.0.0", Auto: true, Seen: time.Now()},
+			"host_e": {Hostname: "old", Release: "v1.0.0", Auto: false, Seen: time.Now()},
 		},
 	}
 	out, err := rollout(t, f, upgradeFleetRequest{status: true})
@@ -201,7 +185,7 @@ func TestUpgradeFleetStopAndStatus(t *testing.T) {
 		}
 	}
 	f.target.LeaseHost, f.target.PausedReason = "", "host_b failed"
-	if out, _ = rollout(t, f, upgradeFleetRequest{status: true}); !strings.Contains(out, "paused: host_b failed") || !strings.Contains(out, "host_b enabled=true rollout=waiting") {
+	if out, _ = rollout(t, f, upgradeFleetRequest{status: true}); !strings.Contains(out, "paused: host_b failed (resume: askdo-config upgrade-fleet v1.2.0)") || !strings.Contains(out, "host_b enabled=true rollout=waiting") || !strings.Contains(out, "host_d enabled=false rollout=excluded") || !strings.Contains(out, "host_e enabled=true rollout=excluded") {
 		t.Errorf("paused status:\n%s", out)
 	}
 	if out, err = rollout(t, f, upgradeFleetRequest{stop: true}); err != nil || f.cleared != 1 || f.target != nil || !strings.Contains(out, "stopped") {
@@ -209,9 +193,6 @@ func TestUpgradeFleetStopAndStatus(t *testing.T) {
 	}
 	if out, _ = rollout(t, f, upgradeFleetRequest{status: true}); !strings.Contains(out, "No fleet upgrade is being offered") {
 		t.Errorf("status after stop:\n%s", out)
-	}
-	if len(h.upgraded) != 0 {
-		t.Fatal("status or stop upgraded this host")
 	}
 }
 
