@@ -89,7 +89,11 @@ esac
 trap '/bin/rm -rf -- "$bootstrap"' EXIT
 /usr/bin/install -m 0700 "$source/%s" "$candidate"
 exec 3<"$candidate"
-printf '%%s  %%s\n' '%s' /proc/self/fd/3 | /usr/bin/sha256sum --quiet -c -
+# Portable -c (BusyBox has no --quiet): show its output only on a mismatch.
+if ! check=$(printf '%%s  %%s\n' '%s' /proc/self/fd/3 | /usr/bin/sha256sum -c - 2>&1); then
+  printf '%%s\n' "$check" >&2
+  exit 1
+fi
 status=0
 printf '%%s' '%s' | /proc/self/fd/3 upgrade-helper --operation "$operation" --source "$source" || status=$?
 exit "$status"

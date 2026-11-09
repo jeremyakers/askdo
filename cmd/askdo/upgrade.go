@@ -147,9 +147,18 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute)
 	defer cancel()
 	lastState := ""
+	lineOpen := false
+	// finishLine ends an unterminated progress line before a diagnostic.
+	finishLine := func() {
+		if lineOpen {
+			fmt.Fprintln(stdout)
+			lineOpen = false
+		}
+	}
 	for {
 		receipt, err := upgrade.ReadReceipt(options.receiptRoot, *operation)
 		if err != nil {
+			finishLine()
 			fmt.Fprintf(stderr, "Cannot read upgrade receipt for %s: %v\n", *operation, err)
 			upgradeResumeHint(stderr, *operation)
 			if errors.Is(err, os.ErrNotExist) && clientCode != 0 {
@@ -158,6 +167,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			return 125
 		}
 		if err := ctx.Err(); err != nil {
+			finishLine()
 			fmt.Fprintln(stderr, "Upgrade observation stopped:", err)
 			upgradeResumeHint(stderr, *operation)
 			return 125
@@ -171,8 +181,9 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 				fmt.Fprint(stdout, " → ", receipt.State)
 			}
 			lastState = receipt.State
+			lineOpen = true
 			if receipt.State == "succeeded" || receipt.State == "failed" || receipt.State == "unknown" {
-				fmt.Fprintln(stdout)
+				finishLine()
 			}
 		}
 		switch receipt.State {
@@ -190,6 +201,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			return 125
 		}
 		if err := waitUpgradeReceipt(ctx, options.wait); err != nil {
+			finishLine()
 			fmt.Fprintln(stderr, "Upgrade observation stopped:", err)
 			upgradeResumeHint(stderr, *operation)
 			return 125
