@@ -626,8 +626,6 @@ func webfetchFailureCategory(err error) (string, bool) {
 		return "invalid_url", true
 	case errors.Is(err, ErrFetchBlockedAddress):
 		return "blocked_address", true
-	case errors.Is(err, ErrFetchCrossHostRedirect):
-		return "cross_host_redirect", true
 	case errors.Is(err, ErrFetchTooManyRedirects):
 		return "too_many_redirects", true
 	case errors.Is(err, ErrFetchBodyTooLarge):

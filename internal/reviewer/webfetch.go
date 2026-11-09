@@ -38,9 +38,6 @@ var (
 	// public: loopback, private, link-local, metadata, unspecified,
 	// multicast, reserved, or a non-public IPv4-mapped IPv6 spelling.
 	ErrFetchBlockedAddress = errors.New("fetch: destination address is not a public network address")
-	// ErrFetchCrossHostRedirect reports a redirect that leaves the
-	// validated host.
-	ErrFetchCrossHostRedirect = errors.New("fetch: refused cross-host redirect")
 	// ErrFetchTooManyRedirects reports exceeding the redirect budget.
 	ErrFetchTooManyRedirects = errors.New("fetch: redirect limit exceeded")
 	// ErrFetchBodyTooLarge reports a response whose decompressed bytes
@@ -172,13 +169,11 @@ func newReviewerFetcher(cfg reviewFetchConfig) *reviewerFetcher {
 			if len(via) > limits.MaxRedirects {
 				return ErrFetchTooManyRedirects
 			}
-			if _, err := f.validateURL(req.URL.String()); err != nil {
-				return err
-			}
-			if !sameFetchHost(req.URL, via[0].URL) {
-				return ErrFetchCrossHostRedirect
-			}
-			return nil
+			// Every hop is validated as a fresh URL and dialed only at a
+			// validated public address, so a redirect to another public host
+			// (such as a release download CDN) is followed like any URL.
+			_, err := f.validateURL(req.URL.String())
+			return err
 		},
 		Transport: &http.Transport{
 			// Proxy nil: the fetch never reads HTTP_PROXY/HTTPS_PROXY/
@@ -304,27 +299,6 @@ func (f *reviewerFetcher) fetch(ctx context.Context, rawURL string) (FetchResult
 		Status:   resp.StatusCode,
 		Content:  string(data),
 	}, nil
-}
-
-// sameFetchHost reports whether two URLs share the scheme and host (hostname
-// and effective port). Hostname/Port are the stdlib canonical forms, so
-// bracketed IPv6, percent-decoded hosts, and explicit-default-port spellings
-// compare correctly.
-func sameFetchHost(a, b *url.URL) bool {
-	if !strings.EqualFold(a.Scheme, b.Scheme) {
-		return false
-	}
-	if a.Hostname() != b.Hostname() {
-		return false
-	}
-	portA, portB := a.Port(), b.Port()
-	if portA == "" {
-		portA = defaultPortForScheme(a.Scheme)
-	}
-	if portB == "" {
-		portB = defaultPortForScheme(b.Scheme)
-	}
-	return portA == portB
 }
 
 // defaultPortForScheme maps http/https to their canonical ports; anything
@@ -571,8 +545,6 @@ func (f *reviewerFetcher) classifyRequestError(err error) error {
 		return ErrFetchTooManyRedirects
 	case errors.Is(err, ErrFetchBlockedAddress):
 		return ErrFetchBlockedAddress
-	case errors.Is(err, ErrFetchCrossHostRedirect):
-		return ErrFetchCrossHostRedirect
 	case errors.Is(err, ErrFetchInvalidURL):
 		return ErrFetchInvalidURL
 	case errors.Is(err, ErrFetchBodyTooLarge):
