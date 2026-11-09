@@ -290,7 +290,7 @@ func TestUpgradeCLIReceiptOutcomesAndMissingReceipt(t *testing.T) {
 			if code != tc.want || (tc.state != "" && (!strings.Contains(stderr.String(), "fixture recovery detail") || !strings.Contains(stderr.String(), "/var/backups/askdo/"+cliUpgradeID))) {
 				t.Fatalf("outcome %s code=%d stdout=%s stderr=%s", tc.state, code, &stdout, &stderr)
 			}
-			if tc.state != "failed" && !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+			if tc.state != "failed" && !strings.Contains(stderr.String(), "askdo-config upgrade --operation "+cliUpgradeID) {
 				t.Fatalf("missing resume guidance: %s", &stderr)
 			}
 		})
@@ -368,7 +368,7 @@ func TestUpgradeCLIContextCancellationHasResumeGuidance(t *testing.T) {
 	// When
 	code := runUpgradeWith(ctx, []string{"--operation", cliUpgradeID}, deps, &stdout, &stderr)
 	// Then
-	if code != 125 || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+	if code != 125 || !strings.Contains(stderr.String(), "askdo-config upgrade --operation "+cliUpgradeID) {
 		t.Fatalf("cancel code=%d stderr=%s", code, &stderr)
 	}
 }
@@ -424,7 +424,7 @@ func TestUpgradeCLIOperationWatchIsBounded(t *testing.T) {
 		code := runUpgradeWith(t.Context(), []string{"--operation", cliUpgradeID}, upgradeCLIOptions{receiptRoot: root}, &stdout, &stderr)
 		// Then: no real seventeen-minute wait or background watcher remains. The
 		// watch outlasts the deadline by a full rollback and two minutes.
-		if code != 125 || time.Since(started) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+		if code != 125 || time.Since(started) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo-config upgrade --operation "+cliUpgradeID) {
 			t.Fatalf("watch code=%d elapsed=%s stderr=%s", code, time.Since(started), &stderr)
 		}
 	})
@@ -450,8 +450,11 @@ func TestUpgradeRoutesAndPublicHelp(t *testing.T) {
 	}
 	var help bytes.Buffer
 	writeTopHelp(&help)
-	if !strings.Contains(help.String(), "askdo upgrade") || strings.Contains(help.String(), "upgrade-helper") {
-		t.Fatalf("public help: %s", &help)
+	var configHelp bytes.Buffer
+	writeConfigHelp(&configHelp)
+	if strings.Contains(help.String(), "askdo upgrade") || strings.Contains(help.String(), "upgrade-helper") ||
+		!strings.Contains(configHelp.String(), "askdo-config upgrade [--release TAG]") || !strings.Contains(configHelp.String(), "askdo-config upgrade-fleet") || strings.Contains(configHelp.String(), "upgrade-helper") {
+		t.Fatalf("public help: %s\nconfig help: %s", &help, &configHelp)
 	}
 }
 
@@ -492,7 +495,7 @@ func TestUpgradeCLISlowApprovalPrecedesObservationDeadline(t *testing.T) {
 		// When: activation itself remains scheduled and never reaches a terminal receipt.
 		code := runUpgradeWith(t.Context(), nil, deps, &stdout, &stderr)
 		// Then: pre-dispatch workflow completes; a NEW bounded watch starts afterward.
-		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo upgrade --operation "+cliUpgradeID) {
+		if !clientFinished || code != 125 || scheduledAt.IsZero() || time.Since(scheduledAt) != upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute || !strings.Contains(stderr.String(), "askdo-config upgrade --operation "+cliUpgradeID) {
 			t.Fatalf("slow approval: client=%v code=%d observation=%s stderr=%s", clientFinished, code, time.Since(scheduledAt), &stderr)
 		}
 	})

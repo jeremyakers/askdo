@@ -311,21 +311,24 @@ working; creating a new enrollment does not revoke the old credential.
 
 ## Upgrading the fleet
 
-Instead of running `askdo upgrade` on every host, name the release once on the
+Instead of running `askdo-config upgrade` on every host, name the release once on the
 gateway host:
 
 ```sh
-askdo-config gateway upgrade-target v1.0.1
+askdo-config upgrade-fleet            # newest stable; or: askdo-config upgrade-fleet v1.0.1
 ```
 
 It asks for the usual Telegram approval (one, for the whole rollout), stores the
 release and the digest of its install manifest in the gateway database (no
 restart), and each enrolled host then upgrades itself, one at a time, with the
-same staged activation and automatic rollback as `askdo upgrade`. A failure pauses
+same staged activation and automatic rollback as `askdo-config upgrade`. A failure pauses
 the rollout; you get a Telegram notice for every host's result; run the command
-again with the tag to resume. `askdo-config gateway upgrade-target` alone shows
-where the rollout stands, and `askdo-config gateway hosts list` shows each host's
-release and last upgrade result (`name`, `release`, `auto_upgrade`, `upgrade`,
+again to resume. `askdo-config upgrade-fleet --status` shows each host's release,
+last upgrade result and rollout state (`--stop` stops offering; disabled or opted-out
+hosts show `rollout=excluded`). The gateway host takes the push only if it is
+enrolled with this gateway; if not, the command tells you to run
+`askdo-config upgrade` on it. `askdo-config gateway hosts list` shows the
+raw columns (`name`, `release`, `auto_upgrade`, `upgrade`,
 `seen`). A host opts out with `"fleet_upgrade": {"auto": false}` in its own
 configuration. Hosts and gateway must first be upgraded by hand to the first
 release that contains this feature. The full behavior and the trust boundary are in

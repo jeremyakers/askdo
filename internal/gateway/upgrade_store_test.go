@@ -251,6 +251,35 @@ func TestOnlyOneHostHoldsTheOfferAtATime(t *testing.T) {
 	}
 }
 
+func TestSettingTheSameRunningTargetAgainKeepsTheHolder(t *testing.T) {
+	s := upgradeFixture(t)
+	ctx := context.Background()
+	setTarget(t, s, "v1.0.1")
+	reportAs(t, s, "host_b", upgradeT0, hostReport("v1.0.0", true, nil))
+	if offerTo(t, s, "host_b", upgradeT0) == nil {
+		t.Fatal("host_b was not given the offer")
+	}
+	before, _, _ := s.Target(ctx)
+	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _ := s.Target(ctx)
+	if after.LeaseHost != "host_b" || !after.LeaseExpires.Equal(before.LeaseExpires) {
+		t.Fatalf("lease changed: before %+v after %+v", before, after)
+	}
+	reportAs(t, s, "host_c", upgradeT0.Add(2*time.Minute), hostReport("v1.0.0", true, nil))
+	if offer := offerTo(t, s, "host_c", upgradeT0.Add(2*time.Minute)); offer != nil {
+		t.Fatalf("a second host was offered the target beside the holder: %+v", offer)
+	}
+	// A different digest is a different target and starts afresh.
+	if _, err := s.SetTarget(ctx, "v1.0.1", strings.Repeat("ab", 32), upgradeT0.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if after, _, _ = s.Target(ctx); after.LeaseHost != "" {
+		t.Fatalf("a changed digest kept the lease: %+v", after)
+	}
+}
+
 func TestHostsReportingAtOnceNeverBothTakeTheOffer(t *testing.T) {
 	s := upgradeFixture(t)
 	setTarget(t, s, "v1.0.1")
@@ -584,5 +613,22 @@ func TestNoticeDeliveryIsBookkeptPerChatAndGivenUpOnEventually(t *testing.T) {
 	}
 	if pending, _ := s.PendingNotices(ctx); len(pending) != 0 {
 		t.Fatalf("a dropped notice is still pending: %+v", pending)
+	}
+}
+
+func TestSettingTheSameTargetAgainClearsAnExpiredLease(t *testing.T) {
+	s := upgradeFixture(t)
+	ctx := context.Background()
+	setTarget(t, s, "v1.0.1")
+	reportAs(t, s, "host_b", upgradeT0, hostReport("v1.0.0", true, nil))
+	if offerTo(t, s, "host_b", upgradeT0) == nil {
+		t.Fatal("host_b was not given the offer")
+	}
+	held, _, _ := s.Target(ctx)
+	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, held.LeaseExpires.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if after, _, _ := s.Target(ctx); after.LeaseHost != "" {
+		t.Fatalf("an expired lease survived a rerun: %+v", after)
 	}
 }

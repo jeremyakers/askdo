@@ -192,8 +192,9 @@ informational notice before the host commits automatic dispatch.
 
 ## Gateway-pushed upgrades
 
-The operator names one release for the fleet to run with `askdo-config gateway
-upgrade-target TAG`, on the gateway host, through that host's usual Telegram
+The operator names one release for the fleet to run with `askdo-config
+upgrade-fleet [TAG]` (the underlying form is `askdo-config gateway
+upgrade-target TAG`), on the gateway host, through that host's usual Telegram
 approval: one approval, not one per host (the operator guide is [upgrading a
 fleet](upgrade.md#upgrade-a-fleet-from-the-gateway)). The gateway resolves the
 release's `install-manifest.v1` from the official `jeremyakers/askdo` repository

@@ -83,7 +83,10 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 		// The upgrade bootstrap runs the verified binary through a pinned
 		// descriptor as `upgrade-helper`; that internal step is not an
 		// operator command and must not warn about itself.
-		args[0] != "upgrade-helper" {
+		args[0] != "upgrade-helper" &&
+		// upgrade-fleet exists only under askdo-config; bare `askdo upgrade-fleet`
+		// is an ordinary program name.
+		args[0] != "upgrade-fleet" {
 		fmt.Fprintf(os.Stderr, "askdo: '%s' moved to askdo-config; this form will be removed in a future release\n", args[0])
 	}
 	switch args[0] {

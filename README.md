@@ -301,13 +301,16 @@ launch, use `status` and `attach` rather than submitting the command again.
 ## Upgrade askdo
 
 ```sh
-askdo upgrade
+askdo-config upgrade
 ```
 
-It downloads and verifies a release, asks for Telegram approval, then activates
+(`askdo upgrade` still works but is deprecated and prints a notice; a bare
+`askdo` subcommand would hide any program of the same name.) It downloads and verifies a release, asks for Telegram approval, then activates
 and verifies it, rolling back to the previous release if activation fails. No
 sudo password is needed. See [upgrading and recovery](docs/upgrade.md) for exact
-releases, reconnecting after a restart, rollback and backup handling. With a fleet
+releases, reconnecting after a restart, rollback and backup handling. With a fleet,
+run `askdo-config upgrade-fleet` on the gateway host to roll a release out to
+every host on one approval. With a fleet
 gateway you can name a release once and have every host upgrade itself, one at a
 time: [upgrade a fleet from the gateway](docs/upgrade.md#upgrade-a-fleet-from-the-gateway).
 
