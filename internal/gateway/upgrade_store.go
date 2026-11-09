@@ -124,6 +124,27 @@ func NewUpgradeStore(e *EnrollmentStore) (*UpgradeStore, error) {
 
 func (s *UpgradeStore) db() *sql.DB { return s.enrollment.db }
 
+// beginWrite starts a transaction that holds the database's write lock from its
+// first statement. The serving gateway and `askdo-config gateway upgrade-target`
+// are two connections to one file, and a transaction that reads before it writes
+// cannot be told to wait: if the other connection writes in between, SQLite fails
+// its first write at once with SQLITE_BUSY whatever the busy timeout, because two
+// such transactions waiting for each other would deadlock. One that takes the
+// write lock first waits for the other writer instead. This is how the CLI's own
+// writes already begin (revoking a host starts with its UPDATE). The statement
+// matches no row and changes nothing; it only takes the lock.
+func (s *UpgradeStore) beginWrite(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE gateway_upgrade_target SET id=id WHERE 0"); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -165,7 +186,7 @@ func (s *UpgradeStore) SetTarget(ctx context.Context, release, manifestSHA256 st
 	if _, err := fleetproto.ParseHash(manifestSHA256); err != nil {
 		return nil, errors.New("manifest digest must be 64 lowercase hex digits")
 	}
-	tx, err := s.db().BeginTx(ctx, nil)
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +283,7 @@ func hostLabel(hostname, hostID string) string {
 // mistaken for its outcome.
 func (s *UpgradeStore) Record(ctx context.Context, hostID string, report fleetproto.HostStatus, now time.Time) error {
 	report = report.Cleaned()
-	tx, err := s.db().BeginTx(ctx, nil)
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return err
 	}
@@ -397,13 +418,21 @@ func pauseExpiredLease(ctx context.Context, tx *sql.Tx, target UpgradeTarget) (s
 // longer than UpgradeLeaseTTL without reporting. The gateway calls it when it is
 // due, so the pause and its notice do not wait for another host to report.
 func (s *UpgradeStore) ExpireLease(ctx context.Context, now time.Time) (bool, error) {
-	tx, err := s.db().BeginTx(ctx, nil)
+	due := func(t UpgradeTarget, ok bool) bool {
+		return ok && t.PausedReason == "" && t.LeaseHost != "" && !t.LeaseExpires.After(now)
+	}
+	// Almost always nothing is due, and finding that out needs no write lock.
+	target, ok, err := readTarget(ctx, s.db())
+	if err != nil || !due(target, ok) {
+		return false, err
+	}
+	tx, err := s.beginWrite(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	target, hasTarget, err := readTarget(ctx, tx)
-	if err != nil || !hasTarget || target.PausedReason != "" || target.LeaseHost == "" || target.LeaseExpires.After(now) {
+	// The rollout may have moved while this waited for the write lock.
+	if target, ok, err = readTarget(ctx, tx); err != nil || !due(target, ok) {
 		return false, err
 	}
 	if _, err = pauseExpiredLease(ctx, tx, target); err != nil {
