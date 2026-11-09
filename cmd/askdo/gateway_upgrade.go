@@ -32,6 +32,7 @@ const gatewayUpgradeTargetUsage = "usage: askdo-config gateway upgrade-target [T
 func gatewayUpgradeTarget(args []string, out io.Writer) (err error) {
 	f := gatewayFlags("upgrade-target")
 	path := f.String("config", defaultGatewayConfig, "gateway configuration")
+	hostPath := f.String("host-config", defaultConfigPath, "this host's configuration")
 	clear := f.Bool("clear", false, "stop offering any release (hosts already upgrading finish)")
 	pos, e := parseGateway(f, args, out)
 	if e != nil {
@@ -63,27 +64,38 @@ func gatewayUpgradeTarget(args []string, out io.Writer) (err error) {
 		fmt.Fprintln(out, "fleet upgrade target cleared; hosts that are already upgrading finish")
 		return nil
 	case len(pos) == 1:
-		return setGatewayUpgradeTarget(ctx, upgrades, pos[0], out)
+		return setGatewayUpgradeTarget(ctx, store, upgrades, pos[0], *hostPath, out)
 	}
 	return showGatewayUpgradeTarget(ctx, upgrades, out)
 }
 
-func setGatewayUpgradeTarget(ctx context.Context, upgrades *gateway.UpgradeStore, tag string, out io.Writer) error {
+func setGatewayUpgradeTarget(ctx context.Context, store fleetHosts, upgrades *gateway.UpgradeStore, tag, hostConfig string, out io.Writer) error {
 	manifest, err := gatewayManifest(ctx, tag)
 	if err != nil {
 		return fmt.Errorf("resolve release %s from the official repository: %w", tag, err)
 	}
+	hostID, _, lookupErr := gatewayHostEnrolledID(ctx, store, hostConfig)
 	now := time.Now()
-	previous, err := upgrades.SetTarget(ctx, manifest.Tag, manifest.Digest, now)
+	previous, err := upgrades.SetTarget(ctx, manifest.Tag, manifest.Digest, now, hostID)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "fleet upgrade target: %s\nsource commit: %s\nmanifest SHA-256: %s\n", manifest.Tag, manifest.SourceCommit, manifest.Digest)
-	fmt.Fprintln(out, "Hosts that apply pushed upgrades take it one at a time, in the order they report that they are ready; the next after the last reports success. A failed upgrade pauses the rollout and you are told on Telegram; run this command again to resume.")
+	if hostID != "" {
+		fmt.Fprintln(out, "Upgrading this host first, then the rest of the fleet one at a time. A failed upgrade pauses the rollout and you are told on Telegram; run this command again to resume.")
+	} else {
+		fmt.Fprintln(out, "Hosts that apply pushed upgrades take it one at a time, in the order they report that they are ready; the next after the last reports success. A failed upgrade pauses the rollout and you are told on Telegram; run this command again to resume.")
+	}
+	if lookupErr != nil {
+		fmt.Fprintf(out, "warning: could not check whether this host is enrolled with this gateway (%v)\n", lookupErr)
+	}
 	// A rerun of the running target keeps its lease, so only a replaced
 	// target can leave its previous holder upgrading beside the next host.
 	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) && (previous.Release != manifest.Tag || previous.ManifestSHA256 != manifest.Digest) {
 		fmt.Fprintf(out, "warning: %s was being offered %s until %s and may still be upgrading; its upgrade is not stopped, and the next host may start before it finishes\n", previous.LeaseHost, previous.Release, previous.LeaseExpires.Local().Format(time.RFC3339))
+	}
+	if hostID != "" {
+		promptFleetUpgrade(out)
 	}
 	return nil
 }

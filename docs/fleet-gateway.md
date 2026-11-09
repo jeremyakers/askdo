@@ -224,9 +224,11 @@ It is omitted when there is no offer, so such a catalog is byte for byte what a
 gateway without the member signs. Its members are optional on the wire as well: an
 offer a host cannot act on is ignored and is never a reason to refuse the catalog,
 and with it every review. The gateway sends it **only to the host it has assigned
-the offer to, which it does only on the report of a host that says it is ready for
-one**, so a host built before the member existed, which never reports, never
-receives it and keeps working unchanged. The catalog is read by more than the
+the offer to**. Setting a target can designate the covered gateway host's initial
+lease; later turns are assigned only on the report of a host that says it is ready
+for one. A host built before the member existed never reports and therefore never
+receives an ordinary reporting-order offer; upgrade a gateway host by hand before
+using the gateway-first command on it. The catalog is read by more than the
 upgrade agent (the broker reads it for every job it reviews, and the activation's
 post-upgrade probe reads it too), so reading it never assigns the offer. Hosts built with
 unknown-field tolerance (see [unknown fields on the
@@ -254,21 +256,27 @@ printable ASCII before it is kept or shown, and the answer, `{"version":1}`, car
 nothing a host acts on and is not signed. A gateway from before the endpoint
 answers with an ordinary failure, which the host ignores until its next report.
 
-**Rollout.** The offer goes to one host at a time, and a host takes its turn by
-reporting: the first ready host that runs an older release than the target is
-assigned the offer (a compare-and-set in the database, so concurrent reports assign
-exactly one). It stays with that host until the host reports how its upgrade ended,
-that it runs the target with nothing running (it was upgraded by hand), or that it
-has opted out. A host whose new release is up but whose upgrade is still being
-verified keeps it, because that verdict can still be a rollback. A result for the
-target that is a failure, a rollback, unknown or a refusal pauses the rollout for
-every host; so does a holder that reports no outcome within an hour. A result counts
-only when it differs from the one the gateway last saw from that host, so receipts
-left from before the target was set, or carried in a host's first report, are never
-mistaken for its outcome. Setting the target again starts afresh. The state lives in
-four tables created beside the enrollments with `IF NOT EXISTS`; the database
-version is unchanged, so a gateway from before them opens the same file and ignores
-them.
+**Rollout.** The offer goes to one host at a time. When the gateway host's own
+broker is enrolled and applies pushed upgrades, either target-setting command
+assigns that host the initial lease immediately, with the normal one-hour expiry,
+and sends it a local `SIGCONT`. The upgrade agent listens for that signal and cuts
+short its startup or polling sleep, so the gateway host reports and reads its offer
+immediately. Other hosts receive no offer until the gateway host's turn ends. If
+the gateway host is not covered, the initial order is unchanged: the first ready
+host that reports an older release takes the offer. Every later turn also goes to
+the first ready older host to report (a compare-and-set in the database, so
+concurrent reports assign exactly one). The offer stays with its host until the
+host reports how its upgrade ended, that it runs the target with nothing running
+(it was upgraded by hand), or that it has opted out. A host whose new release is up
+but whose upgrade is still being verified keeps it, because that verdict can still
+be a rollback. A result for the target that is a failure, a rollback, unknown or a
+refusal pauses the rollout for every host; so does a holder that reports no outcome
+within an hour. A result counts only when it differs from the one the gateway last
+saw from that host, so receipts left from before the target was set, or carried in
+a host's first report, are never mistaken for its outcome. Setting the target again
+starts afresh. The state lives in four tables created beside the enrollments with
+`IF NOT EXISTS`; the database version is unchanged, so a gateway from before them
+opens the same file and ignores them.
 
 **Notices.** Each concluded result is sent to the recipients of the reporting
 host's default channel as an informational Telegram message with no buttons: no

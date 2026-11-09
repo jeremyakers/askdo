@@ -16,13 +16,14 @@ import (
 )
 
 type fakeFleet struct {
-	hosts    []gateway.Enrollment
-	target   *gateway.UpgradeTarget
-	statuses map[string]gateway.HostUpgrade
-	previous *gateway.UpgradeTarget
-	setTags  []string
-	cleared  int
-	listErr  error
+	hosts      []gateway.Enrollment
+	target     *gateway.UpgradeTarget
+	statuses   map[string]gateway.HostUpgrade
+	previous   *gateway.UpgradeTarget
+	setTags    []string
+	firstHosts []string
+	cleared    int
+	listErr    error
 }
 
 func (f *fakeFleet) List(context.Context) ([]gateway.Enrollment, error) { return f.hosts, f.listErr }
@@ -32,9 +33,10 @@ func (f *fakeFleet) Target(context.Context) (gateway.UpgradeTarget, bool, error)
 	}
 	return *f.target, true, nil
 }
-func (f *fakeFleet) SetTarget(_ context.Context, release, digest string, now time.Time) (*gateway.UpgradeTarget, error) {
+func (f *fakeFleet) SetTarget(_ context.Context, release, digest string, now time.Time, firstHost string) (*gateway.UpgradeTarget, error) {
 	f.setTags = append(f.setTags, release)
-	f.target = &gateway.UpgradeTarget{Release: release, ManifestSHA256: digest, SetAt: now}
+	f.firstHosts = append(f.firstHosts, firstHost)
+	f.target = &gateway.UpgradeTarget{Release: release, ManifestSHA256: digest, SetAt: now, LeaseHost: firstHost}
 	return f.previous, nil
 }
 func (f *fakeFleet) ClearTarget(context.Context) error { f.target = nil; f.cleared++; return nil }
@@ -48,6 +50,8 @@ type fleetHarness struct {
 	hostCfg   *config.Config
 	hostErr   error
 	asked     *[]string
+	nudges    int
+	nudgeErr  error
 }
 
 // newFleetHarness replaces every seam upgrade-fleet reaches outside the database.
@@ -55,11 +59,12 @@ func newFleetHarness(t *testing.T) *fleetHarness {
 	t.Helper()
 	h := &fleetHarness{newest: "v1.2.0"}
 	h.asked = fakeGatewayManifest(t, nil)
-	oldNewest, oldLoad := fleetNewestRelease, loadHostConfig
+	oldNewest, oldLoad, oldWake := fleetNewestRelease, loadHostConfig, wakeFleetUpgradeAgent
 	fleetNewestRelease = func(context.Context) (string, error) { return h.newest, h.newestErr }
 	loadHostConfig = func(string) (*config.Config, error) { return h.hostCfg, h.hostErr }
+	wakeFleetUpgradeAgent = func() error { h.nudges++; return h.nudgeErr }
 	t.Cleanup(func() {
-		fleetNewestRelease, loadHostConfig = oldNewest, oldLoad
+		fleetNewestRelease, loadHostConfig, wakeFleetUpgradeAgent = oldNewest, oldLoad, oldWake
 	})
 	return h
 }
@@ -86,6 +91,9 @@ func TestUpgradeFleetDefaultsToNewestStableAndTellsAnUncoveredGatewayHost(t *tes
 	if !reflect.DeepEqual(f.setTags, []string{"v1.2.0"}) || !reflect.DeepEqual(*h.asked, []string{"v1.2.0"}) {
 		t.Fatalf("target %v, manifests asked %v", f.setTags, *h.asked)
 	}
+	if !reflect.DeepEqual(f.firstHosts, []string{""}) || h.nudges != 0 {
+		t.Fatalf("first hosts %v, nudges %d; an uncovered gateway host must not go first", f.firstHosts, h.nudges)
+	}
 	for _, s := range []string{"Upgrading the fleet to v1.2.0", "run `askdo-config upgrade` on this host"} {
 		if !strings.Contains(out, s) {
 			t.Errorf("output lacks %q:\n%s", s, out)
@@ -106,7 +114,7 @@ func TestUpgradeFleetExplicitVersionSkipsResolution(t *testing.T) {
 	}
 }
 
-func TestUpgradeFleetEnrolledGatewayHostIsCoveredByThePush(t *testing.T) {
+func TestUpgradeFleetEnrolledGatewayHostGoesFirstAndIsPrompted(t *testing.T) {
 	h := newFleetHarness(t)
 	h.hostCfg = gwHostConfig("host_gw")
 	f := &fakeFleet{hosts: []gateway.Enrollment{{HostID: "host_other", Enabled: true}, {HostID: "host_gw", Enabled: true}}}
@@ -114,7 +122,10 @@ func TestUpgradeFleetEnrolledGatewayHostIsCoveredByThePush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "takes the upgrade in its turn") || strings.Contains(out, "askdo-config upgrade`") {
+	if !reflect.DeepEqual(f.firstHosts, []string{"host_gw"}) || h.nudges != 1 {
+		t.Fatalf("first hosts %v, nudges %d; want host_gw and one prompt", f.firstHosts, h.nudges)
+	}
+	if !strings.Contains(out, "Upgrading this host first, then the rest of the fleet one at a time.") || strings.Contains(out, "askdo-config upgrade`") {
 		t.Fatalf("out=%s", out)
 	}
 }

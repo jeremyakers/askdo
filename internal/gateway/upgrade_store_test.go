@@ -62,7 +62,7 @@ func offerTo(t *testing.T, s *UpgradeStore, host string, at time.Time) *fleetpro
 
 func setTarget(t *testing.T, s *UpgradeStore, release string) {
 	t.Helper()
-	if _, err := s.SetTarget(context.Background(), release, upgradeDigest, upgradeT0); err != nil {
+	if _, err := s.SetTarget(context.Background(), release, upgradeDigest, upgradeT0, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -110,14 +110,14 @@ func TestSetTargetRefusesWhatNoHostCouldActOn(t *testing.T) {
 		{"snapshot-fixture", upgradeDigest}, {"v1.0", upgradeDigest},
 		{"v1.0.1", ""}, {"v1.0.1", "abc"}, {"v1.0.1", strings.ToUpper(upgradeDigest)}, {"v1.0.1", upgradeDigest + "00"},
 	} {
-		if _, err := s.SetTarget(context.Background(), tc.release, tc.digest, upgradeT0); err == nil {
+		if _, err := s.SetTarget(context.Background(), tc.release, tc.digest, upgradeT0, ""); err == nil {
 			t.Errorf("SetTarget(%q, %q) accepted", tc.release, tc.digest)
 		}
 	}
 	if _, ok, err := s.Target(context.Background()); err != nil || ok {
 		t.Fatalf("a refused target was stored: %v %v", ok, err)
 	}
-	if _, err := s.SetTarget(context.Background(), "v1.0.1", upgradeDigest, upgradeT0); err != nil {
+	if _, err := s.SetTarget(context.Background(), "v1.0.1", upgradeDigest, upgradeT0, ""); err != nil {
 		t.Fatal(err)
 	}
 	target, ok, err := s.Target(context.Background())
@@ -251,6 +251,48 @@ func TestOnlyOneHostHoldsTheOfferAtATime(t *testing.T) {
 	}
 }
 
+func TestSetTargetAssignsTheFirstHostBeforeAnyoneReports(t *testing.T) {
+	t.Run("success releases the next host", func(t *testing.T) {
+		s := upgradeFixture(t)
+		if _, err := s.SetTarget(context.Background(), "v1.0.1", upgradeDigest, upgradeT0, "host_gw"); err != nil {
+			t.Fatal(err)
+		}
+		target := currentTarget(t, s)
+		if target.LeaseHost != "host_gw" || !target.LeaseExpires.Equal(upgradeT0.Add(UpgradeLeaseTTL)) {
+			t.Fatalf("first-host lease = %+v", target)
+		}
+		if offerTo(t, s, "host_gw", upgradeT0) == nil {
+			t.Fatal("the designated first host has no offer")
+		}
+		reportAs(t, s, "host_other", upgradeT0.Add(time.Minute), hostReport("v1.0.0", true, nil))
+		if offer := offerTo(t, s, "host_other", upgradeT0.Add(time.Minute)); offer != nil {
+			t.Fatalf("another ready host took the first host's offer: %+v", offer)
+		}
+		reportAs(t, s, "host_gw", upgradeT0.Add(2*time.Minute), hostReport("v1.0.0", true, nil))
+		reportAs(t, s, "host_gw", upgradeT0.Add(3*time.Minute), hostReport("v1.0.0", true, result("up_1", "v1.0.1", "activating", "", 10)))
+		reportAs(t, s, "host_gw", upgradeT0.Add(4*time.Minute), hostReport("v1.0.1", true, result("up_1", "v1.0.1", "succeeded", "", 20)))
+		reportAs(t, s, "host_other", upgradeT0.Add(5*time.Minute), hostReport("v1.0.0", true, nil))
+		if offerTo(t, s, "host_other", upgradeT0.Add(5*time.Minute)) == nil {
+			t.Fatal("the next ready host did not take the offer after the first succeeded")
+		}
+	})
+
+	t.Run("failure still pauses the rollout", func(t *testing.T) {
+		s := upgradeFixture(t)
+		if _, err := s.SetTarget(context.Background(), "v1.0.1", upgradeDigest, upgradeT0, "host_gw"); err != nil {
+			t.Fatal(err)
+		}
+		reportAs(t, s, "host_gw", upgradeT0, hostReport("v1.0.0", true, nil))
+		reportAs(t, s, "host_gw", upgradeT0.Add(time.Minute), hostReport("v1.0.0", true, result("up_1", "v1.0.1", "activating", "", 10)))
+		reportAs(t, s, "host_gw", upgradeT0.Add(2*time.Minute), hostReport("v1.0.0", true, result("up_1", "v1.0.1", "failed", "rolled_back", 20)))
+		reportAs(t, s, "host_other", upgradeT0.Add(3*time.Minute), hostReport("v1.0.0", true, nil))
+		target := currentTarget(t, s)
+		if target.PausedReason == "" || offerTo(t, s, "host_other", upgradeT0.Add(3*time.Minute)) != nil {
+			t.Fatalf("a first-host failure did not pause the rollout: %+v", target)
+		}
+	})
+}
+
 func TestSettingTheSameRunningTargetAgainKeepsTheHolder(t *testing.T) {
 	s := upgradeFixture(t)
 	ctx := context.Background()
@@ -260,7 +302,7 @@ func TestSettingTheSameRunningTargetAgainKeepsTheHolder(t *testing.T) {
 		t.Fatal("host_b was not given the offer")
 	}
 	before, _, _ := s.Target(ctx)
-	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0.Add(time.Minute)); err != nil {
+	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0.Add(time.Minute), ""); err != nil {
 		t.Fatal(err)
 	}
 	after, _, _ := s.Target(ctx)
@@ -272,7 +314,7 @@ func TestSettingTheSameRunningTargetAgainKeepsTheHolder(t *testing.T) {
 		t.Fatalf("a second host was offered the target beside the holder: %+v", offer)
 	}
 	// A different digest is a different target and starts afresh.
-	if _, err := s.SetTarget(ctx, "v1.0.1", strings.Repeat("ab", 32), upgradeT0.Add(3*time.Minute)); err != nil {
+	if _, err := s.SetTarget(ctx, "v1.0.1", strings.Repeat("ab", 32), upgradeT0.Add(3*time.Minute), ""); err != nil {
 		t.Fatal(err)
 	}
 	if after, _, _ = s.Target(ctx); after.LeaseHost != "" {
@@ -386,7 +428,7 @@ func TestAFailedUpgradePausesTheRolloutForEveryHostAndSettingTheTargetAgainResum
 			}
 			// Resuming is setting the target again: the rollout starts afresh, and a
 			// ready host takes its turn when it next reports.
-			if previous, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0.Add(time.Hour)); err != nil || previous == nil || previous.PausedReason == "" {
+			if previous, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0.Add(time.Hour), ""); err != nil || previous == nil || previous.PausedReason == "" {
 				t.Fatalf("SetTarget returned %+v, %v", previous, err)
 			}
 			reportAs(t, s, "host_b", upgradeT0.Add(time.Hour), hostReport("v1.0.0", true, nil))
@@ -544,11 +586,11 @@ func TestAHostAtOrPastTheTargetHasNoTurnLeft(t *testing.T) {
 func TestSettingAnotherTargetReportsTheOfferItReplaced(t *testing.T) {
 	s := upgradeFixture(t)
 	ctx := context.Background()
-	if previous, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0); err != nil || previous != nil {
+	if previous, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, upgradeT0, ""); err != nil || previous != nil {
 		t.Fatalf("first target replaced %+v, %v", previous, err)
 	}
 	reportAs(t, s, "host_a", upgradeT0, hostReport("v1.0.0", true, nil))
-	previous, err := s.SetTarget(ctx, "v1.0.2", upgradeDigest, upgradeT0.Add(time.Minute))
+	previous, err := s.SetTarget(ctx, "v1.0.2", upgradeDigest, upgradeT0.Add(time.Minute), "")
 	if err != nil || previous == nil || previous.Release != "v1.0.1" || previous.LeaseHost != "host_a" {
 		t.Fatalf("replaced target = %+v, %v", previous, err)
 	}
@@ -625,7 +667,7 @@ func TestSettingTheSameTargetAgainClearsAnExpiredLease(t *testing.T) {
 		t.Fatal("host_b was not given the offer")
 	}
 	held, _, _ := s.Target(ctx)
-	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, held.LeaseExpires.Add(time.Minute)); err != nil {
+	if _, err := s.SetTarget(ctx, "v1.0.1", upgradeDigest, held.LeaseExpires.Add(time.Minute), ""); err != nil {
 		t.Fatal(err)
 	}
 	if after, _, _ := s.Target(ctx); after.LeaseHost != "" {

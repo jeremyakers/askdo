@@ -97,7 +97,7 @@ type fleetHosts interface {
 
 type fleetTargets interface {
 	Target(context.Context) (gateway.UpgradeTarget, bool, error)
-	SetTarget(ctx context.Context, release, manifestSHA256 string, now time.Time) (*gateway.UpgradeTarget, error)
+	SetTarget(ctx context.Context, release, manifestSHA256 string, now time.Time, firstHost string) (*gateway.UpgradeTarget, error)
 	ClearTarget(context.Context) error
 	Statuses(context.Context) (map[string]gateway.HostUpgrade, error)
 }
@@ -126,53 +126,58 @@ func upgradeFleetRun(ctx context.Context, store fleetHosts, upgrades fleetTarget
 		return fmt.Errorf("resolve release %s from the official repository: %w", tag, e)
 	}
 	// Informational only: a failed lookup never stops the target being set.
-	covered, reason, lookupErr := gatewayHostIsEnrolled(ctx, store, req.hostConfig)
+	hostID, reason, lookupErr := gatewayHostEnrolledID(ctx, store, req.hostConfig)
 	now := time.Now()
-	previous, e := upgrades.SetTarget(ctx, manifest.Tag, manifest.Digest, now)
+	previous, e := upgrades.SetTarget(ctx, manifest.Tag, manifest.Digest, now, hostID)
 	if e != nil {
 		return e
 	}
 	fmt.Fprintf(out, "Upgrading the fleet to %s (manifest SHA-256 %s)\n", manifest.Tag, manifest.Digest)
-	fmt.Fprintln(out, "Hosts take it one at a time; a failure pauses the rollout and is reported on Telegram. Watch: askdo-config upgrade-fleet --status")
+	if hostID != "" {
+		fmt.Fprintln(out, "Upgrading this host first, then the rest of the fleet one at a time.")
+	} else {
+		fmt.Fprintln(out, "Hosts take it one at a time; a failure pauses the rollout and is reported on Telegram. Watch: askdo-config upgrade-fleet --status")
+	}
 	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) && (previous.Release != manifest.Tag || previous.ManifestSHA256 != manifest.Digest) {
 		fmt.Fprintf(out, "warning: %s was being offered %s and may still be upgrading; its upgrade is not stopped\n", previous.LeaseHost, previous.Release)
 	}
 
 	if lookupErr != nil {
 		fmt.Fprintf(out, "warning: could not check whether this host is enrolled with this gateway (%v); run `askdo-config upgrade` here if it is not\n", lookupErr)
-	} else if covered {
-		fmt.Fprintln(out, "This host is enrolled with this gateway and takes the upgrade in its turn.")
-	} else {
+	} else if hostID == "" {
 		fmt.Fprintf(out, "This host %s, so the push will not upgrade it; run `askdo-config upgrade` on this host.\n", reason)
+	}
+	if hostID != "" {
+		promptFleetUpgrade(out)
 	}
 	return nil
 }
 
-// gatewayHostIsEnrolled says whether this host's own broker takes the gateway's
-// pushed upgrade: its configuration names a host ID that this gateway has enabled,
-// and it has not opted out of pushed upgrades. When it does not, reason says why.
-func gatewayHostIsEnrolled(ctx context.Context, store fleetHosts, hostConfig string) (bool, string, error) {
+// gatewayHostEnrolledID returns this host's ID when its own broker takes this
+// gateway's pushed upgrades: its configuration names a host ID that this gateway
+// has enabled, and it has not opted out. When it is not covered, reason says why.
+func gatewayHostEnrolledID(ctx context.Context, store fleetHosts, hostConfig string) (string, string, error) {
 	cfg, err := loadHostConfig(hostConfig)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return false, "has no fleet enrollment", nil
+		return "", "has no fleet enrollment", nil
 	case err != nil:
-		return false, "has no readable fleet enrollment", nil
+		return "", "has no readable fleet enrollment", nil
 	case cfg.Fleet == nil:
-		return false, "is not enrolled with a gateway", nil
+		return "", "is not enrolled with a gateway", nil
 	case !cfg.FleetUpgradeAuto():
-		return false, "does not apply pushed upgrades", nil
+		return "", "does not apply pushed upgrades", nil
 	}
 	hosts, err := store.List(ctx)
 	if err != nil {
-		return false, "", err
+		return "", "", err
 	}
 	for _, h := range hosts {
 		if h.HostID == cfg.Fleet.HostID && h.Enabled {
-			return true, "", nil
+			return h.HostID, "", nil
 		}
 	}
-	return false, "is not enrolled with this gateway", nil
+	return "", "is not enrolled with this gateway", nil
 }
 
 func upgradeFleetStatus(ctx context.Context, store fleetHosts, upgrades fleetTargets, out io.Writer) error {

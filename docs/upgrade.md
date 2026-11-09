@@ -240,11 +240,13 @@ askdo-config upgrade-fleet --status            # each host's release, last resul
 askdo-config upgrade-fleet --stop              # stop offering the release
 ```
 
-`upgrade-fleet` only sets the gateway's upgrade target (below). The gateway host
-takes the push like any other host if its own broker is enrolled with this gateway
-(its `/etc/askdo/config.json` names a host ID this gateway has enabled, and it has
-not opted out of pushed upgrades). If it is not, the command says so after setting
-the target, and you run `askdo-config upgrade` on this host yourself. While a
+`upgrade-fleet` sets the gateway's upgrade target (below); it does not contact
+other hosts directly. If the gateway host's own broker is enrolled with this gateway (its `/etc/askdo/config.json`
+names a host ID this gateway has enabled, and it has not opted out of pushed
+upgrades), that host takes the upgrade **first** and is prompted to check
+immediately; the rest of the fleet follows one at a time. If it is not covered,
+the first ready host to report goes first as before, the command says the gateway
+host is not covered, and you run `askdo-config upgrade` on this host yourself. While a
 rollout is paused, `--status` prints the exact `askdo-config upgrade-fleet TAG` that
 resumes it, and shows hosts that are disabled or opted out as `rollout=excluded`.
 The underlying admin form stays available:
@@ -267,9 +269,10 @@ cannot tell newer from older and never upgrades by push (`hosts list` shows
 you build from source reports a release only if you embed one:
 `go build -ldflags '-X github.com/jeremyakers/askdo/internal/version.Release=v1.0.1' ./cmd/askdo`.)
 
-Hosts from before this feature keep working unchanged against a gateway that has
-it. They never report, so the gateway never offers them anything and never sends
-them a catalog field they do not know. Upgrade those by hand.
+Hosts from before this feature never report, so they never receive an ordinary
+reporting-order offer. Upgrade those by hand. In particular, upgrade the gateway
+host itself before using a release with gateway-first targeting, since that command
+deliberately assigns its covered local host the initial lease.
 
 ### Setting the target
 
@@ -282,11 +285,14 @@ optional `-PRERELEASE`, such as `v1.0.1` or `v1.0.0-rc.35`.
 The command fetches that release's `install-manifest.v1` from the official
 `jeremyakers/askdo` repository, once, and stores the manifest's SHA-256 as the
 target in the gateway database. The gateway publishes the release and that digest
-in its signed catalog to the host whose turn it is. The target is not in the
-gateway configuration file, so setting it needs no gateway restart; it reaches the
-next catalog a host fetches. A tag the repository cannot resolve, or one hosts
-could not order against the releases they run, is refused and leaves the current
-target in place.
+in its signed catalog to the host whose turn it is. When the gateway host is
+covered, both `upgrade-fleet` and `gateway upgrade-target` assign its host ID the
+initial lease and send a local signal that wakes its broker's upgrade agent for an
+immediate report and catalog check; no other host can take the offer while that
+lease is held. The target is not in the gateway configuration file, so setting it
+needs no gateway restart; it reaches the next catalog a host fetches. A tag the
+repository cannot resolve, or one hosts could not order against the releases they
+run, is refused and leaves the current target in place.
 
 Setting the target also **starts the rollout afresh**: any pause is cleared, so
 running the command again with the same tag is how you resume after a failure.
@@ -298,7 +304,9 @@ About fifteen seconds after its broker starts, and then about every five minutes
 (a little spread, so hosts that started together do not report together; every
 thirty seconds while one of its own upgrades is running, so the result reaches the
 gateway soon after the receipt records it), an enrolled host reports to the
-gateway: the release it was built from, whether it applies pushed upgrades, whether
+gateway. Setting a target for a covered gateway host also wakes its local agent
+so this first report and check happen immediately instead of waiting for those
+timers. At each look the host reports: the release it was built from, whether it applies pushed upgrades, whether
 it is **ready** for one right now (it applies them and none is running on it), and
 its latest upgrade receipt, whoever started that upgrade. That report is how a host
 takes its turn ([below](#one-host-at-a-time-and-a-pause-on-failure)). If it applies
@@ -345,19 +353,20 @@ partition) and removed once the helper has staged its own copy under
 
 ### One host at a time, and a pause on failure
 
-The gateway offers the target to **one host at a time**, and a host takes its turn
-by **reporting**: the first host whose report says it is ready, and that runs an
-older release, is assigned the offer, and only that host's catalog carries it. The
-offer stays with that host until it reports how its upgrade ended (or that it now
-runs the target with nothing running, which is what a host upgraded by hand
+The gateway offers the target to **one host at a time**. When the gateway host is
+covered, setting either target command assigns the offer to that host first and
+wakes its agent immediately. Otherwise, and for every later turn, a host takes its
+turn by **reporting**: the first host whose report says it is ready, and that runs
+an older release, is assigned the offer. Only the assigned host's catalog carries
+it. The offer stays with that host until it reports how its upgrade ended (or that
+it now runs the target with nothing running, which is what a host upgraded by hand
 reports, or that it has opted out). A host whose new release is already up but
 whose upgrade is still being verified keeps the offer: that verdict can still be a
 rollback, and the next host must not start before it. Then the next ready host to
-report has its turn, which is at most a few minutes later. Within a rollout the
-order is therefore the order hosts happen to report in; to have a particular host
-go first (the gateway host, say), upgrade it by hand before setting the target. The
-gateway host is otherwise an ordinary host: its upgrade restarts the gateway, and
-other hosts' reports and catalog reads fail and are retried meanwhile.
+report has its turn, which is at most a few minutes later. After the gateway
+host's first turn, the remaining order is the order hosts happen to report in. The
+gateway host's upgrade restarts the gateway, and other hosts' reports and catalog
+reads fail and are retried meanwhile.
 
 Reading the catalog never assigns the offer. A host's broker reads it for every job
 it reviews, and the activation's own post-upgrade probe and `askdo-config gateway

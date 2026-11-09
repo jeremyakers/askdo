@@ -110,7 +110,7 @@ func TestBeginWriteTakesTheWriteLockBeforeAnyRead(t *testing.T) {
 func TestSetTargetWaitsForAnotherWriterInsteadOfFailingAtOnce(t *testing.T) {
 	server, cli := twoConnections(t)
 	opWaitsForTheWriter(t, server, func() error {
-		_, err := cli.SetTarget(context.Background(), "v1.0.1", upgradeDigest, upgradeT0)
+		_, err := cli.SetTarget(context.Background(), "v1.0.1", upgradeDigest, upgradeT0, "")
 		return err
 	})
 	if target := currentTarget(t, cli); target.Release != "v1.0.1" || target.ManifestSHA256 != upgradeDigest {

@@ -8,11 +8,11 @@ import "strings"
 // of that release's install manifest, and the host still downloads the release
 // from the official repository, checks that digest and never downgrades.
 //
-// The gateway sends the offer only to the host it has assigned it to, which it
-// does only for a host that reports it is ready for one (HostStatus.Ready), so a
-// host that does not know the field never receives it. Both fields are optional
-// on the wire: a catalog is read whole, and an offer a host cannot act on is
-// ignored, never a reason to refuse the catalog and with it every review.
+// The gateway sends the offer only to the host it has assigned it to. Later turns
+// are assigned only for a host that reports it is ready for one (HostStatus.Ready);
+// the operator can designate the gateway host's initial lease when setting a target.
+// Both fields are optional on the wire: a catalog is read whole, and an offer a host
+// cannot act on is ignored, never a reason to refuse the catalog and with it every review.
 type FleetUpgradeOffer struct {
 	Release        string `json:"release,omitempty"`
 	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
@@ -58,10 +58,11 @@ type UpgradeResult struct {
 // not a request: a field a newer host adds is ignored, as in every other report.
 // Every field but the version is optional, and an absent flag means no.
 //
-// The report is also how a host takes its turn. The catalog is read by much more
-// than the upgrade agent (every job review, the activation's own probe), so
-// reading it never assigns the offer; the gateway assigns it when a host whose
-// report says Ready reports, and only then shows it in that host's catalog.
+// The report is also how a host takes its turn after any operator-designated first
+// host. The catalog is read by much more than the upgrade agent (every job review,
+// the activation's own probe), so reading it never assigns the offer; the gateway
+// assigns later offers when a host whose report says Ready reports, and only then
+// shows the offer in that host's catalog.
 type HostStatus struct {
 	Version int `json:"version"`
 	// Hostname is display-only text for the operator, never an identity.

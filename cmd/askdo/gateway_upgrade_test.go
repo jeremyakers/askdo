@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/gateway"
 	"github.com/jeremyakers/askdo/internal/upgrade"
@@ -30,6 +31,14 @@ func fakeGatewayManifest(t *testing.T, fail error) *[]string {
 	}
 	t.Cleanup(func() { gatewayManifest = old })
 	return &asked
+}
+
+func stubGatewayUpgradeHost(t *testing.T, cfg *config.Config, wake func() error) {
+	t.Helper()
+	oldLoad, oldWake := loadHostConfig, wakeFleetUpgradeAgent
+	loadHostConfig = func(string) (*config.Config, error) { return cfg, nil }
+	wakeFleetUpgradeAgent = wake
+	t.Cleanup(func() { loadHostConfig, wakeFleetUpgradeAgent = oldLoad, oldWake })
 }
 
 func TestHostsListColumnsSayWhatEachHostReported(t *testing.T) {
@@ -80,6 +89,7 @@ func TestGatewayUpgradeTargetIsRootOnlyAndHasHelp(t *testing.T) {
 // database, which only a root fixture can own; they skip elsewhere.
 func TestGatewayRootUpgradeTargetLifecycle(t *testing.T) {
 	_, path := gatewayOperatorFixture(t)
+	stubGatewayUpgradeHost(t, &config.Config{}, func() error { t.Error("uncovered host was prompted"); return nil })
 	asked := fakeGatewayManifest(t, nil)
 	var out, stderr bytes.Buffer
 	call := func(args ...string) int {
@@ -139,8 +149,46 @@ func TestGatewayRootUpgradeTargetLifecycle(t *testing.T) {
 	}
 }
 
+func TestGatewayRootUpgradeTargetStartsTheCoveredGatewayHostFirst(t *testing.T) {
+	dir, path := gatewayOperatorFixture(t)
+	var out, stderr bytes.Buffer
+	if code := runGateway([]string{"hosts", "add", "--config", path, "--output", filepath.Join(dir, "host.json"), "--channel", "default", "--default-channel", "default"}, &out, &stderr); code != 0 {
+		t.Fatalf("add host: %s", stderr.String())
+	}
+	hostID := strings.Fields(out.String())[1]
+	nudges := 0
+	stubGatewayUpgradeHost(t, gwHostConfig(hostID), func() error { nudges++; return nil })
+	fakeGatewayManifest(t, nil)
+	out.Reset()
+	stderr.Reset()
+	if code := runGateway([]string{"upgrade-target", "v1.0.1", "--config", path}, &out, &stderr); code != 0 {
+		t.Fatalf("set target: %s", stderr.String())
+	}
+	if nudges != 1 || !strings.Contains(out.String(), "Upgrading this host first, then the rest of the fleet one at a time.") {
+		t.Fatalf("nudges=%d out=%s", nudges, out.String())
+	}
+	cfg, err := gateway.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := gateway.OpenEnrollmentStore(cfg.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	upgrades, err := gateway.NewUpgradeStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok, err := upgrades.Target(context.Background())
+	if err != nil || !ok || target.LeaseHost != hostID {
+		t.Fatalf("target = %+v, %v, %v; want first lease to %s", target, ok, err, hostID)
+	}
+}
+
 func TestGatewayRootUpgradeTargetShowsPausesAndWarnsAboutAnOfferInFlight(t *testing.T) {
 	_, path := gatewayOperatorFixture(t)
+	stubGatewayUpgradeHost(t, &config.Config{}, func() error { t.Error("uncovered host was prompted"); return nil })
 	fakeGatewayManifest(t, nil)
 	var out, stderr bytes.Buffer
 	call := func(args ...string) int {

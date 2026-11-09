@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -107,6 +108,7 @@ type fleetUpgradeAgent struct {
 	random io.Reader
 	now    func() time.Time
 	sleep  func(ctx context.Context, d time.Duration) bool
+	wake   <-chan os.Signal
 	log    *slog.Logger
 
 	// State between looks; only run's goroutine touches it.
@@ -169,12 +171,16 @@ func startFleetUpgrade(configPath string) (stop func()) {
 // waiting a few seconds at most for a look in progress.
 func (a *fleetUpgradeAgent) start() (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGCONT)
+	a.wake = signals
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		a.run(ctx)
 	}()
 	return func() {
+		signal.Stop(signals)
 		cancel()
 		select {
 		case <-done:
@@ -188,14 +194,37 @@ func (a *fleetUpgradeAgent) start() (stop func()) {
 // look tries again.
 func (a *fleetUpgradeAgent) run(ctx context.Context) {
 	a.clearStaleWork()
-	if !a.sleep(ctx, fleetUpgradeStartDelay) {
+	if !a.wait(ctx, fleetUpgradeStartDelay) {
 		return
 	}
 	for {
 		a.look(ctx)
-		if !a.sleep(ctx, a.interval()) {
+		if !a.wait(ctx, a.interval()) {
 			return
 		}
+	}
+}
+
+// wait lets the operator's local nudge cut short either the startup delay or the
+// regular polling interval. The existing sleep still owns the timer and, most
+// importantly, observes the same cancellation when the broker stops the agent.
+func (a *fleetUpgradeAgent) wait(ctx context.Context, d time.Duration) bool {
+	if a.wake == nil {
+		return a.sleep(ctx, d)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	slept := make(chan bool, 1)
+	go func() { slept <- a.sleep(ctx, d) }()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-a.wake:
+		cancel()
+		<-slept
+		return true
+	case ok := <-slept:
+		return ok
 	}
 }
 
