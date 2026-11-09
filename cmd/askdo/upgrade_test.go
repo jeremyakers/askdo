@@ -244,10 +244,9 @@ func TestUpgradeCLIResumePollsTransitionsWithoutSubmission(t *testing.T) {
 	if code != 0 || waits != len(states) {
 		t.Fatalf("resume code=%d waits=%d stderr=%s", code, waits, &stderr)
 	}
-	for _, state := range []string{"scheduled", "waiting", "activating", "verifying", "succeeded"} {
-		if got := strings.Count(stdout.String(), ": "+state+"\n"); got != 1 {
-			t.Fatalf("transition %s printed %d times: %s", state, got, &stdout)
-		}
+	// Each transition appears once, on one progress line.
+	if !strings.Contains(stdout.String(), "scheduled → waiting → activating → verifying → succeeded\n") {
+		t.Fatalf("progress line: %s", &stdout)
 	}
 }
 
@@ -497,4 +496,17 @@ func TestUpgradeCLISlowApprovalPrecedesObservationDeadline(t *testing.T) {
 			t.Fatalf("slow approval: client=%v code=%d observation=%s stderr=%s", clientFinished, code, time.Since(scheduledAt), &stderr)
 		}
 	})
+}
+
+// A progress line left open by a nonterminal exit is finished before the
+// diagnostic, so the two never run together on one line.
+func TestUpgradeCLIFinishesProgressLineBeforeDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	writeCLIReceipt(t, root, cliUpgradeID, "v3.2.1", "waiting")
+	deps := upgradeCLIOptions{receiptRoot: root, wait: func(context.Context) error { return errors.New("stopped") }}
+	var stdout, stderr bytes.Buffer
+	code := runUpgradeWith(t.Context(), []string{"--operation", cliUpgradeID}, deps, &stdout, &stderr)
+	if code != 125 || stdout.String() != "waiting\n" || !strings.HasPrefix(stderr.String(), "Upgrade observation stopped:") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
 }

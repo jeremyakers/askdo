@@ -137,7 +137,8 @@ func runUpgradeHelperWith(ctx context.Context, args []string, euid int, factory 
 		fmt.Fprintln(stderr, "upgrade-helper:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "upgrade scheduled: %s\nstage: %s\n", *operation, stage)
+	// askdo upgrade reports progress from the receipt; nothing to add here.
+	_ = stage
 	return 0
 }
 

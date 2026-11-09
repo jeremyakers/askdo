@@ -79,7 +79,11 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 	// forms keep the notice.
 	if isOperatorCommand(args[0]) && args[0] != "daemon" &&
 		!(args[0] == "gateway" && len(args) > 1 && args[1] == "serve") &&
-		!(args[0] == "reviewer" && len(args) == 1) {
+		!(args[0] == "reviewer" && len(args) == 1) &&
+		// The upgrade bootstrap runs the verified binary through a pinned
+		// descriptor as `upgrade-helper`; that internal step is not an
+		// operator command and must not warn about itself.
+		args[0] != "upgrade-helper" {
 		fmt.Fprintf(os.Stderr, "askdo: '%s' moved to askdo-config; this form will be removed in a future release\n", args[0])
 	}
 	switch args[0] {
