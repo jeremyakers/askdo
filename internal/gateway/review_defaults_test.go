@@ -271,6 +271,7 @@ func TestServerRefusesToStartWithUnpublishableReviewDefaults(t *testing.T) {
 	for name, section := range map[string]*ReviewDefaults{
 		"missing file":   {RiskPolicy: &PolicyText{File: "/nonexistent/risk-policy.md"}},
 		"invalid grant":  {AutoApproveGrants: nil, TimestampTimeoutUsers: map[string]float64{"alice": 99}},
+		"zero window":    {TimestampTimeoutUsers: map[string]float64{"alice": 0}}, // a host-only override, meaningless as a default
 		"over the limit": {AccountNotes: &AccountNotes{Users: map[string]PolicyText{"a": {Text: strings.Repeat("a", fleetproto.MaxMessageContentBytes)}, "b": {Text: strings.Repeat("b", fleetproto.MaxMessageContentBytes)}, "c": {Text: strings.Repeat("c", fleetproto.MaxMessageContentBytes)}}}},
 	} {
 		t.Run(name, func(t *testing.T) {

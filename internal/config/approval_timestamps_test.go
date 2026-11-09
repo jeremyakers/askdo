@@ -26,15 +26,18 @@ func TestApprovalTimestampUsersLoad(t *testing.T) {
 	}
 	t.Cleanup(func() { lookupUser = old })
 	for _, tc := range []struct {
-		name  string
-		users map[string]int
-		err   bool
-		want  time.Duration
+		name   string
+		users  map[string]int
+		err    bool
+		want   time.Duration
+		source PolicySource
 	}{
 		{name: "default off"},
-		{name: "per user", users: map[string]int{"human": 300}, want: 5 * time.Minute},
-		{name: "zero is not opt in", users: map[string]int{"human": 0}, err: true},
-		{name: "maximum", users: map[string]int{"human": 3600}, want: time.Hour},
+		{name: "per user", users: map[string]int{"human": 300}, want: 5 * time.Minute, source: SourceHost},
+		// Zero is not an opt in, but it is an entry: off for this login on this
+		// host, which an omitted login (left to a fleet gateway) is not.
+		{name: "zero is an explicit off", users: map[string]int{"human": 0}, source: SourceHost},
+		{name: "maximum", users: map[string]int{"human": 3600}, want: time.Hour, source: SourceHost},
 		{name: "negative", users: map[string]int{"human": -1}, err: true},
 		{name: "too short", users: map[string]int{"human": 29}, err: true},
 		{name: "too long", users: map[string]int{"human": 3601}, err: true},
@@ -60,6 +63,9 @@ func TestApprovalTimestampUsersLoad(t *testing.T) {
 			}
 			if err == nil && (loaded.Review.TimestampTimeout(1001) != tc.want || loaded.Review.TimestampTimeout(1002) != 0 || loaded.Review.MaxAutoRisk(1001) != 0) {
 				t.Fatalf("TTL=%v; unrelated user/auto approval must stay disabled", loaded.Review.TimestampTimeout(1001))
+			}
+			if err == nil && (loaded.Review.TimestampSource(1001) != tc.source || loaded.Review.TimestampSource(1002) != SourceNone) {
+				t.Fatalf("source=%q, want %q: an entry (even an explicit off) must differ from an omitted login", loaded.Review.TimestampSource(1001), tc.source)
 			}
 		})
 	}

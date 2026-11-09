@@ -311,6 +311,8 @@ type ReviewConfig struct {
 	ApprovalOnlyUsers []string `json:"approval_only_users,omitempty"`
 	// Internally stored in seconds; JSON uses sudo-style minutes under
 	// timestamp_timeout_users, with approval_timestamp_users as a seconds alias.
+	// A login mapped to 0 is off on this host, whatever a fleet gateway offers;
+	// a login with no entry is left to the gateway.
 	ApprovalTimestampUsers  map[string]int `json:"-"`
 	LocalOnly               bool           `json:"local_only"`
 	Models                  []ModelConfig  `json:"models"`
@@ -946,8 +948,10 @@ func validateReviewPolicy(review ReviewConfig) error {
 		if name == "" || strings.TrimSpace(name) != name {
 			return errors.New("review.timestamp_timeout_users contains an invalid login name")
 		}
-		if seconds < 30 || seconds > 3600 {
-			return errors.New("review.timestamp_timeout_users must be 0.5 through 60 minutes (30 through 3600 seconds)")
+		// Zero is an explicit off for this login: it keeps the entry (so it is
+		// not an omitted login) and overrides a fleet gateway's window.
+		if seconds != 0 && (seconds < 30 || seconds > 3600) {
+			return errors.New("review.timestamp_timeout_users must be 0 (off) or 0.5 through 60 minutes (30 through 3600 seconds)")
 		}
 	}
 	if len(review.AutoApproveGrants) > 128 {

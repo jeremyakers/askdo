@@ -736,3 +736,136 @@ func TestSlowGatewayStillSuppliesDefaultsWithinTheFrameDeadline(t *testing.T) {
 		t.Fatalf("a 4s gateway was reported unavailable: %s", body)
 	}
 }
+
+// A host's explicit zero for a login turns approval reuse off for it, whatever
+// window the gateway offers. Unlike an omitted login it never defers to the
+// gateway: the same gateway exemption and window that let -n reuse a stored
+// fleet window for an omitted login do nothing for a login the host zeroed.
+func TestHostZeroTimestampTurnsOffAGatewayWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry func(login string) map[string]int
+		reuse bool
+	}{
+		{"host omits the login: the gateway's window applies", func(string) map[string]int { return nil }, true},
+		{"host sets another login: this one is still the gateway's", func(string) map[string]int { return map[string]int{"root": 600} }, true},
+		{"host zero: off whatever the gateway offers", func(login string) map[string]int { return map[string]int{login: 0} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, uid, login := gatewayDefaultsHost(t)
+			cfg.Review.ApprovalTimestampUsers = tc.entry(login)
+			g := newFleetAuthorityGateway(t, cfg, uid)
+			g.defaults.Store(gatewayDefaultsExemptWithWindow(login)) // exempt, 60 s window
+			var approvals atomic.Int32
+			h := newBrokerHarnessWithConfig(t, timestampWorker(&approvals, "approve", nil), nil, cfg)
+			key := setTimestampPeer(h, uid)
+			storeFleetWindow(t, h, cfg, uid, key)
+
+			// -n: a stored, live window is reused only where a window applies.
+			req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+			req.NonInteractive = true
+			if tc.reuse {
+				timestampSubmitWithoutHumanPrompt(t, h, req)
+			} else if denied := submitAndReadTerminal(t, h.socket, req); !strings.Contains(string(denied), `"code":"approval_required"`) || approvals.Load() != 0 {
+				t.Fatalf("a window was reused for a login the host turned off: %s cards=%d", denied, approvals.Load())
+			}
+
+			// -l reports the effective value and whose it is.
+			body := sudoExchange(t, h, map[string]any{"op": "timestamp", "action": "list"})
+			var event proto.TimestampStatusEvent
+			if err := proto.StrictUnmarshal(body, &event); err != nil {
+				t.Fatalf("list=%s err=%v", body, err)
+			}
+			wantSeconds, wantSource := int64(60), "gateway"
+			if seconds, set := tc.entry(login)[login]; set && seconds == 0 {
+				wantSeconds, wantSource = 0, "host"
+			}
+			// The other gateway defaults still apply: the exemption is untouched.
+			if event.TimestampTimeoutSeconds != wantSeconds || event.TimestampTimeoutSource != wantSource || event.ReviewRequired || event.ReviewSource != "gateway" {
+				t.Fatalf("%+v", event)
+			}
+		})
+	}
+}
+
+// askdo -v needs a window to validate. A host that zeroed the login answers
+// timestamp_disabled from its own configuration alone: it neither asks the
+// gateway nor waits on one, so even a gateway that never answers cannot turn
+// the host's decision into a timeout. An omitted login still asks and is
+// admitted by the gateway's window.
+func TestHostZeroTimestampIsAnsweredWithoutTheGateway(t *testing.T) {
+	cfg, uid, login := gatewayDefaultsHost(t)
+	cfg.Review.ApprovalTimestampUsers = map[string]int{login: 0}
+	g := newFleetAuthorityGatewayDelayed(t, cfg, uid, 3*time.Second)
+	g.defaults.Store(gatewayDefaultsExemptWithWindow(login))
+	g.delayFrom.Store(1) // every catalogue request stalls
+	h := newBrokerHarnessWithConfig(t, nil, nil, cfg)
+	setTimestampPeer(h, uid)
+	budget := int64(200)
+	req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+	req.ValidateTimestamp, req.Argv, req.WaitTimeoutMS = true, []string{"/bin/true"}, &budget
+	got := firstFrame(t, h, req)
+	if !strings.Contains(got, `"code":"timestamp_disabled"`) {
+		t.Fatalf("host zero was not answered from the host's own configuration: %s", got)
+	}
+	if n := g.requests.Load(); n != 0 {
+		t.Fatalf("the broker asked the gateway %d times about a login the host zeroed", n)
+	}
+}
+
+// A standalone host has no gateway to override: an explicit zero is the same
+// as no entry. It is accepted, answers timestamp_disabled and lists as off.
+func TestStandaloneHostZeroTimestampIsOff(t *testing.T) {
+	cfg, uid := timestampConfig(t)
+	for login := range cfg.Review.ApprovalTimestampUsers {
+		cfg.Review.ApprovalTimestampUsers[login] = 0
+	}
+	h := newBrokerHarnessWithConfig(t, nil, nil, cfg)
+	setTimestampPeer(h, uid)
+	req := lifecycleRequest(reserveForTest(t, h.socket, uid), proto.LifecycleForeground)
+	req.ValidateTimestamp, req.Argv = true, []string{"/bin/true"}
+	if got := firstFrame(t, h, req); !strings.Contains(got, `"code":"timestamp_disabled"`) {
+		t.Fatalf("an explicit zero enabled validation: %s", got)
+	}
+	body := sudoExchange(t, h, map[string]any{"op": "timestamp", "action": "list"})
+	var event proto.TimestampStatusEvent
+	if err := proto.StrictUnmarshal(body, &event); err != nil || event.TimestampTimeoutSeconds != 0 || event.TimestampTimeoutSource != "" || event.GatewayUnavailable {
+		t.Fatalf("list=%s err=%v", body, err)
+	}
+}
+
+// The job's own reuse decision follows the same rule: with the gateway's
+// exemption and window a stored window binds the reviewed manifest, and a host
+// zero for the login leaves nothing to bind.
+func TestApprovalTimestampBindingHonorsAnExplicitHostZero(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		zero bool
+		bind bool
+	}{
+		{"host omits the login", false, true},
+		{"host zero", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, uid, login := gatewayDefaultsHost(t)
+			if tc.zero {
+				cfg.Review.ApprovalTimestampUsers = map[string]int{login: 0}
+			}
+			h := newBrokerHarnessWithConfig(t, nil, nil, cfg)
+			key := setTimestampPeer(h, uid)
+			j := &jobRuntime{
+				daemon: h.daemon, uid: uid, req: proto.SubmitRequest{RequestID: "2026-09-30_#1", Lifecycle: proto.LifecycleForeground}, approvalOnly: true,
+				foreground: &foregroundPeer{pid: 1, tty: ttyIdentity{session: key.TTYSession, rdev: key.TTYRdev, inode: key.TTYInode}},
+				fleet:      &fleetJob{selection: fleetclient.Selection{Catalog: fleetproto.Catalog{ReviewDefaults: gatewayDefaultsExemptWithWindow(login)}}},
+			}
+			now := time.Now().Add(-time.Second)
+			if err := h.daemon.store.UpsertApprovalTimestamp(context.Background(), store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Minute), AuthorityHash: j.approvalAuthorityHash()}); err != nil {
+				t.Fatal(err)
+			}
+			binding, err := j.approvalTimestampBinding(context.Background(), strings.Repeat("a", 64))
+			if err != nil || (binding != nil) != tc.bind {
+				t.Fatalf("binding=%+v err=%v, want bound=%v", binding, err, tc.bind)
+			}
+		})
+	}
+}

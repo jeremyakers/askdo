@@ -32,6 +32,9 @@ import (
 type fleetAuthorityGateway struct {
 	snapshot   fleetproto.RouteSnapshot
 	catalogues atomic.Int32
+	// requests counts every catalogue request received, answered or not, so a
+	// test can tell that the broker never asked.
+	requests atomic.Int32
 	// delayFrom makes that-numbered (1-based) and every later catalogue
 	// answer arrive only after delay, and drops it when the caller gives up
 	// (request context ends) so httptest Close never blocks on a parked
@@ -62,6 +65,7 @@ func newFleetAuthorityGatewayDelayed(t *testing.T, cfg *config.Config, uid uint3
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		g.requests.Add(1)
 		if threshold := int(g.delayFrom.Load()); threshold > 0 && g.catalogues.Load() >= int32(threshold-1) {
 			select {
 			case <-time.After(g.delay):

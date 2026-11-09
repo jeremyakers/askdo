@@ -92,6 +92,7 @@ func TestReviewTimestampTimeoutUnitsAndLegacyAlias(t *testing.T) {
 		{"timestamp_timeout", "10", 600}, {"timestamp_timeout", "2.5", 150},
 		{"timestamp_timeout", "90s", 90}, {"timestamp_timeout", "10m", 600}, {"timestamp_timeout", "1h", 3600},
 		{"timestamp_timeout", "0.5", 30}, {"timestamp_timeout", "60", 3600},
+		{"timestamp_timeout", "0", 0}, {"timestamp_timeout", "0s", 0},
 		{"timestamp", "300", 300},
 	} {
 		code, _, stderr := reviewCLI(tc.verb, "set", current.Username, tc.value, "--config", path)
@@ -99,14 +100,21 @@ func TestReviewTimestampTimeoutUnitsAndLegacyAlias(t *testing.T) {
 			t.Fatalf("%s %s: %d %s", tc.verb, tc.value, code, stderr)
 		}
 		cfg, err := config.DecodeForMutation([]byte(fileContent(t, path)))
-		if err != nil || cfg.Review.ApprovalTimestampUsers[current.Username] != tc.seconds {
-			t.Fatalf("%s %s: %+v %v", tc.verb, tc.value, cfg, err)
+		if err != nil {
+			t.Fatalf("%s %s: %v", tc.verb, tc.value, err)
+		}
+		// 0 must be stored as an entry (an explicit off), not dropped or kept as
+		// the previous value, so the entry's presence is part of the check.
+		if seconds, set := cfg.Review.ApprovalTimestampUsers[current.Username]; !set || seconds != tc.seconds {
+			t.Fatalf("%s %s: %v", tc.verb, tc.value, cfg.Review.ApprovalTimestampUsers)
 		}
 		if tc.verb == "timestamp" && !strings.Contains(stderr, "'review timestamp' moved to askdo-config review timestamp_timeout; this form will be removed in a future release") {
 			t.Fatalf("missing alias notice: %q", stderr)
 		}
 	}
-	for _, value := range []string{"0", "0.49", "61", "29s", "3601s", "-1", "NaN", "+Inf", "nonsense"} {
+	// Only an exact zero is off: a value that merely rounds to zero seconds,
+	// like the other out-of-range values, is rejected without writing.
+	for _, value := range []string{"0.001", "0.49", "61", "29s", "3601s", "-1", "NaN", "+Inf", "nonsense"} {
 		before := fileContent(t, path)
 		if code, _, _ := reviewCLI("timestamp_timeout", "set", current.Username, value, "--config", path); code == 0 || fileContent(t, path) != before {
 			t.Fatalf("accepted %q", value)
@@ -197,5 +205,98 @@ func TestReviewTimestampClearRevokesStoredWindows(t *testing.T) {
 	got, err := jobs.GetApprovalTimestamp(context.Background(), key)
 	if err != nil || !got.ExpiresAt.IsZero() {
 		t.Fatalf("stored timestamp survived clear: %+v %v", got, err)
+	}
+}
+
+// set USER 0 is an explicit off. Unlike clear it keeps an entry, which is what
+// stops a fleet gateway's window applying to the login; it revokes what is
+// stored, as clear does; and clear is still what removes the entry. (The legacy
+// seconds alias rejecting 0 is covered by
+// TestReviewTimestampRejectsInvalidMutationWithoutWriting.)
+func TestReviewTimestampTimeoutZeroIsAnExplicitOff(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := strconv.ParseUint(current.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := func(t *testing.T, path string) (seconds int, set bool) {
+		t.Helper()
+		cfg, err := config.DecodeForFleetMutation([]byte(fileContent(t, path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		seconds, set = cfg.Review.ApprovalTimestampUsers[current.Username]
+		return seconds, set
+	}
+	for _, fleet := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "fleet"}[fleet], func(t *testing.T) {
+			// Given a login the host has no entry for, with an approval stored
+			// for it, as a gateway's window would have left.
+			stubRoot(t)
+			path := reviewPolicyFixture(t)
+			if fleet {
+				path = reviewFleetFixture(t, []string{"local", "fallback"})
+			} else if code, _, errOut := reviewCLI("mode", "approval-only", "--config", path); code != 0 {
+				t.Fatalf("approval-only: %d %s", code, errOut)
+			}
+			jobsPath := filepath.Join(t.TempDir(), "jobs.db")
+			oldPath := timestampStorePath
+			timestampStorePath = jobsPath
+			t.Cleanup(func() { timestampStorePath = oldPath })
+			jobs, err := store.Open(jobsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { jobs.Close() })
+			now := time.Now().UTC()
+			key := store.ApprovalTimestampKey{UID: uint32(uid), TTYSession: 1, TTYRdev: 2, TTYInode: 3, BootID: "test-boot"}
+			if err := jobs.UpsertApprovalTimestamp(context.Background(), store.ApprovalTimestamp{ApprovalTimestampKey: key, ApprovedAt: now, ExpiresAt: now.Add(time.Hour), AuthorityHash: strings.Repeat("a", 64)}); err != nil {
+				t.Fatal(err)
+			}
+			if _, set := entry(t, path); set {
+				t.Fatal("fixture already has an entry")
+			}
+
+			// When the administrator sets the login to 0.
+			code, out, errOut := reviewCLI("timestamp_timeout", "set", current.Username, "0", "--config", path)
+
+			// Then it is off, with no warning that reuse is now enabled,
+			if code != 0 || !strings.Contains(out, "off") || strings.Contains(errOut, "WARNING") {
+				t.Fatalf("set 0: %d %q %q", code, out, errOut)
+			}
+			// kept as an entry rather than left omitted,
+			if seconds, set := entry(t, path); !set || seconds != 0 {
+				t.Fatalf("explicit zero not stored: %d set=%v", seconds, set)
+			}
+			// the stored approval is revoked,
+			if got, err := jobs.GetApprovalTimestamp(context.Background(), key); err != nil || !got.ExpiresAt.IsZero() {
+				t.Fatalf("stored timestamp survived set 0: %+v %v", got, err)
+			}
+			// both list spellings show it off rather than as a window,
+			for _, verb := range []string{"timestamp_timeout", "timestamp"} {
+				if code, out, errOut := reviewCLI(verb, "list", "--config", path); code != 0 || !strings.Contains(out, strconv.Quote(current.Username)+": off") {
+					t.Fatalf("%s list: %d %q %q", verb, code, out, errOut)
+				}
+			}
+			// and an unrelated save of the review section does not drop it,
+			// which would silently hand the login back to the gateway.
+			if code, _, errOut := reviewCLI("mode", "approval-only", "--config", path); code != 0 {
+				t.Fatalf("mode: %d %s", code, errOut)
+			}
+			if seconds, set := entry(t, path); !set || seconds != 0 {
+				t.Fatalf("explicit zero lost by an unrelated save: %d set=%v", seconds, set)
+			}
+
+			// clear is what removes the entry.
+			if code, _, errOut := reviewCLI("timestamp_timeout", "clear", current.Username, "--config", path); code != 0 {
+				t.Fatalf("clear: %d %s", code, errOut)
+			}
+			if _, set := entry(t, path); set {
+				t.Fatal("clear left the entry")
+			}
+		})
 	}
 }

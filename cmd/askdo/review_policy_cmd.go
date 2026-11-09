@@ -8,7 +8,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const reviewUsage = "usage: askdo-config review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review timestamp_timeout set USER VALUE|clear USER|list [--config PATH] | review log [--since DURATION] [--job ID] [--json]\nVALUE matches sudo's timestamp_timeout: minutes (decimals allowed), or Go durations like 90s, 10m, 1h; range 30s..1h. One approval is reused on the same terminal, per target user."
+const reviewUsage = "usage: askdo-config review mode [required|approval-only] [--config PATH] | review exempt add|remove <username> [--config PATH] | review exempt list [--config PATH] | review timestamp_timeout set USER VALUE|clear USER|list [--config PATH] | review log [--since DURATION] [--job ID] [--json]\nVALUE matches sudo's timestamp_timeout: minutes (decimals allowed), or Go durations like 90s, 10m, 1h; range 30s..1h, or 0 to turn reuse off for USER even where a fleet gateway offers a window (clear removes the entry instead). One approval is reused on the same terminal, per target user."
 
 func runReview(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {

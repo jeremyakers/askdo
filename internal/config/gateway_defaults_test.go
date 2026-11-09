@@ -117,6 +117,12 @@ func TestGatewayDefaultsTimestampPrecedence(t *testing.T) {
 		{"host wins over a longer gateway window", map[string]int{"alice": 300}, minute(30), 5 * time.Minute, SourceHost},
 		{"host wins over a shorter gateway window", map[string]int{"alice": 600}, minute(1), 10 * time.Minute, SourceHost},
 		{"host entry for another login leaves this one to the gateway", map[string]int{"bob": 300}, minute(10), 10 * time.Minute, SourceGateway},
+		// An explicit zero is an entry: off for this login whatever the gateway
+		// offers, where an omitted login would inherit the gateway's window.
+		{"host zero turns the gateway's window off", map[string]int{"alice": 0}, minute(10), 0, SourceHost},
+		{"host zero with no gateway window is off", map[string]int{"alice": 0}, nil, 0, SourceHost},
+		{"host zero for another login leaves this one to the gateway", map[string]int{"bob": 0}, minute(10), 10 * time.Minute, SourceGateway},
+		{"host zero beside another host entry still turns a longer gateway window off", map[string]int{"alice": 0, "bob": 600}, minute(30), 0, SourceHost},
 		{"unknown name ignored", nil, []fleetproto.UserTimestampTimeout{{User: "nobody-here", Seconds: 600}}, 0, SourceNone},
 		{"alias names: the shorter window applies", nil, []fleetproto.UserTimestampTimeout{{User: "alice", Seconds: 600}, {User: "alicia", Seconds: 120}}, 2 * time.Minute, SourceGateway},
 		// The limits a host puts on its own setting hold for a default too.

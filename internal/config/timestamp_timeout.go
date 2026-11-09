@@ -13,7 +13,9 @@ import (
 
 // ParseTimestampTimeout follows sudo's timestamp_timeout: a plain number is
 // minutes. Go duration units are also accepted. Runtime policy remains whole
-// seconds, bounded by the existing 30s..3600s contract.
+// seconds, bounded by the existing 30s..3600s contract. Exactly zero ("0",
+// "0s") is the one value outside it: it means off for the login, as in sudo,
+// and is returned as 0 for the caller to store as an explicit entry.
 func ParseTimestampTimeout(value string) (int, error) {
 	minutes, err := strconv.ParseFloat(value, 64)
 	seconds := minutes * 60
@@ -24,8 +26,11 @@ func ParseTimestampTimeout(value string) (int, error) {
 		}
 		seconds = duration.Seconds()
 	}
+	if seconds == 0 {
+		return 0, nil
+	}
 	if !(seconds >= 30 && seconds <= 3600) {
-		return 0, errors.New("timestamp_timeout must be 0.5 through 60 minutes (30s through 1h)")
+		return 0, errors.New("timestamp_timeout must be 0 (off) or 0.5 through 60 minutes (30s through 1h)")
 	}
 	return int(math.Round(seconds)), nil
 }
@@ -92,6 +97,12 @@ func (review *ReviewConfig) UnmarshalJSON(data []byte) error {
 			}
 			if value > 3600 && seconds <= 3600 {
 				seconds = 3601
+			}
+			// Only an exact zero is off. A value that merely rounds to zero
+			// seconds (0.001 minutes) stays out of range rather than becoming
+			// a silent off.
+			if minutes != 0 && seconds == 0 {
+				seconds = 29
 			}
 			review.ApprovalTimestampUsers[name] = seconds
 		}

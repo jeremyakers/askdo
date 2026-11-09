@@ -53,15 +53,21 @@ For sudo-like approval reuse on your own account, opt in with
 `askdo-config review timestamp_timeout set <username> <value>`.
 Like sudo's `timestamp_timeout`, a plain value is **minutes**, including decimals
 (`10` or `2.5`); Go durations such as `90s`, `10m` and `1h` also work. The range
-is 30 seconds through one hour, stored internally as whole seconds.
-`askdo-config review timestamp_timeout clear <username>` disables reuse;
-`askdo-config review timestamp_timeout list` displays the configured timeouts.
+is 30 seconds through one hour, stored internally as whole seconds, or exactly
+`0` for off. `askdo-config review timestamp_timeout clear <username>` removes the
+entry and `askdo-config review timestamp_timeout list` displays the configured
+timeouts. On a standalone host `0` and `clear` both leave reuse off. On a fleet
+host they differ: `clear` leaves the login to the gateway's default window, if
+any, while `0` is an explicit off that overrides a window the gateway offers
+(see [fleet policy defaults](#fleet-policy-defaults)). Either erases the user's
+stored approvals.
 This controls how long one approval is reused on the same terminal, per target
 user. All three require root and request normal Telegram approval for non-root
 askdo members. They accept `--config PATH` with direct v4 and fleet v5 configs.
-The legacy `review timestamp` alias still accepts plain integer **seconds** and
-prints a rename notice. The old `approval_timestamp_users` JSON key also means
-seconds; the new `timestamp_timeout_users` key uses numeric minutes. Either key
+The legacy `review timestamp` alias still accepts plain integer **seconds**
+(30–3600; it cannot set `0`) and prints a rename notice. The old
+`approval_timestamp_users` JSON key also means seconds (30–3600, or `0` for off);
+the new `timestamp_timeout_users` key uses numeric minutes. Either key
 is accepted, but specifying both is an error. Saves write only the new key.
 They use the same atomic, section-validated config mutation as the other review
 policy commands; adding a timestamp does not itself exempt an account from AI review.
@@ -269,7 +275,7 @@ for the distinction between fixture checks and deployment evidence.
 | `local_only` | no | `false` | If true, every entry in `models` must declare `data_boundary: "local"`; entries declared external or unspecified are rejected. This checks the operator's inference-location declarations, not network isolation. A LAN inference server is valid; a proxy can still forward data elsewhere. Telegram delivery is unaffected. |
 | `mode` | no | `"required"` | `required` reviews all submitters except exempt UIDs; `approval_only` skips AI review for every submitting socket-group member. **NO AI REVIEW** requires a human Telegram decision unless an explicitly enabled foreground approval timestamp is valid; eligible detached AI-reviewed jobs can use an explicitly configured risk auto-approval grant. Set `approval_only` explicitly for model-free use. |
 | `approval_only_users` | no | `[]` | OS login names exempt from AI review in `required` mode only; no UID or client-supplied username strings. Names resolve to UIDs at config load; missing or duplicate accounts fail validation. An agent sharing an exempt UID is exempt too. `--review=yes` overrides an exemption. On a fleet host the logins in the gateway's `review_defaults.approval_only_users` are exempt as well ([fleet policy defaults](#fleet-policy-defaults)). |
-| `timestamp_timeout_users` | no | `{}` (off) | Map of OS login names to numeric **minutes**, matching sudo's `timestamp_timeout` (decimals allowed, 0.5–60). Controls how long one approval is reused on the same terminal, per target user. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse it. Omit or clear a login to disable it. Legacy `approval_timestamp_users` accepts integer **seconds** (30–3600); do not specify both keys. On a fleet host a login listed here keeps this window whatever the gateway says; a login not listed takes the gateway's default. |
+| `timestamp_timeout_users` | no | `{}` (off) | Map of OS login names to numeric **minutes**, matching sudo's `timestamp_timeout` (decimals allowed, 0.5–60, or exactly `0` for off). Controls how long one approval is reused on the same terminal, per target user. Names resolve to kernel peer UIDs at load; missing accounts or duplicate resolved UIDs are invalid. Only foreground commands already exempt from AI review can reuse it. Omit or clear a login to disable it. Legacy `approval_timestamp_users` accepts integer **seconds** (30–3600, or `0` for off); do not specify both keys. On a fleet host a login listed here keeps this setting whatever the gateway says, and `0` is an explicit off that the gateway's window cannot turn back on; a login not listed (or cleared) takes the gateway's default. |
 | `account_notes` | no | absent | Additive administrator Markdown context: optional `users` and `groups` maps from OS login / Unix group names to absolute clean file paths. Names resolve at config load; files and membership are read per review. See [reviewer instruction layers and account notes](#reviewer-instruction-layers-and-account-notes). On a fleet host the gateway's notes for the same account come first and these follow. |
 | `auto_approve_grants` | no | `[]` | Root-owned opt-in grants, each naming an OS login and `max_risk` from `1` through `4`, or `0`, which grants nothing and turns off the fleet gateway's grant for that login on this host. The login resolves to a UID at config load; invalid/missing accounts fail validation. A grant sets the administrator cap; the submitter's local preference cannot raise it. Empty means disabled. Where a fleet gateway also grants the login, the **lower** of the two caps applies. A job with captured stdin (a piped or redirected script submitted for review) is never eligible: it always requires the human decision. |
 | `webfetch_enabled` | no | unset (off) | Root-owned opt-in to the reviewer worker's bounded public HTTP(S) `webfetch` tool. When false the model is not offered the tool and cannot execute it; true does not change host inspection policy or grant shell/network execution. Setting it, to `true` **or** `false`, is this host's own decision and always wins. Leaving it out lets a fleet gateway's `reviewer_webfetch_enabled` apply, and means off where there is none. See [review tools](review-tools.md#optional-webfetch). |
@@ -324,9 +330,12 @@ extend it. Reuse still freezes the exact manifest and applies the existing
 pre-launch and one-use foreground grant checks; it does not invent a Telegram
 decision. Timestamp records live in the local jobs database. Config changes apply
 to the next submission without a restart; already admitted jobs keep their policy.
-`askdo-config review timestamp_timeout clear USER` disables reuse and erases that
-user's stored records. `telegram.approval_ttl` is a separate deadline for
-an individual approval card and never starts a timestamp by itself.
+`askdo-config review timestamp_timeout clear USER` removes the host's entry and
+erases that user's stored records, and `set USER 0` erases them while keeping an
+explicit off; on a fleet host the difference is whose window then applies (see
+[fleet policy defaults](#fleet-policy-defaults)). `telegram.approval_ttl` is a
+separate deadline for an individual approval card and never starts a timestamp
+by itself.
 
 #### Reviewer instruction layers and account notes
 
@@ -980,7 +989,7 @@ take that back, only add its own exemptions.
 |---|---|---|---|
 | Reviewer `webfetch` | `reviewer_webfetch_enabled` | `review.webfetch_enabled` | The host's value if the host sets it, `true` or `false`; otherwise the gateway's; otherwise off. |
 | Exempt from AI review (human approval only) | `review_defaults.approval_only_users` | `review.approval_only_users`, `review.mode` | A login is exempt if the host exempts it (its list, or global `approval_only`) **or** the gateway lists it. A host cannot un-exempt a login the gateway lists. `--review=yes` still forces a review. |
-| Approval reuse window | `review_defaults.timestamp_timeout_users` | `review.timestamp_timeout_users` | Per login: the host's entry if it has one, otherwise the gateway's. Same limits (0.5–60 minutes). |
+| Approval reuse window | `review_defaults.timestamp_timeout_users` | `review.timestamp_timeout_users` | Per login: the host's entry if it has one, otherwise the gateway's. A host entry of `0` is an explicit off: that login gets no reuse on that host whatever the gateway offers, where an omitted (or cleared) login takes the gateway's window. Same limits (0.5–60 minutes); `0` is host-only, so a gateway cannot publish it. |
 | Auto-approval cap | `review_defaults.auto_approve_grants` | `review.auto_approve_grants` | Per login: the **lower** of the host's and the gateway's cap where both grant it; the gateway's where the host has no grant; the host's where the gateway has none. A host `max_risk` of `0` turns the gateway's grant off. The submitter's own preference still cannot exceed the effective cap. |
 | Risk-scoring guidance | `review_defaults.risk_policy` | `risk-policy.md` beside the daemon config | The host file if it exists (even empty); otherwise the gateway's text; otherwise the compiled default. |
 | Account notes | `review_defaults.account_notes` | `review.account_notes` | Both apply: the gateway's note first, then the host's own for the same account (see [reviewer instruction layers](#reviewer-instruction-layers-and-account-notes)). |
@@ -1022,8 +1031,10 @@ How a host applies them:
   with the review.
 - **Submissions** consult the host's own policy first and ask the gateway only
   when that would refuse (`askdo -n` without a usable window or grant, `askdo -v`
-  without a timestamp, a submitter who needs a review the host cannot run), so a
-  decision the host makes alone never waits on the gateway. `askdo -l` and
+  for a login the host has no timestamp entry for, a submitter who needs a review
+  the host cannot run), so a decision the host makes alone never waits on the
+  gateway. A host entry of `0` is such a decision: `askdo -v` is refused without
+  asking. `askdo -l` and
   `askdo auto-approve` always ask, because they report or bound the effective
   values. A gateway that cannot be reached in time (a lookup made only for the
   defaults gives up after three seconds) leaves the host's own answer, or a
@@ -1037,8 +1048,8 @@ How a host applies them:
   long an approval can be reused and which risk scores can skip a human tap;
   inspection policy, sensitive masks, dispatch checks, captured-stdin and
   risk-5 human decisions stay with the host. A host that wants none of a default
-  sets its own value (a lower grant or `max_risk: 0`, its own window,
-  `webfetch_enabled: false`); only an exemption cannot be taken back.
+  sets its own value (a lower grant or `max_risk: 0`, its own window or `0` for
+  none, `webfetch_enabled: false`); only an exemption cannot be taken back.
 
 Deploy order: hosts built before unknown-field tolerance
 ([unknown fields on the wire](architecture.md#unknown-fields-on-the-wire)) reject

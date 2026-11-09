@@ -28,6 +28,8 @@ type ReviewDefaults struct {
 	ApprovalOnlyUsers []string `json:"approval_only_users,omitempty"`
 	// TimestampTimeoutUsers maps logins to approval reuse windows in minutes
 	// (0.5 through 60, decimals allowed), like a host's timestamp_timeout_users.
+	// The host's extra 0 (reuse off for one login, overriding a default) has no
+	// meaning in a default, so it is not accepted here.
 	TimestampTimeoutUsers map[string]float64 `json:"timestamp_timeout_users,omitempty"`
 	// AutoApproveGrants are per-login automatic-approval ceilings (max_risk 1
 	// through 4). A host may lower or turn off one of them, never raise it.

@@ -50,11 +50,12 @@ type gatewayDefaults struct {
 // returns the host's own policy exactly.
 //
 // Precedence, per login: a timestamp entry in the host's configuration wins
-// outright; a login both configurations grant auto-approval gets the lower
-// cap (a host grant of 0 turns the gateway's off); and a login either
-// configuration exempts from AI review is exempt. Values a host could not itself configure — a
-// timestamp outside 30 through 3600 seconds, an auto-approval cap outside 1
-// through 4 — are ignored rather than applied.
+// outright (a zero entry turns reuse off whatever the gateway offers); a login
+// both configurations grant auto-approval gets the lower cap (a host grant of 0
+// turns the gateway's off); and a login either configuration exempts from AI
+// review is exempt. Values a host could not itself configure — a timestamp
+// outside 30 through 3600 seconds, an auto-approval cap outside 1 through 4 —
+// are ignored rather than applied.
 func (review ReviewConfig) WithGatewayDefaults(defaults *fleetproto.ReviewDefaults) ReviewConfig {
 	review.gateway = nil
 	if defaults != nil {
@@ -151,7 +152,8 @@ func (review *ReviewConfig) ExemptionSource(peerUID uint32) PolicySource {
 }
 
 // TimestampSource says whose timestamp_timeout applies to peerUID: the host's
-// entry for it, else the fleet gateway's, else nobody's.
+// entry for it (an explicit zero included), else the fleet gateway's, else
+// nobody's.
 func (review *ReviewConfig) TimestampSource(peerUID uint32) PolicySource {
 	if _, set := review.timestampUIDs[peerUID]; set {
 		return SourceHost

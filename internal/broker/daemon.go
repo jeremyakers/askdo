@@ -1011,7 +1011,9 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 	// answer: nothing may refuse on the strength of defaults it never saw. A
 	// refusal reached without any lookup is unaffected.
 	lookupTimedOut := func() bool { return lookup.attempted && timedOut() }
-	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 && lookup.reviewPolicy().TimestampTimeout(uid) == 0 {
+	// The host's own entry for the login, an explicit off included, is final:
+	// the gateway cannot change that answer, so it is not asked.
+	if request.ValidateTimestamp && cfg.Review.TimestampTimeout(uid) == 0 && (cfg.Review.TimestampSource(uid) == config.SourceHost || lookup.reviewPolicy().TimestampTimeout(uid) == 0) {
 		if !lookupTimedOut() {
 			d.rejectReservation(conn, uid, request.RequestID, proto.ErrorEvent{Op: "error", Code: "timestamp_disabled", Message: "askdo: timestamp_timeout is not enabled for this user"})
 		}
