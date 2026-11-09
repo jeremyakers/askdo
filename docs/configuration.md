@@ -1036,8 +1036,8 @@ How a host applies them:
   gateway. A host entry of `0` is such a decision: `askdo -v` is refused without
   asking. `askdo -l` and
   `askdo auto-approve` always ask, because they report or bound the effective
-  values. A gateway that cannot be reached in time (a lookup made only for the
-  defaults gives up after three seconds) leaves the host's own answer, or a
+  values. A gateway that cannot be reached within the frame deadline leaves
+  the host's own answer, or a
   timeout if the request's own budget ran out, never a grant.
 - **`askdo -l`** shows the effective values and, on a fleet host, whose they are:
   `(source: host)`, `(source: gateway)`, or `(source: host+gateway)` for an
