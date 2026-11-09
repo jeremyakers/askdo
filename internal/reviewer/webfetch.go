@@ -171,7 +171,14 @@ func newReviewerFetcher(cfg reviewFetchConfig) *reviewerFetcher {
 			}
 			// Every hop is validated as a fresh URL and dialed only at a
 			// validated public address, so a redirect to another public host
-			// (such as a release download CDN) is followed like any URL.
+			// (such as a release download CDN) is followed like any URL —
+			// except a downgrade from HTTPS to HTTP, which would let the
+			// network substitute the evidence the reviewer asked to fetch
+			// securely. No Referer is carried to the next host.
+			if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return ErrFetchInvalidURL
+			}
+			req.Header.Del("Referer")
 			_, err := f.validateURL(req.URL.String())
 			return err
 		},

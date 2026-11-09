@@ -80,7 +80,9 @@ func setGatewayUpgradeTarget(ctx context.Context, upgrades *gateway.UpgradeStore
 	}
 	fmt.Fprintf(out, "fleet upgrade target: %s\nsource commit: %s\nmanifest SHA-256: %s\n", manifest.Tag, manifest.SourceCommit, manifest.Digest)
 	fmt.Fprintln(out, "Hosts that apply pushed upgrades take it one at a time, in the order they report that they are ready; the next after the last reports success. A failed upgrade pauses the rollout and you are told on Telegram; run this command again to resume.")
-	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) {
+	// A rerun of the running target keeps its lease, so only a replaced
+	// target can leave its previous holder upgrading beside the next host.
+	if previous != nil && previous.LeaseHost != "" && previous.LeaseExpires.After(now) && (previous.Release != manifest.Tag || previous.ManifestSHA256 != manifest.Digest) {
 		fmt.Fprintf(out, "warning: %s was being offered %s until %s and may still be upgrading; its upgrade is not stopped, and the next host may start before it finishes\n", previous.LeaseHost, previous.Release, previous.LeaseExpires.Local().Format(time.RFC3339))
 	}
 	return nil
