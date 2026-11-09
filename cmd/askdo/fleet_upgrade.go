@@ -52,10 +52,12 @@ const (
 	fleetUpgradeDownloadBudget = 15 * time.Minute
 	fleetUpgradeScheduleBudget = 3 * time.Minute
 
-	// fleetUpgradeWorkRoot holds the release being downloaded. It is the broker's
-	// own state directory, not /tmp, which may be small or mounted noexec.
-	fleetUpgradeWorkRoot   = "/var/lib/askdo/fleet-upgrade"
-	fleetUpgradeWorkPrefix = "fleet-upgrade-"
+	// fleetUpgradeWorkPrefix names the private directory a release is downloaded
+	// into. As in `askdo upgrade` it is made under the temporary directory ($TMPDIR,
+	// else /tmp), not under /var: on Synology DSM /var is the small system
+	// partition and /tmp is RAM-backed. The root helper only reads the download; the
+	// copy it executes is staged under the receipt root, never here.
+	fleetUpgradeWorkPrefix = "askdo-fleet-upgrade-"
 )
 
 // errManifestDigestMismatch is the one refusal the host reports: the release
@@ -95,13 +97,17 @@ type fleetUpgradeAgent struct {
 	// schedule starts the staged upgrade for a bundle and returns once the
 	// activation has been handed to the service manager or detached; it does not
 	// wait for the upgrade, which stops this broker.
-	schedule      func(ctx context.Context, bundle fleetUpgradeBundle) error
+	schedule func(ctx context.Context, bundle fleetUpgradeBundle) error
+	// workRoot is where downloads are made; empty means the temporary directory.
 	workRoot      string
 	bootstrapRoot string
-	random        io.Reader
-	now           func() time.Time
-	sleep         func(ctx context.Context, d time.Duration) bool
-	log           *slog.Logger
+	// owned says whether a leftover directory is this process's user's own; nil
+	// means ownedByThisUser. A test cannot make another user's directory.
+	owned  func(os.FileInfo) bool
+	random io.Reader
+	now    func() time.Time
+	sleep  func(ctx context.Context, d time.Duration) bool
+	log    *slog.Logger
 
 	// State between looks; only run's goroutine touches it.
 	refusal    *fleetproto.UpgradeResult
@@ -131,7 +137,6 @@ func newFleetUpgradeAgent(configPath string) *fleetUpgradeAgent {
 			return upgrade.DownloadRelease(ctx, nil, fleetUpgradeRepository, tag, dir)
 		},
 		schedule:      runFleetUpgradeBootstrap,
-		workRoot:      fleetUpgradeWorkRoot,
 		bootstrapRoot: defaultUpgradeBootstrapRoot,
 		now:           time.Now,
 		sleep:         fleetUpgradeSleep,
@@ -343,8 +348,10 @@ func (a *fleetUpgradeAgent) install(ctx context.Context, offer fleetproto.FleetU
 		return fleetUpgradeBundle{}, errManifestDigestMismatch
 	}
 
-	if err := os.MkdirAll(a.workRoot, 0o700); err != nil {
-		return fleetUpgradeBundle{}, err
+	if a.workRoot != "" {
+		if err := os.MkdirAll(a.workRoot, 0o700); err != nil {
+			return fleetUpgradeBundle{}, err
+		}
 	}
 	source, err := os.MkdirTemp(a.workRoot, fleetUpgradeWorkPrefix)
 	if err != nil {
@@ -385,19 +392,36 @@ func (a *fleetUpgradeAgent) install(ctx context.Context, offer fleetproto.FleetU
 }
 
 // clearStaleWork removes download directories a broker that died mid-download
-// left behind. A recent one may belong to an upgrade still being scheduled.
+// left behind. A recent one may belong to an upgrade still being scheduled. The
+// temporary directory is shared, so only a real directory this process's user made
+// is touched: never a symlink, and never another user's directory that merely has
+// the same prefix.
 func (a *fleetUpgradeAgent) clearStaleWork() {
-	entries, err := os.ReadDir(a.workRoot)
+	root := a.workRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
+	owned := a.owned
+	if owned == nil {
+		owned = ownedByThisUser
+	}
 	for _, entry := range entries {
 		info, err := entry.Info()
-		if err != nil || !strings.HasPrefix(entry.Name(), fleetUpgradeWorkPrefix) || !entry.IsDir() || a.now().Sub(info.ModTime()) < time.Hour {
+		if err != nil || !strings.HasPrefix(entry.Name(), fleetUpgradeWorkPrefix) || !entry.IsDir() || !owned(info) || a.now().Sub(info.ModTime()) < time.Hour {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(a.workRoot, entry.Name()))
+		_ = os.RemoveAll(filepath.Join(root, entry.Name()))
 	}
+}
+
+// ownedByThisUser reports whether the file belongs to the user this process runs as.
+func ownedByThisUser(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == uint32(os.Geteuid())
 }
 
 // runFleetUpgradeBootstrap runs the root bootstrap script with the interpreter,

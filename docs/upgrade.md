@@ -320,9 +320,10 @@ download, or another upgrade operation being active), is not tried again for ten
 minutes rather than at every look, which is well inside the gateway's one-hour lease
 on the offer, so a dropped download is retried before the rollout gives up on the
 host; only the refusal is reported as a result, the other is logged.
-The release is downloaded into the root-private `/var/lib/askdo/fleet-upgrade` and
-removed once the helper has staged its own copy; a leftover from a crashed broker
-is removed at the next start.
+The release is downloaded into a private temporary directory (under `$TMPDIR`, else
+`/tmp`, as `askdo upgrade` does; on DSM that is RAM-backed, not the small system
+partition) and removed once the helper has staged its own copy under
+`upgrade_backup_dir`; a leftover from a crashed broker is removed at the next start.
 
 ### One host at a time, and a pause on failure
 

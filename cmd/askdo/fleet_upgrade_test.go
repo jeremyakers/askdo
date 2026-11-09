@@ -16,8 +16,11 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/fleetproto"
@@ -632,6 +635,128 @@ func TestFleetUpgradeAgentStopsWhenTheBrokerStopsIt(t *testing.T) {
 	}
 }
 
+// As in `askdo upgrade`, a release is downloaded under the temporary directory: on
+// DSM that is RAM-backed, where /var is the small system partition.
+func TestFleetUpgradeDownloadsUnderTheTemporaryDirectoryUnlessToldOtherwise(t *testing.T) {
+	if got := newFleetUpgradeAgent("/unused").workRoot; got != "" {
+		t.Fatalf("the production download root is %q, want the temporary directory (empty)", got)
+	}
+	f := newAgentFixture(t, "v1.0.0", "v1.0.1")
+	temporary := t.TempDir()
+	t.Setenv("TMPDIR", temporary)
+	f.agent.workRoot = ""
+	f.agent.schedule = func(_ context.Context, b fleetUpgradeBundle) error {
+		f.scheduled = append(f.scheduled, b)
+		if filepath.Dir(b.Source) != temporary || !strings.HasPrefix(filepath.Base(b.Source), fleetUpgradeWorkPrefix) {
+			t.Errorf("download is in %s, want a %s directory under %s", b.Source, fleetUpgradeWorkPrefix, temporary)
+		}
+		if info, err := os.Stat(b.Source); err != nil || info.Mode().Perm() != 0o700 {
+			t.Errorf("download directory is not private: %v %v", info, err)
+		}
+		return nil
+	}
+
+	f.tick()
+
+	if len(f.scheduled) != 1 {
+		t.Fatalf("scheduled %d: %s", len(f.scheduled), f.logs)
+	}
+	if entries, err := os.ReadDir(temporary); err != nil || len(entries) != 0 {
+		t.Fatalf("the download was not removed from the temporary directory: %v %v", entries, err)
+	}
+}
+
+func TestOwnedByThisUserOnlyCountsWhatThisProcessCreated(t *testing.T) {
+	mine := uint32(os.Geteuid())
+	for name, tc := range map[string]struct {
+		sys  any
+		want bool
+	}{
+		"this user":     {&syscall.Stat_t{Uid: mine}, true},
+		"another user":  {&syscall.Stat_t{Uid: mine + 1}, false},
+		"no owner info": {nil, false},
+	} {
+		if got := ownedByThisUser(fakeFileInfo{sys: tc.sys}); got != tc.want {
+			t.Errorf("%s: ownedByThisUser = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+type fakeFileInfo struct {
+	os.FileInfo
+	sys any
+}
+
+func (i fakeFileInfo) Sys() any { return i.sys }
+
+// Another user can make a directory with the download prefix in the shared
+// temporary directory; the broker must not delete it, however old.
+func TestFleetUpgradeCleanupLeavesDirectoriesOfOtherUsers(t *testing.T) {
+	f := newAgentFixture(t, "v1.0.0", "")
+	if err := os.MkdirAll(f.work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	theirs := filepath.Join(f.work, fleetUpgradeWorkPrefix+"theirs")
+	if err := os.Mkdir(theirs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := f.clock.Add(-5 * time.Hour)
+	if err := os.Chtimes(theirs, old, old); err != nil {
+		t.Fatal(err)
+	}
+	f.agent.owned = func(os.FileInfo) bool { return false }
+	f.agent.clearStaleWork()
+	if _, err := os.Stat(theirs); err != nil {
+		t.Fatalf("cleanup removed a directory that is not this user's: %v", err)
+	}
+	// The same directory is removed once it is this user's own.
+	f.agent.owned = nil
+	f.agent.clearStaleWork()
+	if _, err := os.Stat(theirs); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup left a stale download of this user: %v", err)
+	}
+}
+
+// The temporary directory is shared, so cleaning it up must never follow a symlink
+// someone planted under the download prefix, however old.
+func TestFleetUpgradeCleanupNeverFollowsAPlantedSymlink(t *testing.T) {
+	f := newAgentFixture(t, "v1.0.0", "")
+	if err := os.MkdirAll(f.work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	precious := filepath.Join(victim, "precious")
+	if err := os.WriteFile(precious, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(f.work, fleetUpgradeWorkPrefix+"planted")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	// Age the link itself, not its target, so only what cleanup does with a link
+	// decides the outcome.
+	old := f.clock.Add(-5 * time.Hour)
+	stamp := []unix.Timespec{unix.NsecToTimespec(old.UnixNano()), unix.NsecToTimespec(old.UnixNano())}
+	if err := unix.UtimesNanoAt(unix.AT_FDCWD, link, stamp, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(link); err != nil || f.clock.Sub(info.ModTime()) < time.Hour {
+		t.Fatalf("the link was not aged: %v %v", info, err)
+	}
+
+	f.agent.clearStaleWork()
+
+	if data, err := os.ReadFile(precious); err != nil || string(data) != "data" {
+		t.Fatalf("cleanup reached through a planted symlink: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("cleanup removed the link, which is not a download directory: %v", err)
+	}
+}
+
 func TestFleetUpgradeRemovesDownloadsAbandonedByADeadBroker(t *testing.T) {
 	f := newAgentFixture(t, "v1.0.0", "")
 	if err := os.MkdirAll(f.work, 0o700); err != nil {
@@ -654,6 +779,23 @@ func TestFleetUpgradeRemovesDownloadsAbandonedByADeadBroker(t *testing.T) {
 		if _, err := os.Stat(path); (err == nil) != want {
 			t.Errorf("%s exists = %v, want %v", filepath.Base(path), err == nil, want)
 		}
+	}
+
+	// With no download root of its own the agent cleans the temporary directory.
+	temporary := t.TempDir()
+	t.Setenv("TMPDIR", temporary)
+	stale = filepath.Join(temporary, fleetUpgradeWorkPrefix+"stale-in-tmp")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	long := f.clock.Add(-3 * time.Hour)
+	if err := os.Chtimes(stale, long, long); err != nil {
+		t.Fatal(err)
+	}
+	f.agent.workRoot = ""
+	f.agent.clearStaleWork()
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a stale download in the temporary directory was not removed: %v", err)
 	}
 }
 
