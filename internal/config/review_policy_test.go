@@ -197,6 +197,26 @@ func TestAutoApproveGrantsLoad(t *testing.T) {
 			t.Fatalf("MaxAutoRisk(4400)=%d, want 2", got)
 		}
 	})
+	t.Run("max risk zero is an explicit off that grants nothing", func(t *testing.T) {
+		// The way a fleet host turns off its gateway's grant for one login. On
+		// its own it is no grant at all.
+		cfg, err := load(t, func(r *ReviewConfig) {
+			r.AutoApproveGrants = []AutoApproveGrant{{User: "sample-human", MaxRisk: 0}, {User: "sample-agent", MaxRisk: 1}}
+		})
+		if err != nil {
+			t.Fatalf("explicit zero grant rejected: %v", err)
+		}
+		if got := cfg.Review.MaxAutoRisk(4400); got != 0 {
+			t.Fatalf("MaxAutoRisk(4400)=%d, want 0 (explicit off)", got)
+		}
+		if got := cfg.Review.MaxAutoRisk(4242); got != 1 {
+			t.Fatalf("MaxAutoRisk(4242)=%d, want 1", got)
+		}
+		saved, err := json.Marshal(cfg)
+		if err != nil || !strings.Contains(string(saved), `"max_risk":0`) {
+			t.Fatalf("a save dropped the explicit off: %s (%v)", saved, err)
+		}
+	})
 	t.Run("no implicit activation from approval_only_users exemption", func(t *testing.T) {
 		cfg, err := load(t, func(r *ReviewConfig) {
 			r.ApprovalOnlyUsers = []string{"sample-human"}
@@ -219,7 +239,6 @@ func TestAutoApproveGrantsLoad(t *testing.T) {
 	}{
 		{name: "duplicate login", grants: []AutoApproveGrant{{User: "sample-human", MaxRisk: 1}, {User: "sample-human", MaxRisk: 2}}, want: "duplicate"},
 		{name: "duplicate resolved UID", grants: []AutoApproveGrant{{User: "sample-human", MaxRisk: 1}, {User: "sample-human-alias", MaxRisk: 2}}, want: "duplicate"},
-		{name: "max risk zero", grants: []AutoApproveGrant{{User: "sample-human", MaxRisk: 0}}, want: "max_risk"},
 		{name: "max risk five never auto", grants: []AutoApproveGrant{{User: "sample-agent", MaxRisk: 5}}, want: "max_risk"},
 		{name: "negative max risk", grants: []AutoApproveGrant{{User: "sample-human", MaxRisk: -1}}, want: "max_risk"},
 		{name: "nonexistent user fails at Load", grants: []AutoApproveGrant{{User: "missing", MaxRisk: 1}}, want: "missing"},

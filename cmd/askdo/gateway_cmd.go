@@ -301,7 +301,7 @@ func loadGatewayOperator(path string) (*gateway.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range append(c.CredentialPaths(), c.Database) {
+	for _, p := range append(append(c.CredentialPaths(), c.PolicyFilePaths()...), c.Database) {
 		if err = operator.TrustedDirectory(filepath.Dir(p), false); err != nil {
 			return nil, err
 		}

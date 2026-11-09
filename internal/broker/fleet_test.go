@@ -516,14 +516,17 @@ func TestFleetWebfetchPolicyPrecedence(t *testing.T) {
 	yes, no := true, false
 	for _, tc := range []struct {
 		name    string
-		host    bool
+		host    *bool
 		gateway *bool
 		want    bool
 	}{
-		{"absent_host_off", false, nil, false},
-		{"absent_host_on", true, nil, true},
-		{"gateway_on_overrides_host_off", false, &yes, true},
-		{"gateway_off_overrides_host_on", true, &no, false},
+		{"neither_off", nil, nil, false},
+		{"host_unset_gateway_on", nil, &yes, true},
+		{"host_unset_gateway_off", nil, &no, false},
+		{"host_on_gateway_absent", &yes, nil, true},
+		{"host_off_gateway_absent", &no, nil, false},
+		{"host_on_beats_gateway_off", &yes, &no, true},
+		{"host_off_beats_gateway_on", &no, &yes, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			j, r := fleetTurnFixture()

@@ -82,8 +82,13 @@ caller's windows across terminals. Both need no approval and return
 `askdo_group` (boolean), `review_mode` (string), `review_required` (boolean),
 `timestamp_timeout_seconds`, `remaining_seconds` (zero if expired, wrong target
 or no terminal), `auto_approval_max_risk`, `auto_approval_threshold`
-and `auto_approval_effective` (integers). Reset/remove return these fields at
-their zero values. No request accepts a UID, PID or TTY identity from the client.
+and `auto_approval_effective` (integers). A fleet host adds the optional strings
+`review_source`, `timestamp_timeout_source` and `auto_approval_source` (`host`,
+`gateway`, or `host+gateway` for an auto-approval cap both grant), naming whose
+configuration decided each value, and the optional boolean `gateway_unavailable`
+when its gateway could not be asked, so the values are the host's own; all are
+omitted otherwise. Reset/remove return these fields at their zero values. No
+request accepts a UID, PID or TTY identity from the client.
 
 Four optional boolean fields extend v4+ `submit`; false fields are omitted,
 preserving the existing wire when unused. Older strict brokers reject them:

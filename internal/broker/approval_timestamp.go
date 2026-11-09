@@ -16,6 +16,7 @@ import (
 
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/fleetclient"
+	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
 )
@@ -46,14 +47,15 @@ func (j *jobRuntime) approvalTimestampKey() store.ApprovalTimestampKey {
 }
 
 func (j *jobRuntime) approvalTimestampBinding(ctx context.Context, digest string) (*approvalBinding, error) {
-	if j.req.ResetTimestamp || j.foreground == nil || !j.approvalOnly || (!j.req.ValidateTimestamp && j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview)) || j.configuration().Review.TimestampTimeout(j.uid) == 0 {
+	review := j.reviewPolicy()
+	if j.req.ResetTimestamp || j.foreground == nil || !j.approvalOnly || (!j.req.ValidateTimestamp && review.RequiresReview(j.uid, j.req.ForceReview)) || review.TimestampTimeout(j.uid) == 0 {
 		return nil, nil
 	}
 	stamp, err := j.daemon.store.GetApprovalTimestamp(ctx, j.approvalTimestampKey())
 	if err != nil {
 		return nil, err
 	}
-	expiry := timestampExpiry(stamp, j.configuration().Review.TimestampTimeout(j.uid), j.approvalAuthorityHash())
+	expiry := timestampExpiry(stamp, review.TimestampTimeout(j.uid), j.approvalAuthorityHash())
 	if !expiry.After(time.Now()) {
 		return nil, nil
 	}
@@ -75,60 +77,116 @@ func (d *daemon) terminalTimestampKey(uid uint32, tty ttyIdentity) store.Approva
 	return store.ApprovalTimestampKey{UID: uid, TTYSession: tty.session, TTYRdev: tty.rdev, TTYInode: tty.inode, BootID: d.bootID}
 }
 
-// timestampAuthorityRoute is the approval-authority route a timestamp check
-// must hash against. A fleet-configured job binds the signed gateway
-// catalogue route — j.route as prepareFleet selects it — into its stored
-// window's authority hash, so the local per-UID Telegram route can never
-// match a fleet-created window: valid fleet windows failed non-interactive
-// reuse (askdo -n always answered approval_required) and -l always reported
-// zero remaining time. The route must therefore come from the same fleet
-// connection a new job would select: the daemon-owned client for a fixed
-// configuration, and a client built from the current configuration for a
-// reload daemon whose fleet section may postdate startup. Callers consult
-// this only when a window is actually stored, so local users never pay a
-// gateway round trip. When the route cannot be resolved or authenticated
-// right now, the exact fleet route is unknowable; falling back to the local
-// comparison (which yields no window, never a false grant) is an explicitly
-// bounded limitation rather than a new availability prerequisite for the
-// exchange.
-func (d *daemon) timestampAuthorityRoute(ctx context.Context, cfg *config.Config, uid uint32) config.TelegramRoute {
-	route := cfg.Telegram.RouteForUID(uid)
-	if cfg.Fleet == nil {
-		return route
-	}
-	connection, closeConnection := d.fleet, func() {}
-	if d.reloadConfig {
-		client, err := fleetclient.New(*cfg.Fleet)
-		if err != nil {
-			slog.Warn("fleet timestamp authority connection unavailable", "uid", uid, "error", err)
-			return route
-		}
-		connection, closeConnection = client, client.Close
-	}
-	defer closeConnection()
-	if connection == nil {
-		return route
-	}
-	ctx, cancel := context.WithTimeout(ctx, frameDeadline)
-	defer cancel()
-	catalog, err := connection.Catalogue(ctx, uid)
-	if err != nil {
-		slog.Warn("fleet timestamp authority route unavailable", "uid", uid, "error", err)
-		return route
-	}
-	return fleetTelegramRoute(cfg.Fleet, catalog.Route)
+// fleetLookup asks a fleet host's gateway, at most once per exchange, for the
+// signed catalogue a new review would select for one submitter. Admission and
+// listing need it for two things: the approval-authority route a stored
+// timestamp window is bound to, and the gateway's review defaults.
+//
+// A fleet-configured job binds the signed gateway catalogue route — j.route as
+// prepareFleet selects it — into its stored window's authority hash, so the
+// local per-UID Telegram route can never match a fleet-created window: valid
+// fleet windows failed non-interactive reuse (askdo -n always answered
+// approval_required) and -l always reported zero remaining time. The route must
+// therefore come from the same fleet connection a new job would select: the
+// daemon-owned client for a fixed configuration, and a client built from the
+// current configuration for a reload daemon whose fleet section may postdate
+// startup. Submission admission consults it only when an answer could depend on
+// the gateway (a window is actually stored, or the host's own policy would
+// refuse; -l and auto-approve always do), so local users never pay a gateway
+// round trip. When the catalogue cannot be resolved
+// or authenticated right now, the exact fleet route and defaults are
+// unknowable; falling back to the host's own policy and the local comparison
+// (which yields no window and no gateway grant, never a false grant) is an
+// explicitly bounded limitation rather than a new availability prerequisite
+// for the exchange.
+type fleetLookup struct {
+	d    *daemon
+	ctx  context.Context
+	cfg  *config.Config
+	uid  uint32
+	once sync.Once
+	// attempted is set when a gateway call was actually made.
+	attempted bool
+	catalog   fleetproto.Catalog
+	found     bool
+	review    *config.ReviewConfig
 }
 
-// timestampWindowAuthority resolves the exact authority hash a stored window
-// must match for this caller: the plain local-route hash without a fleet
-// configuration (or with no window stored to compare against), and the hash
-// built from the selected fleet route otherwise.
-func (d *daemon) timestampWindowAuthority(ctx context.Context, cfg *config.Config, uid uint32, stored bool, target ExecutionTarget) string {
-	route := cfg.Telegram.RouteForUID(uid)
-	if stored {
-		route = d.timestampAuthorityRoute(ctx, cfg, uid)
+func (d *daemon) newFleetLookup(ctx context.Context, cfg *config.Config, uid uint32) *fleetLookup {
+	return &fleetLookup{d: d, ctx: ctx, cfg: cfg, uid: uid}
+}
+
+// catalogue fetches the signed catalogue at most once, bounded by the frame
+// deadline every gateway lookup has always had.
+func (l *fleetLookup) catalogue(timeout time.Duration) (fleetproto.Catalog, bool) {
+	l.once.Do(func() {
+		if l.cfg.Fleet == nil {
+			return
+		}
+		connection, closeConnection := l.d.fleet, func() {}
+		if l.d.reloadConfig {
+			client, err := fleetclient.New(*l.cfg.Fleet)
+			if err != nil {
+				slog.Warn("fleet catalogue connection unavailable", "uid", l.uid, "error", err)
+				return
+			}
+			connection, closeConnection = client, client.Close
+		}
+		defer closeConnection()
+		if connection == nil {
+			return
+		}
+		l.attempted = true
+		ctx, cancel := context.WithTimeout(l.ctx, timeout)
+		defer cancel()
+		catalog, err := connection.Catalogue(ctx, l.uid)
+		if err != nil {
+			slog.Warn("fleet catalogue unavailable", "uid", l.uid, "error", err)
+			return
+		}
+		l.catalog, l.found = catalog, true
+	})
+	return l.catalog, l.found
+}
+
+// unavailable reports a fleet host whose gateway answer could not be had, so
+// what the exchange knows is only the host's own policy.
+func (l *fleetLookup) unavailable() bool {
+	_, found := l.catalogue(frameDeadline)
+	return l.cfg.Fleet != nil && !found
+}
+
+// reviewPolicy is the host's review policy for the submitter plus the
+// gateway's defaults. Without a fleet, or without a catalogue, it is the
+// host's own policy, and no gateway is called for a host with no fleet.
+func (l *fleetLookup) reviewPolicy() *config.ReviewConfig {
+	if l.review == nil {
+		l.review = &l.cfg.Review
+		if catalog, found := l.catalogue(frameDeadline); found && catalog.ReviewDefaults != nil {
+			merged := l.cfg.Review.WithGatewayDefaults(catalog.ReviewDefaults)
+			l.review = &merged
+		}
 	}
-	return approvalAuthorityHash(route, cfg.Fleet, cfg.Telegram.OperatorUserID, cfg.Review.GatewayProfiles, target)
+	return l.review
+}
+
+func (l *fleetLookup) route() config.TelegramRoute {
+	if catalog, found := l.catalogue(frameDeadline); found {
+		return fleetTelegramRoute(l.cfg.Fleet, catalog.Route)
+	}
+	return l.cfg.Telegram.RouteForUID(l.uid)
+}
+
+// windowAuthority resolves the exact authority hash a stored window must match
+// for this caller: the plain local-route hash without a fleet configuration (or
+// with no window stored to compare against), and the hash built from the
+// selected fleet route otherwise.
+func (l *fleetLookup) windowAuthority(stored bool, target ExecutionTarget) string {
+	route := l.cfg.Telegram.RouteForUID(l.uid)
+	if stored {
+		route = l.route()
+	}
+	return approvalAuthorityHash(route, l.cfg.Fleet, l.cfg.Telegram.OperatorUserID, l.cfg.Review.GatewayProfiles, target)
 }
 
 // askdoGroupLookup is the small NSS seam used by list. It is variable so a
@@ -275,11 +333,23 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 		return
 	}
 	event.AskdoGroup = membership
-	event.ReviewMode, event.ReviewRequired = cfg.Review.Mode, cfg.Review.RequiresReview(uid, false)
+	// The effective policy: this host's own settings plus, on a fleet host, the
+	// gateway's defaults for settings the host leaves unset. -l names whose
+	// setting each value is, and says so when the gateway could not be asked.
+	lookup := d.newFleetLookup(ctx, cfg, uid)
+	review := lookup.reviewPolicy()
+	event.ReviewMode, event.ReviewRequired = review.Mode, review.RequiresReview(uid, false)
 	if event.ReviewMode == "" {
 		event.ReviewMode = "required"
 	}
-	event.TimestampTimeoutSeconds = int64(cfg.Review.TimestampTimeout(uid) / time.Second)
+	event.TimestampTimeoutSeconds = int64(review.TimestampTimeout(uid) / time.Second)
+	if cfg.Fleet != nil {
+		// A standalone host has no second source to tell apart from its own.
+		event.ReviewSource = string(review.ExemptionSource(uid))
+		event.TimestampTimeoutSource = string(review.TimestampSource(uid))
+		event.AutoApprovalSource = string(review.AutoApprovalSource(uid))
+		event.GatewayUnavailable = lookup.unavailable()
+	}
 	if key.TTYSession > 0 && key.TTYRdev > 0 && key.TTYInode > 0 {
 		stamp, stampErr := d.store.PeekApprovalTimestamp(ctx, key)
 		if stampErr != nil {
@@ -294,14 +364,14 @@ func (d *daemon) handleTimestamp(conn *net.UnixConn, uid uint32, request proto.T
 		// Peek keeps expired rows; resolve Fleet authority only for a window
 		// still live by its locally stored expiry.
 		if stamp.ExpiresAt.After(time.Now()) {
-			authority := d.timestampWindowAuthority(ctx, cfg, uid, !stamp.ApprovedAt.IsZero(), target)
-			expiry := timestampExpiry(stamp, cfg.Review.TimestampTimeout(uid), authority)
+			authority := lookup.windowAuthority(!stamp.ApprovedAt.IsZero(), target)
+			expiry := timestampExpiry(stamp, review.TimestampTimeout(uid), authority)
 			if expiry.After(time.Now()) {
 				event.RemainingSeconds = int64(time.Until(expiry).Seconds())
 			}
 		}
 	}
-	event.AutoApprovalMaxRisk = cfg.Review.MaxAutoRisk(uid)
+	event.AutoApprovalMaxRisk = review.MaxAutoRisk(uid)
 	event.AutoApprovalThreshold, err = d.store.GetAutoApprovalThreshold(ctx, uid)
 	if err != nil {
 		fail("read auto-approval preference failed")
@@ -345,10 +415,11 @@ func (j *jobRuntime) recordApprovalTimestamp(ctx context.Context, expiry time.Ti
 	human := j.humanApproval && j.approvalOnly
 	state := j.state
 	j.mu.Unlock()
-	if !human || j.req.ResetTimestamp || j.foreground == nil || j.configuration().Review.RequiresReview(j.uid, j.req.ForceReview) {
+	review := j.reviewPolicy()
+	if !human || j.req.ResetTimestamp || j.foreground == nil || review.RequiresReview(j.uid, j.req.ForceReview) {
 		return nil
 	}
-	ttl := j.configuration().Review.TimestampTimeout(j.uid)
+	ttl := review.TimestampTimeout(j.uid)
 	now := time.Now().UTC()
 	if ttl == 0 || !now.Before(expiry) || state == store.StateCancelled || state == store.StateExpired || state == store.StateFailed {
 		return nil
@@ -380,7 +451,7 @@ func (j *jobRuntime) completeValidation(ctx context.Context, pending *approvalBi
 		j.fail("encode timestamp validation")
 		return
 	}
-	stamp := store.ApprovalTimestamp{ApprovalTimestampKey: j.approvalTimestampKey(), ApprovedAt: now, ExpiresAt: now.Add(j.configuration().Review.TimestampTimeout(j.uid)), AuthorityHash: j.approvalAuthorityHash()}
+	stamp := store.ApprovalTimestamp{ApprovalTimestampKey: j.approvalTimestampKey(), ApprovedAt: now, ExpiresAt: now.Add(j.reviewPolicy().TimestampTimeout(j.uid)), AuthorityHash: j.approvalAuthorityHash()}
 	j.mu.Lock()
 	changed, err := j.daemon.store.CompleteTimestampValidation(ctx, j.req.RequestID, pending.digest, stamp, approval)
 	if changed && err == nil {

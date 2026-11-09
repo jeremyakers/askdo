@@ -30,9 +30,13 @@ type Config struct {
 	Profiles       []config.ModelConfig `json:"profiles"`
 	Bots           []BotConfig          `json:"bots"`
 	Channels       []ChannelConfig      `json:"channels"`
-	// ReviewerWebfetchEnabled, when present, overrides every fleet host's
-	// review.webfetch_enabled; omit it to leave the choice to each host.
+	// ReviewerWebfetchEnabled, when present, is the default for every fleet
+	// host that does not set review.webfetch_enabled itself; a host's own
+	// setting, true or false, wins. Omit it to leave the choice to each host.
 	ReviewerWebfetchEnabled *bool `json:"reviewer_webfetch_enabled,omitempty"`
+	// ReviewDefaults, when present, is the review policy hosts apply wherever
+	// their own configuration sets none (see ReviewDefaults).
+	ReviewDefaults *ReviewDefaults `json:"review_defaults,omitempty"`
 }
 
 type BotConfig struct {
@@ -258,6 +262,9 @@ func (c *Config) Validate() error {
 				users[id] = true
 			}
 		}
+	}
+	if _, err := c.ReviewDefaults.wire(); err != nil {
+		return fmt.Errorf("review_defaults: %w", err)
 	}
 	return nil
 }

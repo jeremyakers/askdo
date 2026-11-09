@@ -141,15 +141,27 @@ func TestBootstrapProjectsWebfetchEnabled(t *testing.T) {
 	if boot := job.bootstrap(); boot.ConfigProjection.Limits.WebfetchEnabled {
 		t.Fatal("webfetch projected as enabled with the default config")
 	}
-	h.daemon.cfg.Review.WebfetchEnabled = true
+	yes, no := true, false
+	h.daemon.cfg.Review.WebfetchEnabled = &yes
 	if boot := job.bootstrap(); !boot.ConfigProjection.Limits.WebfetchEnabled {
 		t.Fatal("webfetch_enabled was not projected to the worker limits")
 	}
-	// A signed gateway policy overrides the host setting in the projection.
-	no := false
+	// A gateway's default fills only a host that leaves the setting unset: the
+	// host's explicit true stays on under a gateway false...
 	job.fleet = &fleetJob{selection: fleetclient.Selection{Catalog: fleetproto.Catalog{ReviewerWebfetchEnabled: &no}}}
+	if boot := job.bootstrap(); !boot.ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("gateway webfetch default overrode the host's explicit setting")
+	}
+	// ...and an explicit host false stays off under a gateway true.
+	h.daemon.cfg.Review.WebfetchEnabled = &no
+	job.fleet.selection.Catalog.ReviewerWebfetchEnabled = &yes
 	if boot := job.bootstrap(); boot.ConfigProjection.Limits.WebfetchEnabled {
-		t.Fatal("gateway webfetch policy did not override the host setting")
+		t.Fatal("gateway webfetch default overrode an explicit host false")
+	}
+	// Unset on the host, the gateway's value is what the worker is told.
+	h.daemon.cfg.Review.WebfetchEnabled = nil
+	if boot := job.bootstrap(); !boot.ConfigProjection.Limits.WebfetchEnabled {
+		t.Fatal("gateway webfetch default did not reach a host that leaves it unset")
 	}
 }
 

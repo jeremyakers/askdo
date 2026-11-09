@@ -31,7 +31,11 @@ import (
 // All mutable fleet state belongs to run's single root lifecycle. Cancellation
 // and dispatch still use the existing per-job lock and durable store CAS.
 type fleetJob struct {
-	selection      fleetclient.Selection
+	selection fleetclient.Selection
+	// review is the effective review policy for this job: the host's own
+	// configuration plus the defaults of the signed catalogue frozen in
+	// selection. Set once by prepareFleet; see jobRuntime.reviewPolicy.
+	review         *config.ReviewConfig
 	reviewDeadline time.Time
 	seq            uint64
 	choice         int
@@ -83,6 +87,11 @@ func fleetTelegramRoute(fleet *config.FleetConfig, snapshot fleetproto.RouteSnap
 	return route
 }
 
+// prepareFleet fetches and freezes the signed catalogue for one review.
+// approvalOnly is what the host's own configuration already decided; the
+// catalogue can only add to it, because the gateway's defaults may exempt this
+// submitter from AI review where the host alone would review. The effective
+// review policy is frozen with the catalogue (j.reviewPolicy).
 func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]proto.ProjectedModel, error) {
 	deadline := time.Now().Add(j.configuration().Review.TotalTimeout.Value())
 	if d := j.deadline(); !d.IsZero() && d.Before(deadline) {
@@ -97,6 +106,8 @@ func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]pro
 	if err != nil {
 		return nil, fmt.Errorf("fleet catalogue: %w", err)
 	}
+	review := j.configuration().Review.WithGatewayDefaults(catalog.ReviewDefaults)
+	approvalOnly = approvalOnly || !review.RequiresReview(j.uid, j.req.ForceReview)
 	profiles := j.configuration().Review.GatewayProfiles
 	if approvalOnly {
 		// Human-only jobs still authenticate and bind the signed route, but
@@ -107,7 +118,7 @@ func (j *jobRuntime) prepareFleet(ctx context.Context, approvalOnly bool) ([]pro
 	if err != nil {
 		return nil, fmt.Errorf("fleet selection: %w", err)
 	}
-	j.fleet = &fleetJob{selection: selection, reviewDeadline: deadline}
+	j.fleet = &fleetJob{selection: selection, review: &review, reviewDeadline: deadline}
 	// The signed route, not worker-supplied peer numbers, is adapted to existing
 	// authenticated named-recipient gates. No Telegram credential is projected.
 	j.namedTelegram = true
