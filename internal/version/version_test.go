@@ -3,6 +3,8 @@ package version
 import (
 	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -109,5 +111,43 @@ func TestReleaseBuildEmbedsTheTagInThisPackage(t *testing.T) {
 		if !strings.Contains(string(script), want) {
 			t.Fatalf("scripts/build-release-bundle.py does not contain %q", want)
 		}
+	}
+}
+
+// The release build embeds the tag with the linker's -X flag, which silently does
+// nothing if the variable is renamed, moved or stops being a plain string, and a
+// binary that does not know its release is never upgraded by its gateway. Searching
+// the finished binary for the tag proves nothing: v1.0.0 and v1.0.1 already occur
+// in it through dependency versions. So build a probe with the flag the build
+// script uses and ask it.
+func TestLinkerEmbedsTheReleaseInTheVariableTheBuildNames(t *testing.T) {
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Skipf("no go tool to build the probe with: %v", err)
+	}
+	build := func(flag string) string {
+		t.Helper()
+		out := filepath.Join(t.TempDir(), "probe")
+		args := []string{"build", "-trimpath", "-buildvcs=false", "-o", out}
+		if flag != "" {
+			args = append(args, "-ldflags", flag)
+		}
+		cmd := exec.Command(goTool, append(args, "./testdata/probe")...)
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("go %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
+		got, err := exec.Command(out).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(got))
+	}
+	if got := build("-X " + PackagePath() + ".Release=v9.8.7-rc.6"); got != `"v9.8.7-rc.6"` {
+		t.Fatalf("a build with -X reports release %s, want the tag it was given", got)
+	}
+	// Any other build leaves the release empty, which a fleet host reads as unknown.
+	if got := build(""); got != `""` {
+		t.Fatalf("a build without -X reports release %s, want none", got)
 	}
 }

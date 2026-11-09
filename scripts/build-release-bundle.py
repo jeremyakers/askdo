@@ -560,12 +560,6 @@ def build(args: BuildOptions) -> None:
                 require('-tags=' not in info and 'askdo_fleet_fixture' not in info,
                         f'test build tag in release asset: {asset}')
                 binary = path.read_bytes()
-                if name == 'askdo':
-                    # With -trimpath go does not record -ldflags in the build info (golang.org/issue/52372),
-                    # so `go version -m` cannot show the -X took effect; look for the tag in the binary. This
-                    # is a cheap sanity check, not proof (the text could occur elsewhere); that the variable
-                    # named above is the real one is pinned by internal/version's test.
-                    require(tag.encode('ascii') in binary, f'release tag was not embedded in {asset}')
                 metadata[asset] = ArtifactRecord(digest(binary), len(binary), elf_metadata(path, arch), info)
                 _ = (assets / (asset + '.sha256')).write_text(f'{digest(path.read_bytes())}  {asset}\n', encoding='ascii')
         expected = set(COMMON) | {'visudo-LICENSE', 'visudo-SOURCE'}
