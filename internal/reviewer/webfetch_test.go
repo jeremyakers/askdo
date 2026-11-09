@@ -881,3 +881,36 @@ func TestFetchReviewURLNetworkErrorsLeakNoHostOrURL(t *testing.T) {
 		t.Fatalf("error echoes the hostname: %q", err)
 	}
 }
+
+func TestFetchReviewURLRefusesHTTPSDowngradeAndDropsReferer(t *testing.T) {
+	// A redirect hop never sees the previous URL as Referer.
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			parsed, _ := url.Parse(server.URL)
+			w.Header().Set("Location", "http://other.example:"+parsed.Port()+"/next?secret=1")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		if r.Header.Get("Referer") != "" {
+			t.Errorf("Referer carried to the next host: %q", r.Header.Get("Referer"))
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	fetcher, _, rawURL := newTestFetcher(t, server, staticLookup(fakePublicIP))
+	if _, err := fetcher.fetch(context.Background(), rawURL+"start?q=private"); err != nil {
+		t.Fatal(err)
+	}
+	// An https URL redirected to http is refused.
+	req, _ := http.NewRequest(http.MethodGet, "http://other.example/", nil)
+	via, _ := http.NewRequest(http.MethodGet, "https://github.com/x", nil)
+	if err := fetcher.client.CheckRedirect(req, []*http.Request{via}); !errors.Is(err, ErrFetchInvalidURL) {
+		t.Fatalf("https->http redirect error = %v", err)
+	}
+	// The previous hop decides: http -> https -> http is refused too.
+	start, _ := http.NewRequest(http.MethodGet, "http://example.com/", nil)
+	if err := fetcher.client.CheckRedirect(req, []*http.Request{start, via}); !errors.Is(err, ErrFetchInvalidURL) {
+		t.Fatalf("http->https->http redirect error = %v", err)
+	}
+}
