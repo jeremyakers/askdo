@@ -331,8 +331,8 @@ It asks for the usual Telegram approval (one, for the whole rollout), stores the
 release and the digest of its install manifest in the gateway database (no
 restart), and each enrolled host then upgrades itself, one at a time, with the
 same staged activation and automatic rollback as `askdo-config upgrade`. A failure pauses
-the rollout; you get a Telegram notice for every host's result; run the command
-again to resume. `askdo-config upgrade-fleet --status` shows each host's release,
+the rollout; you get a Telegram notice for every host's result; to resume, run the
+exact `askdo-config upgrade-fleet TAG` that `--status` prints. `askdo-config upgrade-fleet --status` shows each host's release,
 last upgrade result and rollout state without an approval card for askdo-group
 members (`--stop` stops offering; disabled or opted-out hosts show
 `rollout=excluded`). The gateway host takes the push only if it is

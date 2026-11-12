@@ -221,8 +221,9 @@ askdo-config upgrade-fleet --status # releases, results, and rollout state; no c
 askdo-config upgrade-fleet --stop   # stop offering the release
 ```
 
-Hosts upgrade one at a time. A failure pauses the rollout; running
-`askdo-config upgrade-fleet` again resumes it. See
+Hosts upgrade one at a time. A failure pauses the rollout; to resume, run the
+exact `askdo-config upgrade-fleet TAG` command that `--status` prints (a bare
+`upgrade-fleet` targets the newest release instead). See
 [fleet upgrades](docs/upgrade.md#upgrade-a-fleet-from-the-gateway).
 
 ### Uninstall
@@ -234,7 +235,11 @@ curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/uninsta
 ```
 
 To remove the retained state too, download `uninstall.sh`, inspect it, and run
-`sudo sh uninstall.sh --purge --yes`.
+`sudo sh uninstall.sh --purge --yes`. It removes `/etc/askdo`, `/var/lib/askdo`,
+`/var/lib/askdo-review` and the default gateway state. It does not remove a
+gateway database at a custom path or upgrade backups (default
+`/var/backups/askdo`); on Synology DSM it also keeps the askdo accounts and
+`/var/lib/askdo-review`. Delete those yourself if you want them gone.
 
 ## Glossary
 
