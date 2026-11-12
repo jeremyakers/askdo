@@ -163,3 +163,31 @@ func TestJoinComparesCanonicalExistingDisplayNames(t *testing.T) {
 		t.Fatal("join accepted whitespace-only display name")
 	}
 }
+
+// A join still pending from an older gateway has no display name, only its
+// hostname; a new join with that hostname must not reuse it unsuffixed.
+func TestJoinTreatsLegacyPendingHostnameAsTaken(t *testing.T) {
+	joins, store := joinStoreFixture(t)
+	first := "host_" + strings.Repeat("a", 64)
+	req, _ := joinFixtureRequest(first)
+	req.Hostname = "pop-os"
+	if _, err := joins.Create(t.Context(), req, joinFixtureEnrollment(first)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec("UPDATE gateway_pending_joins SET policy_json=json_remove(policy_json,'$.display_name') WHERE host_id=?", first); err != nil {
+		t.Fatal(err)
+	}
+	second := "host_" + strings.Repeat("b", 64)
+	req, _ = joinFixtureRequest(second)
+	req.Hostname = "pop-os"
+	if _, err := joins.Create(t.Context(), req, joinFixtureEnrollment(second)); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := store.db.QueryRow("SELECT json_extract(policy_json,'$.display_name') FROM gateway_pending_joins WHERE host_id=?", second).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "pop-os-bbbb" {
+		t.Fatalf("second join named %q", name)
+	}
+}

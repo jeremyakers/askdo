@@ -215,7 +215,7 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 	if name == "" {
 		name = string(req.HostID)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT json_extract(policy_json,'$.display_name') FROM gateway_enrollments UNION ALL SELECT json_extract(policy_json,'$.display_name') FROM gateway_pending_joins WHERE state='pending' AND expires_at>?`, now)
+	rows, err := tx.QueryContext(ctx, `SELECT json_extract(policy_json,'$.display_name') FROM gateway_enrollments UNION ALL SELECT COALESCE(NULLIF(json_extract(policy_json,'$.display_name'),''),hostname) FROM gateway_pending_joins WHERE state='pending' AND expires_at>?`, now)
 	if err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
