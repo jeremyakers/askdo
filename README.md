@@ -2,210 +2,263 @@
 
 **Sudo, but the approval happens on your phone.**
 
-Your AI agent needs to install a package. Your server needs a service restarted.
-You need to run a script you didn't write. None of those should mean handing
-over a root password or blindly trusting a command.
+askdo lets people and AI agents run privileged Linux commands after approval in
+Telegram, instead of sharing a root password or granting blanket passwordless
+sudo. Add an optional AI reviewer for a second opinion, or use approval-only
+mode with no model or API key.
 
-**askdo lets humans and AI agents request privileged Linux commands, with
-approval through Telegram.** Add an AI reviewer for a second opinion, or skip
-the model and just approve from your phone.
-
-[Why askdo?](#why-askdo) · [Get started](#get-started) ·
-[Review a script](#review-a-script-before-you-run-it) · [Documentation](#documentation)
-
-## See it work
-
-On the server, you (or your agent) run:
-
-```sh
-askdo --reason 'restart nginx after config change' /usr/bin/systemctl restart nginx
-```
-
-Your phone buzzes once per request. The approval card leads with the AI's risk
-rating and verdict, followed by the server/job identity, who's asking, expiry,
-up to three ranked warnings, the command and the reason. **Details** expands
-the full request, review, evidence and reviewer history. With no AI review, the
-card instead prominently says **NO AI REVIEW — Risks NOT assessed**.
-Tap **Approve once** to run it, **Deny** to stop it, or **Details** to
-take a closer look. AI-reviewed cards also offer **Request changes**: run
-nothing and return the review's uncertainties, warnings, and suggestions to
-the submitting agent. The output comes back to the terminal that asked.
-
-Suggestions identify what the submitter can address and what needs an
-administrator. **Request changes** returns that feedback without running the
-command. Nothing automatically resubmits: address it, then ask again when
-you're ready.
-
-## Why askdo?
-
-### Let your agent work without handing it the keys
-
-An agent can write the code and run the tests, then get stuck at the last step:
-installing a system dependency, reloading nginx, or fixing a file's ownership.
-
-Instead of giving it blanket passwordless sudo—or doing every privileged step
-yourself—give it askdo. The agent asks, an AI reviewer can flag risky changes,
-and you decide from Telegram. It gets a way to request root access, not your
-password.
-
-### Keep strong passwords. Stop typing them into every sudo prompt.
-
-Long, unique passwords belong in your password manager, not your muscle memory.
-With askdo, you can keep a different strong password for every server and use
-a Telegram tap for day-to-day privileged commands.
-
-Already know what you're doing? **Approval-only mode needs no AI model or API
-key.** You still log in to your server as usual; askdo handles the approval
-when it's time to run a privileged command.
-
-### Get a second opinion before running unfamiliar code
-
-That installer wants root. That maintenance script looks useful. Your own
-cleanup command is a little more ambitious than usual.
-
-Ask for an AI review before you run it. For a script arriving on stdin — the
-classic `curl … | sh` — askdo can capture it, make it available to the
-reviewer, and run those exact bytes with Bash after your approval; bundles
-work the same way for local script folders. [Here's how](#review-a-script-before-you-run-it).
-
-Reviewers can also inspect bounded files, executable hashes, service state and
-sanitized sudo-policy metadata when you enable those tools. See
-[review tools](docs/review-tools.md).
-
-### Make the rest of the workflow easier, too
-
-- **Approve homelab maintenance from the sofa.** Let an agent prepare the
-  work and send you the decision instead of calling you back to the keyboard.
-- **Put a human checkpoint in a deployment script.** Run the unprivileged
-  steps normally, then use askdo for the service reload or system change.
-- **Pick up long-running agent work later.** Once a headless command has
-  launched, a client timeout needn't stop it. Check its status and reconnect
-  to its output using the same job ID.
-- **Use different review policies for people and agents.** Keep AI review
-  for agent accounts while using phone-only approval for your own account.
-- **Give reviewers account context.** Administrator-owned notes describe
-  normal work for each user or group, without granting extra privileges.
-  See [account notes](docs/configuration.md#reviewer-instruction-layers-and-account-notes).
-- **Add more admins without sharing phones.** Each submitting account can
-  reach its own bot, one request can reach several admins at once, and the
-  first valid approve or deny decides it. Set up named channels in
-  [configuration](docs/configuration.md#telegram).
-- **Approve a whole fleet from one phone.** Running several servers? An
-  optional shared gateway can hold the model credentials, Codex login and one
-  Telegram bot for all of them, while each machine keeps its own inspection
-  rules and local root execution. The gateway can also publish review defaults
-  (who skips AI review, approval reuse windows, auto-approval ceilings, risk
-  guidance and notes) that a machine inherits wherever its own configuration
-  sets nothing. Standalone mode — one bot per server, configured on that
-  server — stays the default and is unchanged. See
-  [fleet setup](docs/fleet-setup.md).
-- **Let routine work through automatically.** Opt-in risk-based auto-approval
-  can run qualifying AI-reviewed headless jobs with a Telegram notice.
-  It's off by default; [you choose the policy](docs/configuration.md).
+[Get started](#get-started) · [Everyday commands](#everyday-commands) ·
+[Day-2 operations](#day-2-operations) · [Documentation](#documentation)
 
 ## Get started
 
-You'll need a Linux host with systemd and sudo, plus a Telegram bot. Create the
-bot with [BotFather](https://t.me/BotFather). A model is optional: choose it
-later if you want AI review.
+### Prerequisites
 
-### Install
+- Linux on **amd64 (x86-64)** or **arm64**, with **systemd**, **sudo**
+  (including `visudo`), and **curl**.
+- A Telegram bot from [@BotFather](https://t.me/BotFather). The standalone
+  steps below explain how to create and connect it.
+- Optional: an AI model and its credentials for automated review. You do not
+  need a model for approval-only mode.
 
-One command, pinned to the published release:
+### 1. Install
 
 ```sh
-curl -fsSL https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.20/install.sh | sudo sh
+curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/install.sh | sudo sh
 ```
 
-The installer downloads the release binaries and writes a starter config; it
-never starts the service. Stop an older askdo broker yourself before upgrading.
-For the installer's verification model and Synology DSM specifics, see
+The installer downloads and verifies the release and writes a starter config;
+it does not enable or start the service. Use this command for a first install;
+for later upgrades, use [`askdo-config upgrade`](#upgrade-this-host).
+
+Check the installed versions (neither command asks for approval):
+
+```sh
+askdo --version
+askdo-config --version
+```
+
+For asset verification and Synology DSM specifics, see
 [installation details](docs/installation.md).
 
-### Set up a standalone server
+### 2A. Set up a standalone server
 
-Standalone mode uses one bot per server, configured on that server.
-The first setup uses administrator access because no configured broker is
-running yet. After setup, askdo members use `askdo-config` without sudo: root-only
-operations request the normal Telegram approval and preserve interactive prompts.
+Use this path for one machine with its own Telegram bot.
 
-First, connect Telegram. The wizard asks for the bot token and can discover
-your Telegram IDs after you message the bot:
+1. **Add every human and agent account to the `askdo` group.**
+
+   ```sh
+   sudo usermod -aG askdo "$USER"
+   # If an agent uses a separate account:
+   sudo usermod -aG askdo AGENT_USER
+   ```
+
+   Log out and back in, or run `newgrp askdo` in your current shell. An agent
+   account needs a fresh login too. Only add accounts you trust to request
+   privileged commands.
+
+2. **Connect Telegram.**
+
+   a. Open [@BotFather](https://t.me/BotFather) in Telegram, send `/newbot`, and
+   follow its prompts. Copy the bot token it gives you.
+
+   b. Open a chat with your new bot and press **Start** or send it a message.
+
+   c. Run the setup wizard:
+
+   ```sh
+   sudo askdo-config channel add telegram
+   ```
+
+   Paste the bot token when prompted. After your message, the wizard can
+   discover both the **chat ID** (where approval cards arrive) and your numeric
+   **Telegram user ID** (who may approve them). Accept those discovered IDs, or
+   enter them manually if you already have them.
+
+3. **Choose the review mode.** For phone-only approval with no AI model:
+
+   ```sh
+   sudo askdo-config review mode approval-only
+   ```
+
+   For AI review instead, add a hosted reviewer or your own local model:
+
+   ```sh
+   sudo askdo-config reviewer add my-reviewer
+   ```
+
+4. **Validate the configuration and enable the service.**
+
+   ```sh
+   sudo askdo-config config check
+   sudo systemctl enable --now askdo
+   ```
+
+   A successful check prints `configuration valid`; resolve any reported error
+   before enabling the service.
+
+5. **Run a harmless first command.**
+
+   ```sh
+   askdo --reason 'Try my first Telegram approval' /usr/bin/id -u
+   ```
+
+   Telegram shows an **approval card** with the host and job, requester,
+   command, reason, and expiry. AI-reviewed cards also show a risk verdict and
+   warnings; approval-only cards prominently say **NO AI REVIEW — Risks NOT
+   assessed**. Tap **Approve once** to run the command, **Deny** to stop it, or
+   **Details** for more context. AI-reviewed cards also offer **Request
+   changes**, which returns feedback without running anything.
+
+   The terminal prints `0` after approval: that is root's user ID, so the
+   command ran successfully as root.
+
+### 2B. Add a machine to an existing fleet
+
+Use this path only if you already have a fleet gateway. Skip it for a single
+standalone machine.
+
+1. **Add the human and agent accounts on this machine to the `askdo` group.**
+
+   ```sh
+   sudo usermod -aG askdo "$USER"
+   sudo usermod -aG askdo AGENT_USER  # if you use a separate agent account
+   ```
+
+   Log out and back in, or run `newgrp askdo` in your current shell.
+
+2. **Check the gateway prerequisites.** Before joining, complete
+   [fleet gateway setup](docs/fleet-setup.md#prerequisites): its TLS
+   certificate and key must have SANs matching the gateway DNS name or IP you
+   use below, and it needs a **dedicated Telegram bot** (not a bot already used
+   by a standalone server).
+
+3. **Join from the new host.** Choose a display name with `--name`:
+
+   ```sh
+   sudo askdo-config fleet join --name web-01 https://gateway.example.com:8443
+   ```
+
+   The host prints a six-character request code. Approve the fleet enrollment
+   card **only if its code matches the host terminal**. For a privately trusted
+   CA, answer the host's `y/N` confirmation only after comparing the code and
+   approving the card yourself. The code binds the request to the gateway's TLS
+   certificate; a different code is unsafe. Join installs the fleet config and
+   enables `askdo.service`.
+
+   `--name` is optional. By default the gateway uses the machine hostname; if
+   that hostname is already used, it assigns `hostname-<4 chars>` instead. On
+   the gateway host, group members can list hosts without an approval card:
+
+   ```sh
+   askdo-config gateway hosts list
+   askdo-config gateway hosts rename HOST_ID NAME
+   ```
+
+4. **Test the host.**
+
+   ```sh
+   askdo --reason 'Try my first fleet approval' /usr/bin/id -u
+   ```
+
+   Approve the card in Telegram as described in
+   [standalone step 5](#2a-set-up-a-standalone-server). Output `0` means the
+   command ran as root. See [fleet setup](docs/fleet-setup.md) for explicit CA
+   trust, enrollment recovery, central AI review, and revocation.
+
+### When do I need sudo?
+
+| Task | Run as |
+| --- | --- |
+| First-time standalone setup (`channel add`, `reviewer add`, `review mode`, initial `config check`) | `sudo` |
+| Fleet join (`askdo-config fleet join`) | `sudo` |
+| Enable or disable the systemd service | `sudo systemctl …` |
+| Everything else after setup | Your normal account in the `askdo` group; root-only operations ask for Telegram approval |
+
+`askdo --help` and `askdo-config --help` are local help and never request
+approval. Read-only views including `askdo -l`, `askdo status`,
+`askdo-config upgrade-fleet --status`, and `askdo-config gateway hosts list`
+also run without a card (in their default form; adding `--config PATH` reads
+that file as root and asks for approval).
+
+### If the first command cannot connect
+
+Follow the remedy in the printed connection error. The usual checks are:
 
 ```sh
-sudo askdo-config channel add telegram
+id -nG                         # must include askdo after a fresh login
+sudo systemctl status askdo   # broker service state
+sudo journalctl -u askdo      # broker logs
 ```
 
-Then choose how you want to approve.
+If `sudo` says `askdo-config` is not found, its `secure_path` may omit
+`/usr/local/bin`; use `sudo /usr/local/bin/askdo-config …`. The starter
+`/etc/askdo/config.json` is root-only (`0600`), so inspect or edit it with
+administrator access rather than as an unprivileged user.
 
-**With AI review:** add a hosted reviewer or your own local model:
+## Day-2 operations
+
+### Upgrade this host
+
+Run as an `askdo` group member, without `sudo`:
 
 ```sh
-sudo askdo-config reviewer add my-reviewer
+askdo-config upgrade
+# Or choose an exact release:
+askdo-config upgrade --release vX.Y.Z
 ```
 
-**Or, just use your phone:** no model or API key is needed. Cards will clearly
-say **NO AI REVIEW — Risks NOT assessed**; your tap is still required.
+The command asks for Telegram approval, downloads and verifies the release,
+then activates it with automatic rollback if activation fails. See
+[upgrading and recovery](docs/upgrade.md) for reconnecting, exact releases, and
+backups.
+
+### Upgrade a fleet from the gateway host
 
 ```sh
-sudo askdo-config review mode approval-only
+askdo-config upgrade-fleet          # newest stable release; one approval
+askdo-config upgrade-fleet --status # releases, results, and rollout state; no card
+askdo-config upgrade-fleet --stop   # stop offering the release
 ```
 
-Finally, add your account to the `askdo` group, validate the config and start
-the service:
+Hosts upgrade one at a time. A failure pauses the rollout; to resume, run the
+exact `askdo-config upgrade-fleet TAG` command that `--status` prints (a bare
+`upgrade-fleet` targets the newest release instead). See
+[fleet upgrades](docs/upgrade.md#upgrade-a-fleet-from-the-gateway).
+
+### Uninstall
+
+Remove askdo while keeping configuration, credentials, and databases:
 
 ```sh
-sudo usermod -aG askdo "$USER"
-sudo askdo-config config check
-sudo systemctl enable --now askdo
+curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/uninstall.sh | sudo sh
 ```
 
-Add a separate agent account too if you use one. Log out and back in, then try
-something harmless:
+To remove the retained state too, download `uninstall.sh`, inspect it, and run
+`sudo sh uninstall.sh --purge --yes`. It removes `/etc/askdo`, `/var/lib/askdo`,
+`/var/lib/askdo-review` and the default gateway state. It does not remove a
+gateway database at a custom path or upgrade backups (default
+`/var/backups/askdo`); on Synology DSM it also keeps the askdo accounts and
+`/var/lib/askdo-review`. Delete those yourself if you want them gone.
 
-```sh
-askdo --reason 'Try my first Telegram approval' /usr/bin/id -u
-```
+## Glossary
 
-Approve it in Telegram. Seeing `0` means it ran as root. For custom review
-policies and inspection scope, see [configuration](docs/configuration.md).
-
-### Join another machine to your fleet
-
-Once your gateway is running, a fresh host can enroll itself:
-
-```sh
-sudo askdo-config fleet join https://your.gateway:8443
-```
-
-Approve the Telegram card **ONLY if its request code matches the host terminal**.
-The code binds the request to the gateway's TLS certificate. Private LAN
-certificates need no CA copying or fingerprint pasting: the first certificate
-is provisionally pinned, with normal hostname and validity checks. A different
-code is unsafe—do not approve it. `--ca-file PATH` remains available for explicit
-CA trust.
-
-For provisional trust, after the gateway reports approval the host asks:
-`Did the Telegram card show code XXXXXX, and did you approve it? [y/N] `.
-Answer `y` or `yes` (case-insensitive) **only after comparing the code and
-approving that card yourself**. The answer comes from `/dev/tty`, never piped
-stdin. Any other answer, EOF or no terminal aborts without installing config,
-credentials or CA. A gateway can claim approval without sending a card.
-System-trusted gateways and `--ca-file` joins do not ask this extra question.
-
-The host installs its fleet config, adds the invoking user to `askdo` and starts
-the service. Log out
-and back in once, and it's ready. No bundle copying or server-side enrollment
-command is needed.
+| Term | Meaning |
+| --- | --- |
+| **Broker** | The local root service that receives requests, enforces policy, and dispatches approved commands. |
+| **Gateway** | The optional fleet service that centralizes Telegram approvals and AI credentials; it never runs host commands. |
+| **Fleet host** | A machine enrolled with a gateway. It keeps its own broker, policy, jobs, and privileged execution. |
+| **Reviewer** | The optional AI model that assesses a request and supplies risk findings before the human decision. |
+| **Approval card** | The Telegram message showing a request and its Approve, Deny, and Details controls. |
+| **Approval-only** | Mode with human Telegram approval but no AI review or model credentials. |
+| **Bundle** | A captured folder of scripts and helper files reviewed and executed together. |
+| **Auto-approval** | Opt-in automatic dispatch of qualifying requests under your risk policy; off by default. |
 
 ## Everyday commands
 
 Use `askdo COMMAND [ARG...]` to run a command; use `askdo -- COMMAND` if its name
-collides with an askdo subcommand (including a legacy operator alias) or starts
-with `-`. Configuration and operator commands live in `askdo-config --help`;
-the old `askdo review|channel|config|auth|inspection|reviewer|gateway|fleet|logs`
-forms still work with a one-line deprecation notice. Service invocations
-`askdo daemon` and `askdo gateway serve` remain notice-free.
+collides with an askdo subcommand or starts with `-`. Configuration and operator
+commands live in `askdo-config --help`.
 
 Ask for a second opinion on one command, even if your account is normally
 exempt:
@@ -296,23 +349,27 @@ See [timestamp_timeout and approval reuse](docs/configuration.md#sliding-foregro
 
 Headless agents get streamed output and a job ID they can return to later. If
 the client disconnects before launch, the pending request is cancelled; after
-launch, use `status` and `attach` rather than submitting the command again.
+launch, use `status` and `attach` rather than submitting the command again. See
+[guidance for AI agents](docs/agents.md).
 
-## Upgrade askdo
+## Why askdo?
 
-```sh
-askdo-config upgrade
-```
-
-(`askdo upgrade` still works but is deprecated and prints a notice; a bare
-`askdo` subcommand would hide any program of the same name.) It downloads and verifies a release, asks for Telegram approval, then activates
-and verifies it, rolling back to the previous release if activation fails. No
-sudo password is needed. See [upgrading and recovery](docs/upgrade.md) for exact
-releases, reconnecting after a restart, rollback and backup handling. With a fleet,
-run `askdo-config upgrade-fleet` on the gateway host to roll a release out to
-every host on one approval. With a fleet
-gateway you can name a release once and have every host upgrade itself, one at a
-time: [upgrade a fleet from the gateway](docs/upgrade.md#upgrade-a-fleet-from-the-gateway).
+- **Give agents a checkpoint, not your root password.** Agents can request a
+  package install or service restart while you keep the decision.
+- **Approve from your phone.** Approval-only mode needs no AI model; optional
+  AI review adds a second opinion and clearly labels unreviewed requests.
+- **Review scripts and bundles before they run.** askdo captures the exact
+  bytes or files for review. See [Review a script](#review-a-script-before-you-run-it).
+- **Fit different people and agents.** Named Telegram channels, account
+  exemptions, approval reuse windows, account notes, and inspection policies
+  are covered in [configuration](docs/configuration.md).
+- **Reconnect to long-running work.** Job IDs support `status` and `attach`
+  without blindly running the command again.
+- **Centralize several machines, not their root execution.** An optional fleet
+  gateway shares Telegram and model credentials while each host executes
+  locally. See [fleet setup](docs/fleet-setup.md).
+- **Automate only what you choose.** Risk-based auto-approval is opt-in and off
+  by default; [you choose the policy](docs/configuration.md).
 
 ## Review a script before you run it
 
@@ -352,6 +409,8 @@ askdo --review=yes --reason 'Review this installer before running it' \
 - [Installation details and DSM notes](docs/installation.md)
 - [Configuration](docs/configuration.md)
 - [Fleet setup](docs/fleet-setup.md)
+- [Upgrading and recovery](docs/upgrade.md)
+- [Guidance for AI agents](docs/agents.md)
 - [Review journal](docs/review-log.md)
 - [Architecture](docs/architecture.md) and [review tools](docs/review-tools.md)
 - [Client protocol](docs/protocol-client.md)

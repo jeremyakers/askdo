@@ -4,10 +4,9 @@ The broker (root) and the reviewer worker (`askdo-review`) communicate over a
 private pipe: the worker's stdin (broker → worker) and stdout (worker →
 broker). Nothing else shares this channel. This document is the public
 reference for the wire schema implemented in `internal/proto/worker.go` and
-`internal/proto/inspection_metadata.go`. The host-evidence additions below
-are source-only, not in published rc.2 binaries; old strict decoders do not
-accept their new fields/operations. Upgrade the host broker and reviewer
-together before enabling optional capabilities.
+`internal/proto/inspection_metadata.go`. Old strict decoders do not accept the
+host-evidence additions' new fields/operations. Upgrade the host broker and
+reviewer together before enabling optional capabilities.
 
 ## Process launch contract
 
@@ -112,7 +111,7 @@ groups per review. Host guidance and notes compose through one shared function;
 notes never replace calibration or compiled protocol duties. The broker owns the
 exact-byte snapshots and ordered `administrator_layers` audit in manifest v1
 (scope, name, subject UID, source, SHA-256, text), replacing the old single
-`risk_policy` audit field. See [configuration and rc.15 migration](configuration.md#reviewer-instruction-layers-and-account-notes).
+`risk_policy` audit field. See [configuration and risk-policy migration](configuration.md#reviewer-instruction-layers-and-account-notes).
 All text must be valid UTF-8 without NUL and fit the combined framing limits.
 Fleet mode additionally requires the complete resulting system message to meet
 the existing fleet message-content limit and character rules. Policy files are
@@ -603,8 +602,6 @@ The broker could not freeze the review; the job fails.
 | `reason` | string ≤ 512 |
 
 ### `model_turn_request` (W→B) — fleet mode only
-
-*Implemented in source; not in the `v1.0.0-rc.1` release binaries.*
 
 In fleet mode the worker holds no provider, OAuth, enrollment, Telegram or
 signing secrets, so its model traffic is mediated by the root broker through

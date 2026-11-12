@@ -10,9 +10,8 @@ not an alternative install path.
 - The `install.sh` published with a release defaults to its own tag; no
   arguments are needed. `--version TAG` (or `ASKDO_VERSION`) selects any
   other published release tag — never a source branch.
-- The `releases/latest/...` URL selects the newest stable (non-prerelease)
-  release only, with no prerelease fallback; prefer the exact-tag URL shown
-  in the README while only release candidates exist.
+- The `releases/latest/...` URL used by the README selects the newest stable
+  (non-prerelease) release only, with no prerelease fallback.
 - One closed `install-manifest.v1` pins the tag, source commit, installer,
   both architecture inventories and asset hashes/sizes. All subsequent
   assets use that exact tag.
@@ -27,6 +26,19 @@ not an alternative install path.
   the same binary by its invocation name. There is no extra release asset.
   Installation creates or repairs the link and refuses an existing non-symlink;
   uninstall removes the link without following its target.
+
+## Post-install checks
+
+- Confirm the release with `askdo --version` and `askdo-config --version`.
+  Both `--help` forms are local and never request approval.
+- If `sudo askdo-config` is not found, `sudo` may have a `secure_path` that
+  omits `/usr/local/bin` (seen on some Synology and RHEL-like systems). Use
+  `sudo /usr/local/bin/askdo-config …` instead.
+- `/etc/askdo/config.json` starts as root-only `0600`; use administrator access
+  to inspect or edit it.
+- If a client cannot reach the broker, follow its printed connection remedy.
+  Check group membership with `id -nG`, log in again after `usermod`, and check
+  the service with `sudo systemctl status askdo` and `sudo journalctl -u askdo`.
 
 ## Synology DSM specifics
 

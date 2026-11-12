@@ -7,6 +7,8 @@
   Synology DSM behavior.
 - [`upgrade.md`](upgrade.md) — approved self-upgrade, gateway-pushed fleet
   upgrades, reconnects and recovery.
+- [`agents.md`](agents.md) — submission, job tracking, exit codes, and a
+  paste-in prompt for AI agents.
 - [`clean-cutover.md`](clean-cutover.md) — install alongside another service,
   coordinate Telegram bot use, and plan an operator-approved handoff; no live
   cutover is claimed.

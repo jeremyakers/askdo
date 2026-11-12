@@ -75,7 +75,7 @@ validator fixtures. Real validators need their separate build/runtime checks.
 No `askdo_fleet_fixture` build tag may appear in release assets. ARM64 checker
 tests use explicit user-mode emulation, not native ARM hardware/kernel proof.
 
-### Fleet fixtures (implemented in source; not in the rc.1 release binaries)
+### Fleet fixtures
 
 The default root and foreground container runners
 (`scripts/run-root-tests.sh`, `scripts/test-foreground-sudo-container.sh`)
@@ -123,15 +123,13 @@ not make the source-checkout suites contact external services automatically,
 cover every provider/model, or prove model risk calibration. Real issuer refresh
 rotation after natural token expiry was not forced during the short Codex smoke;
 refresh locking and uncertain-outcome handling remain covered by automated tests.
-The previously published rc.1 binaries still do not contain the fleet gateway.
 
 ### Host-evidence validation
 
-`inspection_scope`, optional executable hashing, service metadata, sudo-policy
-metadata and inspection audit/manifest binding are new source additions, **not
-in the published rc.2 binaries**. The earlier fleet validation above and existing
-foreground-helper sudo hardening do not establish that these additions were
-tested or deployed.
+The earlier fleet validation above and existing foreground-helper sudo
+hardening do not establish that `inspection_scope`, optional executable hashing,
+service metadata, sudo-policy metadata and inspection audit/manifest binding
+were tested or deployed.
 
 Targeted fixture checks from the current checkout:
 

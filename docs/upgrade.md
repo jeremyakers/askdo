@@ -1,7 +1,6 @@
 # Upgrade askdo
 
-Run this as an askdo user; no sudo password is needed. (`askdo upgrade` is the
-deprecated old spelling: it still works and prints a notice.)
+Run this as an askdo user; no sudo password is needed.
 
 ```sh
 askdo-config upgrade
@@ -11,7 +10,7 @@ The command selects the newest stable release by publication date, or the newest
 published prerelease when no stable release exists. To choose an exact release:
 
 ```sh
-askdo-config upgrade --release v1.0.0-rc.21
+askdo-config upgrade --release vX.Y.Z
 ```
 
 To upgrade every host of a fleet from one decision instead of one approval per
@@ -240,6 +239,10 @@ askdo-config upgrade-fleet --status            # each host's release, last resul
 askdo-config upgrade-fleet --stop              # stop offering the release
 ```
 
+`--status` and `askdo-config gateway hosts list` are readable by askdo-group
+members without an approval card. Setting or stopping the target still follows
+the normal approval policy.
+
 `upgrade-fleet` sets the gateway's upgrade target (below); it does not contact
 other hosts directly. If the gateway host's own broker is enrolled with this gateway (its `/etc/askdo/config.json`
 names a host ID this gateway has enabled, and it has not opted out of pushed
@@ -265,7 +268,8 @@ feature **and** was produced by the release build, which embeds the release tag 
 the binary. A binary built any other way does not know which release it is, so it
 cannot tell newer from older and never upgrades by push (`hosts list` shows
 `release=unknown`). Upgrade each host and the gateway once by hand with
-`askdo-config upgrade` to the first such release; after that, set the target. (A binary
+`askdo-config upgrade` to the first such release (v1.1.0 or later); after
+that, set the target. (A binary
 you build from source reports a release only if you embed one:
 `go build -ldflags '-X github.com/jeremyakers/askdo/internal/version.Release=v1.0.1' ./cmd/askdo`.)
 
