@@ -66,11 +66,12 @@ func (state State) IsTerminal() bool {
 type ResultKind string
 
 const (
-	ResultExit          ResultKind = "exit"
-	ResultSignal        ResultKind = "signal"
-	ResultLaunchFailure ResultKind = "launch_failure"
-	ResultWrapper       ResultKind = "wrapper"
-	ResultDecision      ResultKind = "decision"
+	ResultExit             ResultKind = "exit"
+	ResultSignal           ResultKind = "signal"
+	ResultLaunchFailure    ResultKind = "launch_failure"
+	ResultWrapper          ResultKind = "wrapper"
+	ResultDecision         ResultKind = "decision"
+	ResultApprovalRequired ResultKind = "approval_required"
 )
 
 // Result is the durable result payload. ExitCode and Signal are pointers so an
@@ -1397,6 +1398,10 @@ func validateResult(result Result) error {
 		}
 	case ResultLaunchFailure, ResultWrapper:
 		return nil
+	case ResultApprovalRequired:
+		if result.ExitCode == nil || *result.ExitCode != 1 {
+			return errors.New("approval-required result requires exit code 1")
+		}
 	case ResultDecision:
 		return (proto.ResultEvent{Op: "result", State: "denied", Decision: result.Decision, Feedback: result.Feedback, ExitCode: result.ExitCode, Signal: result.Signal}).Validate()
 	default:

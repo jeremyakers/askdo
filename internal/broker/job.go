@@ -621,7 +621,14 @@ func (j *jobRuntime) run(ctx context.Context) {
 	// This gate precedes *any* worker/fleet/broker notification. The worker
 	// cannot create an approval card until it receives the frozen manifest.
 	if j.req.NonInteractive && timestampApproval == nil && autoPlan == nil {
-		j.fail("askdo: a Telegram approval is required")
+		// This is a refusal to run, not a review/infrastructure failure.
+		// Commit the result with the state so later readers and the terminal
+		// journal retain the same exit code as the live client.
+		one := 1
+		result := store.Result{Kind: store.ResultApprovalRequired, ExitCode: &one}
+		if changed, _ := j.transition(ctx, store.StateReviewing, store.StateDenied, result); changed {
+			j.finishTerminal(store.StateDenied, result)
+		}
 		return
 	}
 	brokerApproval = brokerApproval && j.fleet == nil && autoPlan == nil
@@ -1559,6 +1566,9 @@ func resultEvent(requestID string, state store.State, result store.Result) proto
 		event.Message = "operation launch failed"
 	case store.ResultWrapper:
 		event.Message = "review or infrastructure failure"
+	case store.ResultApprovalRequired:
+		event.ExitCode = result.ExitCode
+		event.Message = "askdo: a Telegram approval is required"
 	case store.ResultDecision:
 		event.Decision, event.Feedback = result.Decision, result.Feedback
 	}
