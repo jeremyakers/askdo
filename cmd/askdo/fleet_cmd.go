@@ -111,6 +111,9 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	// made while the operator is considering the enrollment.
 	store, err := loadFleetConfig(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("askdo is not installed here: run the installer first: curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/install.sh | sudo sh")
+		}
 		return err
 	}
 	if err = store.Config().ValidateFleetJoinPolicy(); err != nil {

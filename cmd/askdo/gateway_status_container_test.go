@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -27,6 +28,33 @@ func TestGatewayStatusCLIContainer(t *testing.T) {
 	if _, err := os.Stat("/.dockerenv"); err != nil {
 		t.Skip("requires Docker container marker")
 	}
+	t.Run("join-before-install", func(t *testing.T) {
+		if _, err := os.Stat(defaultConfigPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("fixture must not have an installed host config: %v", err)
+		}
+		gatewaySocket, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer gatewaySocket.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "/usr/local/bin/askdo-config", "fleet", "join", "https://"+gatewaySocket.Addr().String()).CombinedOutput()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), "askdo is not installed here: run the installer first: curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/install.sh | sudo sh") {
+			t.Fatalf("missing-install result: %v %s", err, out)
+		}
+		_ = gatewaySocket.SetDeadline(time.Now().Add(25 * time.Millisecond))
+		conn, err := gatewaySocket.Accept()
+		if conn != nil {
+			conn.Close()
+			t.Fatal("missing installation dialed the gateway")
+		}
+		var timeout net.Error
+		if !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatalf("gateway spy failed: %v", err)
+		}
+	})
 	dir, path := gatewayOperatorFixture(t)
 	cfg, err := gateway.LoadConfig(path)
 	if err != nil {
@@ -131,6 +159,15 @@ func TestGatewayStatusCLIContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer jobs.Close()
+	for _, command := range []string{"status", "attach", "cancel", "auto-approve status", "auto-approve set", "auto-approve off"} {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		args := append([]string{"-u", "askdo-human", "--", "/usr/local/bin/askdo"}, strings.Fields(command)...)
+		out, err := exec.CommandContext(ctx, "runuser", append(args, "--help")...).CombinedOutput()
+		cancel()
+		if err != nil || !strings.Contains(string(out), "usage: askdo "+strings.Fields(command)[0]) {
+			t.Fatalf("%s help: %v %s", command, err, out)
+		}
+	}
 	// A successful socket response also proves the broker has finished startup.
 	for _, args := range [][]string{{"gateway", "hosts", "list"}, {"upgrade-fleet", "--status"}} {
 		for _, user := range []string{"askdo-human", "askdo-outsider"} {

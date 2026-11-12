@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -34,6 +35,38 @@ func TestOperatorHelpNeverElevates(t *testing.T) {
 				t.Fatalf("%q: %d %q %q", args, code, out, stderr)
 			}
 		}
+	}
+}
+
+func TestConfigHelpExplainsFirstSetupSudo(t *testing.T) {
+	cliIdentity(t, "askdo-config", 1000)
+	code, out, stderr := captureCLI(t, func() int { return runWithClient([]string{"--help"}, noCLIClient(t)) })
+	if code != 0 || stderr != "" {
+		t.Fatalf("%d %q", code, stderr)
+	}
+	for _, want := range []string{"After initial setup, run askdo-config as yourself", "First-time setup (channel add, reviewer add, review mode, initial config check)", "and fleet join use sudo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestFleetJoinMissingLayoutExplainsInstaller(t *testing.T) {
+	old := loadFleetConfig
+	t.Cleanup(func() { loadFleetConfig = old })
+	for _, missing := range []string{"missing directory", "missing config"} {
+		loadFleetConfig = func(string) (fleetConfigStore, error) {
+			return nil, fmt.Errorf("lstat: %w", &os.PathError{Op: "lstat", Path: missing, Err: os.ErrNotExist})
+		}
+		err := runFleetJoin(t.Context(), []string{"https://gateway.example:8443"}, "unused", nil, io.Discard, io.Discard)
+		if err == nil || err.Error() != "askdo is not installed here: run the installer first: curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/install.sh | sudo sh" {
+			t.Fatal(err)
+		}
+	}
+	loadFleetConfig = func(string) (fleetConfigStore, error) { return nil, os.ErrPermission }
+	err := runFleetJoin(t.Context(), []string{"https://gateway.example:8443"}, "unused", nil, io.Discard, io.Discard)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("misreported an existing but inaccessible installation: %v", err)
 	}
 }
 

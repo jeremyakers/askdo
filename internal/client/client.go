@@ -60,6 +60,9 @@ type Options struct {
 // Run executes the default invocation or a status, attach, or cancel command.
 func Run(ctx context.Context, args []string, options Options) int {
 	options = withDefaults(options)
+	if commandHelp(args, options.Stdout) {
+		return 0
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "status":

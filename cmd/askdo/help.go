@@ -100,7 +100,10 @@ func writeConfigHelp(w io.Writer) {
   askdo-config logs JOB_ID [--uid UID] [--all]
   askdo-config daemon [--config PATH]                 service mode (root only)
 
-Run askdo-config as yourself; do not use sudo. Commands that change askdo's
+After initial setup, run askdo-config as yourself; do not use sudo.
+First-time setup (channel add, reviewer add, review mode, initial config check)
+and fleet join use sudo; before the first service start there is no configured
+broker to approve setup. Commands that change askdo's
 configuration or read root-only state (review mode changes/exempt/timestamp_timeout,
 channel, config install, auth, reviewer, gateway setup, logs) automatically
 request the usual Telegram approval and run in the foreground, including
