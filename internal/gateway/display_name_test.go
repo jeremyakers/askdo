@@ -17,6 +17,10 @@ func TestJoinNamesDistinctAndPersisted(t *testing.T) {
 		{"host_" + strings.Repeat("1", 64), "pop-os", "pop-os"},
 		{"host_" + strings.Repeat("2", 64), "pop-os", "pop-os-2222"},
 		{"host_" + strings.Repeat("3", 64), "lab-desktop", "lab-desktop"},
+		{"host_abcd" + strings.Repeat("1", 60), "web", "web"},
+		{"host_abcd" + strings.Repeat("2", 60), "web", "web-abcd"},
+		{"host_abcd" + strings.Repeat("3", 60), "web", "web-abcd3"},
+		{"host_abcd3" + strings.Repeat("4", 59), "web", "web-abcd34"},
 	} {
 		req, secret := joinFixtureRequest(tc.host)
 		req.Hostname = tc.name

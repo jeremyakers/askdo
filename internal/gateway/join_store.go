@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -214,14 +215,16 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 	if err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
-	duplicate := false
+	taken := make(map[string]bool)
 	for rows.Next() {
 		var existing sql.NullString
 		if err = rows.Scan(&existing); err != nil {
 			rows.Close()
 			return fleetproto.JoinResponse{}, err
 		}
-		duplicate = duplicate || existing.String == name
+		if existing.Valid {
+			taken[existing.String] = true
+		}
 	}
 	err = rows.Err()
 	rows.Close()
@@ -235,18 +238,42 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 		return fleetproto.JoinResponse{}, err
 	}
 	if hasStatus != 0 {
-		var count int
-		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM gateway_host_status s JOIN gateway_enrollments e ON e.host_id=s.host_id WHERE s.hostname=? AND COALESCE(json_extract(e.policy_json,'$.display_name'),'')=''", name).Scan(&count); err != nil {
+		rows, err := tx.QueryContext(ctx, "SELECT s.hostname FROM gateway_host_status s JOIN gateway_enrollments e ON e.host_id=s.host_id WHERE COALESCE(json_extract(e.policy_json,'$.display_name'),'')=''")
+		if err != nil {
 			return fleetproto.JoinResponse{}, err
 		}
-		duplicate = duplicate || count > 0
-	}
-	if duplicate {
-		id := strings.TrimPrefix(string(req.HostID), "host_")
-		for len(name) > fleetproto.MaxJoinHostnameBytes-5 {
-			name = string([]rune(name)[:len([]rune(name))-1])
+		for rows.Next() {
+			var hostname string
+			if err = rows.Scan(&hostname); err != nil {
+				rows.Close()
+				return fleetproto.JoinResponse{}, err
+			}
+			taken[hostname] = true
 		}
-		name += "-" + id[:4]
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return fleetproto.JoinResponse{}, err
+		}
+	}
+	if taken[name] {
+		id := strings.TrimPrefix(string(req.HostID), "host_")
+		base := name
+		for width := 4; ; width++ {
+			suffix := id[:min(width, len(id))]
+			// Even a manually assigned full-ID label must not collide.
+			if width > len(id) {
+				suffix += "-" + strconv.Itoa(width-len(id)+1)
+			}
+			prefix := []rune(base)
+			for len(string(prefix))+1+len(suffix) > fleetproto.MaxJoinHostnameBytes {
+				prefix = prefix[:len(prefix)-1]
+			}
+			name = string(prefix) + "-" + suffix
+			if !taken[name] {
+				break
+			}
+		}
 	}
 	enrollment.Policy.DisplayName = name
 	policy, err = json.Marshal(enrollment.Policy)
