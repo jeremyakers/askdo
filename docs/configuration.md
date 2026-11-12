@@ -126,9 +126,9 @@ when the key is absent.
 | `deny_paths` | no | `[]` | Absolute, cleaned exclusions. The most-specific component-wise match wins across allow and deny rules; ties deny, and no match denies. Allow `/`, deny `/home/user`, allow `/home/user/bin` reopens only the `bin` subtree. |
 | `trusted_executable_roots` | no | — | **Deprecated and ignored.** Still accepted by the strict decoder so existing version 4 files that carry it keep loading, but the value has no effect: no validation, no warning, no policy decision, and no record in the frozen approval manifest. There is no trusted-code category that substitutes for the model reading code, and the reviewer does not automatically discover dependencies. Omit this field in new configurations. |
 | `sensitive_masks` | no | built-in default list | Credential-like path **name** masks. Omitting the field compiles the built-in list of 31 well-known secret-name conventions; an explicit **non-empty** array **replaces** the defaults entirely (it does not extend them), so tuning out one false positive without re-listing the others silently unprotects them. An explicit empty or `null` array is invalid — never a silent disable. At most 256 masks, each ≤ 256 bytes, valid UTF-8, no backslashes, control characters, or empty/`.`/`..` components. Mask syntax and matching semantics are defined below. |
-| `hash_path_enabled` | no | `false` | Source-only opt-in to bounded executable SHA-256 metadata. Does not bypass path policy, return bytes or pin a later execution. |
-| `service_status_enabled` | no | `false` | Source-only opt-in to fixed observational metadata for one literal `.service` unit. No arbitrary properties or service actions. |
-| `sudo_policy_enabled` | no | `false` | Source-only opt-in to sanitized policy listings for the submitting UID and explicitly authorized additional UIDs. Does not grant sudo rights. |
+| `hash_path_enabled` | no | `false` | Opt-in to bounded executable SHA-256 metadata. Does not bypass path policy, return bytes or pin a later execution. |
+| `service_status_enabled` | no | `false` | Opt-in to fixed observational metadata for one literal `.service` unit. No arbitrary properties or service actions. |
+| `sudo_policy_enabled` | no | `false` | Opt-in to sanitized policy listings for the submitting UID and explicitly authorized additional UIDs. Does not grant sudo rights. |
 | `sudo_policy_uids` | no | `[]` | At most 127 additional numeric uint32 UIDs, not login names; unique integers 0–4294967295. Null array/elements, duplicates, strings, fractions and out-of-range numbers are rejected. The caller is always eligible when enabled; UID 0 has no special exemption. |
 
 The three capability flags accept JSON booleans, never `null`. These fields
@@ -214,7 +214,7 @@ therefore be insufficient even when the final acquisition is metadata-only
 (`O_PATH`). Such permission failures remain fail-closed; no broader read root,
 ACL bypass, or alternate path walker is selected to compensate.
 
-These source-only compatibility changes require compatible fleet gateway and
+These compatibility changes require compatible fleet gateway and
 joining host broker/reviewer builds. Older strict peers can reject
 `display.captured_stdin_kind`, `operation.captured_stdin.delivery_kind`, or
 inspection-scope `compatibility`. Modern sealed-memfd jobs also emit the new
@@ -226,11 +226,10 @@ host installation and acceptance remain separate from source publication.
 
 #### Optional host evidence and rollout
 
-These additions are implemented on the `feat/reviewer-host-evidence` source branch,
-**not in published rc.2 binaries** and not implied by the separate existing
-foreground-helper sudo hardening. Old strict config parsers reject unknown
-new fields, even if a new flag is set to false. Do not add them to an old
-installation before upgrading its parser, root broker and reviewer together.
+These additions are not implied by the separate existing foreground-helper
+sudo hardening. Old strict config parsers reject unknown new fields, even if a
+new flag is set to false. Do not add them to an old installation before
+upgrading its parser, root broker and reviewer together.
 The broker must understand the new operations, bootstrap capability projection
 and fixed tool registry; upgrading only the reader/reviewer is insufficient.
 
@@ -241,7 +240,7 @@ enforces the exact offered definitions and inspection policy. No new gateway
 config flags or signing keys are needed; verify deployed version compatibility
 before rollout rather than assuming that an arbitrary old gateway works.
 
-After owner review and merge, obtain approval **per host** for the binary
+Obtain approval **per host** for the binary
 upgrade, specific flag/UID/path values, queue drain and askdo restart. This is
 not authorization to change running configuration or restart shared services;
 OpenCode/GPU services are outside this rollout. Retain existing denies,
@@ -596,8 +595,8 @@ configuration is always required.
 |---|---|---|---|
 | `max_inspected_files` | no | `256` | ≥ 1. Bound on staged bundle files per job; also bounds the file set of one bundle-scope `search_path` call and caps enabled hash attempts at `min(2, max_inspected_files)` per job. |
 | `max_inspected_bytes` | no | `8388608` (8 MiB) | ≥ 1 and ≤ 66060288 (fits under the 64 MiB frame ceiling). Total staged bundle byte budget per job; also sets the daemon's effective client frame limit to `max_inspected_bytes + 1 MiB` and caps the content one broker-side bundle search will scan (further bounded to 1 MiB per search call). |
-| `max_hash_file_bytes` | no | `33554432` (32 MiB) | Source-only integer 1–33554432. Independent per-file executable hashing budget, not the content/staging budget. Zero/null are invalid when explicitly present. |
-| `max_hashed_bytes_per_review` | no | `67108864` (64 MiB) | Source-only integer ≥ `max_hash_file_bytes` and ≤ 67108864. Aggregate hashing-work budget across the job, including failed reads and an overflow-probe byte; fallback does not reset it. Zero/null are invalid when explicitly present. |
+| `max_hash_file_bytes` | no | `33554432` (32 MiB) | Optional integer 1–33554432. Independent per-file executable hashing budget, not the content/staging budget. Zero/null are invalid when explicitly present. |
+| `max_hashed_bytes_per_review` | no | `67108864` (64 MiB) | Optional integer ≥ `max_hash_file_bytes` and ≤ 67108864. Aggregate hashing-work budget across the job, including failed reads and an overflow-probe byte; fallback does not reset it. Zero/null are invalid when explicitly present. |
 | `max_log_bytes_per_stream` | no | `33554432` (32 MiB) | ≥ 4096. Retained-output cap per stream (stdout/stderr); a fixed truncation marker is appended at the cap and further bytes discarded while the pipe keeps draining. |
 
 Fixed broker ceilings (not additional configurable fields): 32 combined new
@@ -923,8 +922,7 @@ this example is unchanged.
 
 ## Fleet host config (version 5)
 
-**Fleet mode is implemented in source; it is not in the `v1.0.0-rc.1` release
-binaries.** A host that uses the optional shared gateway sets
+A host that uses the optional shared gateway sets
 `config_version: 5` and a `fleet` object. `askdo-config gateway connect` writes this
 document; the rules below are what it and the daemon enforce. Mixed mode is
 rejected: a v5 file must **not** contain `telegram` or `review.models` (no

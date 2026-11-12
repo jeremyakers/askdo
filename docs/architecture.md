@@ -129,10 +129,9 @@ typed provider availability failures are exhausted (without `--review=yes`),
 the broker sends a **NO AI REVIEW** Telegram request without a model
 report; it never substitutes invented risk, effects or reversibility.
 
-The host-evidence tools are **source-only, not in published rc.2 binaries**;
-they are separate from existing foreground-helper sudo hardening. The new
-root broker, config parser and reviewer must be upgraded together before
-using their fields. The default registry is eight tools, at most twelve with
+The host-evidence tools are separate from existing foreground-helper sudo
+hardening. The host's root broker, config parser and reviewer must be upgraded
+together before using their fields. The default registry is eight tools, at most twelve with
 all four opt-ins. See [rollout constraints](configuration.md#optional-host-evidence-and-rollout).
 
 ### Reviewer instruction layers
@@ -191,8 +190,6 @@ be incomplete; raw Defaults, arguments and command output are never evidence
 payloads. Neither adapter is a general execution or zero-side-effect boundary.
 
 ### Fleet gateway (root, optional central approval authority)
-
-*Implemented in source; not in the `v1.0.0-rc.1` release binaries.*
 
 A host may instead belong to a fleet (`config_version: 5`). The separate
 `askdo-config gateway serve` process owns shared model provider endpoints, the one

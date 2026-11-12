@@ -1,7 +1,6 @@
 # Fleet gateway design
 
-**Status: implemented in source; not present in the `v1.0.0-rc.1` release
-binaries.** This document records the agreed objectives and boundaries the
+This document records the agreed objectives and boundaries the
 implementation follows. For concrete setup and operations see
 [fleet-setup.md](fleet-setup.md); for the wire contracts see
 [configuration](configuration.md) and the protocol documents. Existing

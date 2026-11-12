@@ -1,7 +1,6 @@
 # Fleet setup and operations
 
-**Status: implemented in source; not present in the `v1.0.0-rc.1` release
-binaries.** This is the operator guide for the optional fleet gateway. The
+This is the operator guide for the optional fleet gateway. The
 design objectives and trust boundaries are in [fleet-gateway.md](fleet-gateway.md);
 field-level schemas are in [configuration.md](configuration.md). Standalone
 installations (one bot per server, configured on that server) remain the
@@ -87,8 +86,18 @@ configured provider endpoints with a synthetic fixture (never host files).
 With askdo installed, run **on the joining host**:
 
 ```sh
-sudo askdo-config fleet join https://gateway.example.com:8443
+sudo askdo-config fleet join --name web-01 https://gateway.example.com:8443
 # Optional explicit trust: --ca-file /path/to/root-owned-read-only-ca.pem
+```
+
+`--name` sets the host's gateway display name and is optional. By default the
+gateway uses the machine hostname; a duplicate hostname gets a generated
+`hostname-<4 chars>` name instead. On the gateway host, `askdo-config gateway
+hosts list` shows host IDs, names, releases, and rollout state without an
+approval card for askdo-group members. Rename a host with:
+
+```sh
+askdo-config gateway hosts rename HOST_ID NAME
 ```
 
 Approve the dedicated **fleet enrollment** card in Telegram **ONLY if its
@@ -324,8 +333,9 @@ restart), and each enrolled host then upgrades itself, one at a time, with the
 same staged activation and automatic rollback as `askdo-config upgrade`. A failure pauses
 the rollout; you get a Telegram notice for every host's result; run the command
 again to resume. `askdo-config upgrade-fleet --status` shows each host's release,
-last upgrade result and rollout state (`--stop` stops offering; disabled or opted-out
-hosts show `rollout=excluded`). The gateway host takes the push only if it is
+last upgrade result and rollout state without an approval card for askdo-group
+members (`--stop` stops offering; disabled or opted-out hosts show
+`rollout=excluded`). The gateway host takes the push only if it is
 enrolled with this gateway; if not, the command tells you to run
 `askdo-config upgrade` on it. `askdo-config gateway hosts list` shows the
 raw columns (`name`, `release`, `auto_upgrade`, `upgrade`,
@@ -363,10 +373,7 @@ instant offline revocation.
   a valid rate-limit `retry_after` can require a longer wait. Cancellation stops
   the wait, and a successful poll plus inbox/cursor commit resets the backoff.
   Network/read transport errors retry the same way even when their cause is
-  not individually recognized.
-  Existing ticket expiries are never extended. This recovery is in source after
-  rc.2; already-running rc.2 gateways still require operator repair/restart if
-  their poller has latched a failure.
+  not individually recognized. Existing ticket expiries are never extended.
 - Invalid credentials, a competing-poller conflict, trust/protocol failures and
   unexpected cursor/inbox database failures remain terminal and require operator
   attention. Categorical outage/recovery/failure events are logged without bot

@@ -12,10 +12,9 @@ The maximum registry is twelve tools. Configuration cannot redefine tools;
 calls execute strictly sequentially. Broker operations use private-pipe
 `inspect_request`/`inspect_result` exchanges with fixed, strictly typed shapes.
 
-**Host-evidence additions are source-only, not in the published rc.2 binaries.**
-They are separate from existing foreground-helper sudo hardening. See
-[configuration and rollout](configuration.md#optional-host-evidence-and-rollout)
-before adding fields to an installed host.
+Host-evidence additions are separate from existing foreground-helper sudo
+hardening. See [configuration and rollout](configuration.md#optional-host-evidence-and-rollout)
+for version compatibility before adding fields to an installed host.
 
 Under explicit `review.mode: "approval_only"`, or for an exempt OS login UID
 under `required`, no model or tools are used unless `--review=yes` is given.
