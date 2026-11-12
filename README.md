@@ -177,7 +177,8 @@ standalone machine.
 `askdo --help` and `askdo-config --help` are local help and never request
 approval. Read-only views including `askdo -l`, `askdo status`,
 `askdo-config upgrade-fleet --status`, and `askdo-config gateway hosts list`
-also run without a card.
+also run without a card (in their default form; adding `--config PATH` reads
+that file as root and asks for approval).
 
 ### If the first command cannot connect
 

@@ -39,6 +39,7 @@ askdo --reason 'Restart nginx so the validated site config takes effect' -- \
 | `0`–`255` | After dispatch, the command's own exit status is preserved; `0` means it succeeded. |
 | `128 + signal` | The dispatched command died from that signal (for example, `137` for SIGKILL). |
 | `124` | The client waiting timeout expired. Before dispatch the request is cancelled; after dispatch only observation stops and the command continues. |
+| `2` | `askdo` was run with no command; nothing was submitted. |
 | `125` | askdo usage, connection, review, or infrastructure failure, or a failed/unknown job. Check status and the error; do not assume nothing ran. |
 | `126` | Denied, expired, or cancelled before dispatch; the command did not run. |
 | `130` | Interrupted with SIGINT while waiting; before dispatch the request is cancelled. |
