@@ -29,7 +29,7 @@ func (d *daemon) handleOperatorStatus(conn *net.UnixConn, view string) {
 			}
 		}
 	} else if d.operatorStatus != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(d.shutdownCtx, 15*time.Second)
 		defer cancel()
 		text, err = d.operatorStatus(ctx, view)
 	} else {

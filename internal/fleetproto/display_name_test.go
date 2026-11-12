@@ -13,6 +13,8 @@ func TestDisplayNameUsesVisibleCanonicalSpelling(t *testing.T) {
 		{"  north \t lab\n", "north_lab", true},
 		{"north\u00a0lab", "north_lab", true},
 		{"north_lab", "north_lab", true},
+		{"no\u200brth\u202e_\u2066lab", "north_lab", true},
+		{"\u200b\u202e\u2066", "", false},
 		{"", "", false},
 		{" \t\n\u00a0", "", false},
 		{"bad\x00name", "bad\x00name", false},

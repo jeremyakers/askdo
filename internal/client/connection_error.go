@@ -10,7 +10,7 @@ import (
 func connectionError(err error) error {
 	switch {
 	case errors.Is(err, os.ErrPermission):
-		return fmt.Errorf("you are not in the askdo group (or need to log out and back in after sudo usermod -aG askdo USER): %w", err)
+		return fmt.Errorf("you are not in the askdo group (or need to log out and back in after sudo usermod -aG askdo USER (Synology DSM: sudo /usr/syno/sbin/synogroup --memberadd askdo USER)): %w", err)
 	case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ECONNREFUSED):
 		return fmt.Errorf("the askdo service is not running: sudo systemctl enable --now askdo: %w", err)
 	default:

@@ -113,3 +113,34 @@ func TestSlowOperatorStatusDoesNotHoldReservationAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestShutdownCancelsOperatorProjection(t *testing.T) {
+	h := newBrokerHarnessWithConfig(t, nil, nil, testConfig())
+	started := make(chan struct{})
+	stopped := make(chan error, 1)
+	h.daemon.operatorStatus = func(ctx context.Context, _ string) (string, error) {
+		close(started)
+		<-ctx.Done()
+		stopped <- ctx.Err()
+		return "", ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := client.OperatorStatus(ctx, h.socket, "hosts"); done <- err }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("projection did not start")
+	}
+	h.daemon.beginShutdown()
+	select {
+	case err := <-stopped:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("shutdown context: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown left projection blocked until its timeout")
+	}
+	<-done
+}
