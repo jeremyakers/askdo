@@ -14,7 +14,7 @@ func gatewayStatus(ctx context.Context, view string) (string, error) {
 func gatewayStatusAt(ctx context.Context, view, path string) (string, error) {
 	var out strings.Builder
 	if view == "hosts" {
-		err := gatewayHosts([]string{"list", "--config", path}, &out)
+		err := gatewayHosts(ctx, []string{"list", "--config", path}, &out)
 		return out.String(), err
 	}
 	cfg, err := loadGatewayOperator(path)

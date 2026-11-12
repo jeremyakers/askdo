@@ -150,6 +150,10 @@ type JoinDecision struct {
 // the operator will enact, and stores only the hashes of the host-owned
 // bearer and join secrets. Cards remain unavailable until a valid reveal.
 func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enrollment JoinEnrollment) (fleetproto.JoinResponse, error) {
+	if req.Hostname != "" && !fleetproto.ValidDisplayName(req.Hostname) {
+		return fleetproto.JoinResponse{}, fleetproto.ErrProtocol
+	}
+	req.Hostname = fleetproto.NormalizeDisplayName(req.Hostname)
 	if _, err := fleetproto.MarshalJoinRequest(req); err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
@@ -223,7 +227,7 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 			return fleetproto.JoinResponse{}, err
 		}
 		if existing.Valid {
-			taken[existing.String] = true
+			taken[fleetproto.NormalizeDisplayName(existing.String)] = true
 		}
 	}
 	err = rows.Err()
@@ -248,7 +252,7 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 				rows.Close()
 				return fleetproto.JoinResponse{}, err
 			}
-			taken[hostname] = true
+			taken[fleetproto.NormalizeDisplayName(hostname)] = true
 		}
 		err = rows.Err()
 		rows.Close()
