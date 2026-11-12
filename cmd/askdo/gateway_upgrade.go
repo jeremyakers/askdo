@@ -125,14 +125,14 @@ func showGatewayUpgradeTarget(ctx context.Context, upgrades *gateway.UpgradeStor
 // reported, whether it applies pushed upgrades, how its last upgrade ended and
 // when it last reported. A host that never reported says so.
 func upgradeColumns(h gateway.HostUpgrade, reported bool) string {
-	if !reported {
-		return " name=- release=unknown auto_upgrade=unknown upgrade=none seen=never"
-	}
 	// Every value is one token: what a host reported may hold spaces, and must not
 	// be able to pass for another column.
 	name, release, last := strings.Join(strings.Fields(h.Hostname), "_"), strings.Join(strings.Fields(h.Release), "_"), "none"
 	if name == "" {
 		name = "-"
+	}
+	if !reported {
+		return " name=" + name + " release=unknown auto_upgrade=unknown upgrade=none seen=never"
 	}
 	if release == "" {
 		release = "unknown"

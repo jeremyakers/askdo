@@ -256,7 +256,8 @@ func TestUpgradeCLIContinuesAfterBrokerDisconnect(t *testing.T) {
 	deps := upgradeCLIOptions{receiptRoot: root, tempRoot: temps, random: bytes.NewReader(bytes.Repeat([]byte{0x12}, 16)), download: func(context.Context, string, string) (upgrade.Manifest, error) {
 		raw, _ := cliReleaseFixture("v3.2.1")
 		return upgrade.ParseManifest(strings.NewReader(raw), "v3.2.1")
-	}, runClient: func(context.Context, []string, client.Options) int {
+	}, runClient: func(_ context.Context, _ []string, options client.Options) int {
+		options.SubmissionStarted()
 		writeCLIReceipt(t, root, cliUpgradeID, "v3.2.1", "scheduled")
 		return 125
 	}, wait: func(context.Context) error {
@@ -402,7 +403,11 @@ func TestUpgradeCLIDisconnectBeforeReceiptRetainsPrivateSource(t *testing.T) {
 	deps := upgradeCLIOptions{tempRoot: temps, receiptRoot: root, download: func(context.Context, string, string) (upgrade.Manifest, error) {
 		raw, _ := cliReleaseFixture("v3.2.1")
 		return upgrade.ParseManifest(strings.NewReader(raw), "v3.2.1")
-	}, runClient: func(_ context.Context, args []string, _ client.Options) int { source = args[len(args)-1]; return 125 }}
+	}, runClient: func(_ context.Context, args []string, options client.Options) int {
+		options.SubmissionStarted()
+		source = args[len(args)-1]
+		return 125
+	}}
 	var stdout, stderr bytes.Buffer
 	// When
 	code := runUpgradeWith(t.Context(), nil, deps, &stdout, &stderr)

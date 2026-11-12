@@ -207,6 +207,9 @@ func upgradeFleetStatus(ctx context.Context, store fleetHosts, upgrades fleetTar
 	}
 	for _, h := range hosts {
 		s, seen := reported[h.HostID]
+		if h.DisplayName != "" {
+			s.Hostname = h.DisplayName
+		}
 		state := "-"
 		if ok && h.Enabled && target.LeaseHost == h.HostID && target.PausedReason == "" {
 			// It may already report the target while it verifies.

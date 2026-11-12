@@ -74,7 +74,7 @@ func (d *dispatcher) runCosmetic(job cosmeticJob) {
 		ctx, cancel := d.cosmeticContext(2 * time.Second)
 		_ = job.bot.client.AnswerCallbackQuery(ctx, job.callback, "")
 		cancel()
-		rendering, err := telegram.RenderFleet(job.record.Submission.Ticket)
+		rendering, err := d.renderTicket(job.record.Submission.Ticket)
 		if err == nil {
 			ctx, cancel := d.cosmeticContext(detailsBudget(len(rendering.Details)))
 			_, _ = telegram.SendDetails(ctx, job.bot.client, job.chat, rendering.Details)

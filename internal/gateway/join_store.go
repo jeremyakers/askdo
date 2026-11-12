@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/fleetproto"
@@ -203,6 +204,55 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 		return fleetproto.JoinResponse{}, err
 	}
 	defer tx.Rollback()
+	// Choose the display name in the same transaction as admission, including
+	// pending joins so simultaneous equal hostnames remain distinguishable.
+	name := req.Hostname
+	if name == "" {
+		name = string(req.HostID)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT json_extract(policy_json,'$.display_name') FROM gateway_enrollments UNION ALL SELECT json_extract(policy_json,'$.display_name') FROM gateway_pending_joins WHERE state='pending' AND expires_at>?`, now)
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	duplicate := false
+	for rows.Next() {
+		var existing sql.NullString
+		if err = rows.Scan(&existing); err != nil {
+			rows.Close()
+			return fleetproto.JoinResponse{}, err
+		}
+		duplicate = duplicate || existing.String == name
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	// Older enrollments predate display names; use their reported hostnames
+	// without requiring the optional status table to exist.
+	var hasStatus int
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gateway_host_status'").Scan(&hasStatus); err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	if hasStatus != 0 {
+		var count int
+		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM gateway_host_status s JOIN gateway_enrollments e ON e.host_id=s.host_id WHERE s.hostname=? AND COALESCE(json_extract(e.policy_json,'$.display_name'),'')=''", name).Scan(&count); err != nil {
+			return fleetproto.JoinResponse{}, err
+		}
+		duplicate = duplicate || count > 0
+	}
+	if duplicate {
+		id := strings.TrimPrefix(string(req.HostID), "host_")
+		for len(name) > fleetproto.MaxJoinHostnameBytes-5 {
+			name = string([]rune(name)[:len([]rune(name))-1])
+		}
+		name += "-" + id[:4]
+	}
+	enrollment.Policy.DisplayName = name
+	policy, err = json.Marshal(enrollment.Policy)
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
 	var exists int
 	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM gateway_pending_joins WHERE host_id=?) OR EXISTS(SELECT 1 FROM gateway_enrollments WHERE host_id=?)", string(req.HostID), string(req.HostID)).Scan(&exists); err != nil {
 		return fleetproto.JoinResponse{}, err
@@ -530,6 +580,9 @@ func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
 			return nil, err
 		}
 		card.Profiles, card.Channel = scope.AllowedProfiles, scope.DefaultChannel
+		if scope.DisplayName != "" {
+			card.Hostname = scope.DisplayName
+		}
 		cards = append(cards, card)
 	}
 	return cards, rows.Err()

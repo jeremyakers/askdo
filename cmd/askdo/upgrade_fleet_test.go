@@ -230,7 +230,7 @@ func TestUpgradeFleetArgumentsAndApprovalRouting(t *testing.T) {
 	// Non-root: the one Telegram approval, exactly like other root-only commands,
 	// and nothing runs before it.
 	cliIdentity(t, "/usr/local/bin/askdo-config", 1000)
-	for _, args := range [][]string{{"upgrade-fleet"}, {"upgrade-fleet", "v1.2.0"}, {"upgrade-fleet", "--status"}, {"upgrade-fleet", "--stop"}} {
+	for _, args := range [][]string{{"upgrade-fleet"}, {"upgrade-fleet", "v1.2.0"}, {"upgrade-fleet", "--stop"}} {
 		calls := 0
 		code, _, stderr := captureCLI(t, func() int {
 			return runWithClient(args, func(_ context.Context, got []string, _ client.Options) int {

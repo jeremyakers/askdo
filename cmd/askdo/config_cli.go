@@ -15,6 +15,8 @@ import (
 
 const configCLIPath = "/usr/local/bin/askdo-config"
 
+var readOperatorStatus = client.OperatorStatus
+
 func isOperatorCommand(cmd string) bool {
 	switch cmd {
 	case "review", "channel", "config", "auth", "inspection", "reviewer", "gateway", "fleet", "logs", "daemon", "upgrade-helper", "upgrade", "upgrade-fleet":
@@ -60,6 +62,20 @@ func runConfigCLI(args []string, runClient func(context.Context, []string, clien
 		fmt.Fprintf(os.Stderr, "askdo-config: unknown command %q (use --help)\n", args[0])
 		return 125
 	}
+	if operatorHelp(args, os.Stdout) {
+		return 0
+	}
+	if getEUID() != 0 {
+		if view := statusView(args); view != "" {
+			text, err := readOperatorStatus(context.Background(), "", view)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "askdo-config:", err)
+				return 125
+			}
+			fmt.Fprint(os.Stdout, text)
+			return 0
+		}
+	}
 	// Enrollment has its own approval. Service entrypoints must never submit
 	// themselves as foreground jobs (including when invoked through the symlink).
 	if args[0] == "daemon" {
@@ -87,6 +103,9 @@ func runConfigCLI(args []string, runClient func(context.Context, []string, clien
 }
 
 func runOperatorCommand(args []string, stderr io.Writer) int {
+	if operatorHelp(args, os.Stdout) {
+		return 0
+	}
 	switch args[0] {
 	case "review":
 		return runReview(args[1:], os.Stdout, stderr)

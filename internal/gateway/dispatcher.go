@@ -237,7 +237,7 @@ func (d *dispatcher) deliver(r TicketRecord) error {
 	if bot == nil || !bot.healthy() {
 		return errors.New("delivery bot unavailable")
 	}
-	rendering, err := telegram.RenderFleet(sub.Ticket)
+	rendering, err := d.renderTicket(sub.Ticket)
 	if err != nil || len(rendering.Parts) != sub.Ticket.Display.SummaryParts {
 		return fleetproto.ErrBinding
 	}

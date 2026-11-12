@@ -27,6 +27,10 @@ type upgradeCLIOptions struct {
 	wait                  func(context.Context) error
 }
 
+func writeUpgradeHelp(out io.Writer) {
+	fmt.Fprintln(out, "usage: askdo-config upgrade [--release TAG] [--operation ID]\n\nDownload and verify a release, request human approval, then follow activation.\nWithout --release, select the newest stable release, or a prerelease if none exists.\n--operation resumes receipt observation only; it never schedules another upgrade.\nRun as an askdo user; no sudo is required.")
+}
+
 func runUpgrade(args []string, runClient func(context.Context, []string, client.Options) int, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -37,7 +41,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	flags := flag.NewFlagSet("upgrade", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		fmt.Fprintln(stdout, "usage: askdo-config upgrade [--release TAG] [--operation ID]\n\nDownload and verify a release, request human approval, then follow activation.\nWithout --release, select the newest stable release, or a prerelease if none exists.\n--operation resumes receipt observation only; it never schedules another upgrade.\nRun as an askdo user; no sudo is required.")
+		writeUpgradeHelp(stdout)
 	}
 	release := flags.String("release", "", "exact published release tag")
 	operation := flags.String("operation", "", "resume an existing upgrade operation")
@@ -138,7 +142,12 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		if options.runClient == nil {
 			options.runClient = client.Run
 		}
-		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--script", script, *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Quiet: true, Interrupt: make(chan os.Signal)})
+		submitted := false
+		clientCode = options.runClient(ctx, []string{"--detach", "--reason", reason, "--script", script, *operation, source}, client.Options{Stdout: stdout, Stderr: stderr, Quiet: true, Interrupt: make(chan os.Signal), SubmissionStarted: func() { submitted = true }})
+		if !submitted && clientCode != 0 {
+			fmt.Fprintln(stderr, "Upgrade was not submitted; nothing was changed. Fix the error above, then rerun askdo-config upgrade.")
+			return clientCode
+		}
 		removeSource = clientCode != 125 && clientCode != 124 && clientCode != 130
 	}
 	// The root operation's activation budget starts only after scheduling, not

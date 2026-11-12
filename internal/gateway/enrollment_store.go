@@ -32,6 +32,7 @@ var (
 // EnrollmentPolicy grants explicit identities, never wildcard authority. No
 // default channel means a UID without an explicit route cannot create tickets.
 type EnrollmentPolicy struct {
+	DisplayName     string            `json:"display_name,omitempty"`
 	AllowedProfiles []string          `json:"allowed_profiles"`
 	AllowedChannels []string          `json:"allowed_channels"`
 	DefaultChannel  string            `json:"default_channel,omitempty"`
@@ -76,6 +77,9 @@ func containsID(list []string, id string) bool {
 }
 
 func (p EnrollmentPolicy) validate() error {
+	if p.DisplayName != "" && !fleetproto.ValidDisplayName(p.DisplayName) {
+		return errors.New("display name must be at most 256 UTF-8 bytes without control characters")
+	}
 	for _, list := range []struct {
 		field string
 		ids   []string
@@ -429,6 +433,16 @@ func (s *EnrollmentStore) UpdatePolicy(ctx context.Context, hostID string, polic
 		return err
 	}
 	result, err := s.db.ExecContext(ctx, "UPDATE gateway_enrollments SET policy_json=? WHERE host_id=?", string(data), hostID)
+	return enrollmentAffected(result, err)
+}
+
+// Rename changes only the administrative label, preserving concurrent grants
+// and revocation. It never changes the host's authentication identity.
+func (s *EnrollmentStore) Rename(ctx context.Context, hostID, name string) error {
+	if !fleetproto.ValidDisplayName(name) {
+		return errors.New("name must be 1 through 256 UTF-8 bytes without control characters; choose a readable host name")
+	}
+	result, err := s.db.ExecContext(ctx, "UPDATE gateway_enrollments SET policy_json=json_set(policy_json,'$.display_name',?) WHERE host_id=?", name, hostID)
 	return enrollmentAffected(result, err)
 }
 
