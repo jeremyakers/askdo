@@ -111,10 +111,10 @@ later if you want AI review.
 
 ### Install
 
-One command, pinned to the published release:
+One command installs the latest release:
 
 ```sh
-curl -fsSL https://github.com/jeremyakers/askdo/releases/download/v1.0.0-rc.20/install.sh | sudo sh
+curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/install.sh | sudo sh
 ```
 
 The installer downloads the release binaries and writes a starter config; it
