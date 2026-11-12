@@ -798,7 +798,8 @@ bypass its trusted-directory checks for `..` traversal or symlink ancestors.
 
 Rationale: the broker (root) validates them; the reviewer (running as
 `askdo-review`) reads them through group membership; the submitting agent can
-read neither. The recommended layout is:
+read neither. The recommended layout is below; each `install … /dev/stdin`
+reads the secret you paste: paste it, press Enter, then press Ctrl-D.
 
 ```sh
 install -d -m 0750 -o root -g askdo-review /etc/askdo/credentials
