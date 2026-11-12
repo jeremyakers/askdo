@@ -94,7 +94,11 @@ sudo askdo-config fleet join --name web-01 https://gateway.example.com:8443
 gateway uses the machine hostname; a duplicate hostname gets a generated
 `hostname-<4 chars>` name instead. On the gateway host, `askdo-config gateway
 hosts list` shows host IDs, names, releases, and rollout state without an
-approval card for askdo-group members. Rename a host with:
+approval card for askdo-group members. That card-free form reads through the
+local `askdo` service, so it needs the gateway host's own broker running (as it
+is when the gateway host is also enrolled in the fleet). On a gateway-only host,
+use `sudo askdo-config gateway hosts list` (and `sudo askdo-config upgrade-fleet
+--status`) instead. Rename a host with:
 
 ```sh
 askdo-config gateway hosts rename HOST_ID NAME
