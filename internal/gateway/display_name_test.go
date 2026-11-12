@@ -21,6 +21,9 @@ func TestJoinNamesDistinctAndPersisted(t *testing.T) {
 		{"host_abcd" + strings.Repeat("2", 60), "web", "web-abcd"},
 		{"host_abcd" + strings.Repeat("3", 60), "web", "web-abcd3"},
 		{"host_abcd3" + strings.Repeat("4", 59), "web", "web-abcd34"},
+		{"host_" + strings.Repeat("5", 64), "  office\u00a0 desktop  ", "office_desktop"},
+		{"host_" + strings.Repeat("6", 64), "office   desktop", "office_desktop-6666"},
+		{"host_" + strings.Repeat("7", 64), "office_desktop", "office_desktop-7777"},
 	} {
 		req, secret := joinFixtureRequest(tc.host)
 		req.Hostname = tc.name
@@ -89,7 +92,7 @@ func TestGatewayAdministrativeNameDoesNotRewriteFrozenTicket(t *testing.T) {
 	if err != nil || !strings.Contains(after.Final, "new-name") {
 		t.Fatalf("%+v %v", after, err)
 	}
-	if err := store.Rename(t.Context(), host.HostID, "injected\nline"); err == nil {
+	if err := store.Rename(t.Context(), host.HostID, "injected\x00line"); err == nil {
 		t.Fatal("accepted terminal control character")
 	}
 	if err := store.Rename(t.Context(), "host_missing", "new-name"); err == nil {
@@ -101,5 +104,62 @@ func TestGatewayAdministrativeNameDoesNotRewriteFrozenTicket(t *testing.T) {
 	}
 	if n := utf8.RuneCountInString(telegram.FleetHostLabel(strings.Repeat("&", 256))); n > 190 {
 		t.Fatalf("display label exceeds its card budget: %d", n)
+	}
+}
+
+func TestDisplayNameNormalizationAtEnrollmentBoundaries(t *testing.T) {
+	_, store := joinStoreFixture(t)
+	policy := EnrollmentPolicy{AllowedProfiles: []string{}, AllowedChannels: []string{"default"}, DefaultChannel: "default", DisplayName: "  north\t lab  "}
+	host, _, err := store.Create(t.Context(), policy)
+	if err != nil || host.DisplayName != "north_lab" {
+		t.Fatalf("create: %+v %v", host, err)
+	}
+	for _, name := range []string{"", " ", "\t\n\u00a0"} {
+		if err := store.Rename(t.Context(), host.HostID, name); err == nil {
+			t.Errorf("rename accepted blank name %q", name)
+		}
+	}
+	if err := store.Rename(t.Context(), host.HostID, "  south   lab "); err != nil {
+		t.Fatal(err)
+	}
+	host, err = store.Get(t.Context(), host.HostID)
+	if err != nil || host.DisplayName != "south_lab" {
+		t.Fatalf("rename: %+v %v", host, err)
+	}
+	policy.DisplayName = " \t "
+	if _, _, err := store.Create(t.Context(), policy); err == nil {
+		t.Fatal("create accepted blank supplied name")
+	}
+	if err := store.UpdatePolicy(t.Context(), host.HostID, policy); err == nil {
+		t.Fatal("policy update accepted blank supplied name")
+	}
+}
+
+func TestJoinComparesCanonicalExistingDisplayNames(t *testing.T) {
+	joins, store := joinStoreFixture(t)
+	host, _, err := store.Create(t.Context(), EnrollmentPolicy{AllowedProfiles: []string{}, AllowedChannels: []string{"default"}, DefaultChannel: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A label from an older gateway must also compare by its visible spelling.
+	if _, err := store.db.Exec("UPDATE gateway_enrollments SET policy_json=json_set(policy_json,'$.display_name',?) WHERE host_id=?", "  north   lab ", host.HostID); err != nil {
+		t.Fatal(err)
+	}
+	req, _ := joinFixtureRequest("host_" + strings.Repeat("8", 64))
+	req.Hostname = "north_lab"
+	if _, err := joins.Create(t.Context(), req, joinFixtureEnrollment(string(req.HostID))); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := store.db.QueryRow("SELECT json_extract(policy_json,'$.display_name') FROM gateway_pending_joins WHERE host_id=?", string(req.HostID)).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "north_lab-8888" {
+		t.Fatal(name)
+	}
+	req, _ = joinFixtureRequest("host_" + strings.Repeat("9", 64))
+	req.Hostname = " \t "
+	if _, err := joins.Create(t.Context(), req, joinFixtureEnrollment(string(req.HostID))); err == nil {
+		t.Fatal("join accepted whitespace-only display name")
 	}
 }

@@ -51,7 +51,9 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	case "init":
 		err = gatewayInit(args[1:], stdout)
 	case "hosts":
-		err = gatewayHosts(args[1:], stdout)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err = gatewayHosts(ctx, args[1:], stdout)
 	case "upgrade-target":
 		err = gatewayUpgradeTarget(args[1:], stdout)
 	case "connect":
@@ -311,7 +313,10 @@ func loadGatewayOperator(path string) (*gateway.Config, error) {
 	return c, nil
 }
 
-func gatewayHosts(args []string, out io.Writer) (err error) {
+func gatewayHosts(ctx context.Context, args []string, out io.Writer) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("hosts requires add, list, rename HOST_ID NAME, or revoke HOST_ID; use --help")
 	}
@@ -347,13 +352,11 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 		return e
 	}
 	defer func() { err = errors.Join(err, store.Close()) }()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if sub == "rename" {
 		if e = store.Rename(ctx, pos[0], pos[1]); e != nil {
 			return fmt.Errorf("cannot rename host (check HOST_ID with askdo-config gateway hosts list): %w", e)
 		}
-		fmt.Fprintf(out, "renamed %s to %q\n", pos[0], pos[1])
+		fmt.Fprintf(out, "renamed %s to %q\n", pos[0], fleetproto.NormalizeDisplayName(pos[1]))
 		return nil
 	}
 	if sub == "list" {
@@ -368,6 +371,9 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 			if statuses, e := upgrades.Statuses(ctx); e == nil {
 				reported = statuses
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		for _, h := range hosts {
 			if _, e = fleetproto.ParseID(h.HostID); e != nil {

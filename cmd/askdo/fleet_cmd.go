@@ -130,9 +130,16 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	if err != nil {
 		return errors.New("could not read local hostname")
 	}
-	if *name != "" {
+	nameSet := false
+	f.Visit(func(option *flag.Flag) {
+		if option.Name == "name" {
+			nameSet = true
+		}
+	})
+	if nameSet {
 		hostname = *name
 	}
+	hostname = fleetproto.NormalizeDisplayName(hostname)
 	if !fleetproto.ValidDisplayName(hostname) {
 		return errors.New("--name must be 1 through 256 UTF-8 bytes without control characters; choose a readable host name")
 	}

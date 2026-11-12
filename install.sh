@@ -1010,6 +1010,12 @@ elif [ "$MIGRATING" = 1 ]; then
     printf 'WARNING: could not enumerate askdo-foreground group; no group deletion attempted\n' >&2
   fi
 fi
-printf '%s\n' 'askdo installed; service was NOT enabled or started.' '' 'Next steps (standalone):' '  1. sudo usermod -aG askdo USER  # replace USER with your login' '     Log out and back in before using askdo.' '  2. sudo askdo-config channel add telegram  # create a bot, then message it for ID discovery' '     sudo askdo-config reviewer add  # or: sudo askdo-config review mode approval-only' '     sudo askdo-config config check' '  3. sudo systemctl enable --now askdo' '' 'Fleet host instead: sudo askdo-config fleet join https://gateway.example:8443' '  Join requests approval, adds the invoking user to askdo, and enables the service.' '  Log out and back in after joining.' 'Optional gateway examples: /etc/askdo/examples; askdo-gateway.service was NOT enabled or started; no gateway keys or credentials were created.' 'Setup guide: https://github.com/jeremyakers/askdo#get-started'
+printf '%s\n' 'askdo installed; service was NOT enabled or started.' '' 'Next steps (standalone):'
+if [ "$DSM" = 1 ]; then
+  printf '%s\n' '  1. Add your login to askdo in DSM Control Panel > User & Group > Group > askdo > Edit > Members.' '     Or: sudo /usr/syno/sbin/synogroup --memberadd askdo USER  # replace USER with your login'
+else
+  printf '%s\n' '  1. sudo usermod -aG askdo USER  # replace USER with your login'
+fi
+printf '%s\n' '     Log out and back in before using askdo.' '  2. sudo askdo-config channel add telegram  # create a bot, then message it for ID discovery' '     sudo askdo-config reviewer add  # or: sudo askdo-config review mode approval-only' '     sudo askdo-config config check' '  3. sudo systemctl enable --now askdo' '' 'Fleet host instead: sudo askdo-config fleet join https://gateway.example:8443' '  Join requests approval, adds the invoking user to askdo, and enables the service.' '  Log out and back in after joining.' 'Optional gateway examples: /etc/askdo/examples; askdo-gateway.service was NOT enabled or started; no gateway keys or credentials were created.' 'Setup guide: https://github.com/jeremyakers/askdo#get-started'
 
 # askdo install.sh end-of-file

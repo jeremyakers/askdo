@@ -259,10 +259,10 @@ func TestFleetJoinHTTPSHostSetup(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 			defer cancel()
 			// When the owner runs join and receives an operator decision.
-			err := runFleetJoin(ctx, []string{server.URL, "--ca-file", ca, "--name", "lab-desktop"}, path, runner, &out, &stderr)
+			err := runFleetJoin(ctx, []string{server.URL, "--ca-file", ca, "--name", "  lab   desktop  "}, path, runner, &out, &stderr)
 			mu.Lock()
 			defer mu.Unlock()
-			if requested.Hostname != "lab-desktop" {
+			if requested.Hostname != "lab_desktop" {
 				t.Fatalf("--name was not sent: %q", requested.Hostname)
 			}
 			// Then rejected joins leave local files/setup alone; approved joins

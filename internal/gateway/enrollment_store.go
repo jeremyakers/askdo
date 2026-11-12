@@ -310,6 +310,7 @@ func (s *EnrollmentStore) create(ctx context.Context, policy EnrollmentPolicy, e
 	if err := policy.validate(); err != nil {
 		return Enrollment{}, "", err
 	}
+	policy.DisplayName = fleetproto.NormalizeDisplayName(policy.DisplayName)
 	var id, secret [32]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return Enrollment{}, "", err
@@ -360,6 +361,7 @@ func decodeEnrollment(hostID string, enabled bool, data string) (Enrollment, err
 	if err := policy.validate(); err != nil {
 		return Enrollment{}, err
 	}
+	policy.DisplayName = fleetproto.NormalizeDisplayName(policy.DisplayName)
 	return Enrollment{HostID: hostID, Enabled: enabled, EnrollmentPolicy: policy}, nil
 }
 
@@ -428,6 +430,7 @@ func (s *EnrollmentStore) UpdatePolicy(ctx context.Context, hostID string, polic
 	if err := policy.validate(); err != nil {
 		return err
 	}
+	policy.DisplayName = fleetproto.NormalizeDisplayName(policy.DisplayName)
 	data, err := json.Marshal(policy)
 	if err != nil {
 		return err
@@ -439,6 +442,7 @@ func (s *EnrollmentStore) UpdatePolicy(ctx context.Context, hostID string, polic
 // Rename changes only the administrative label, preserving concurrent grants
 // and revocation. It never changes the host's authentication identity.
 func (s *EnrollmentStore) Rename(ctx context.Context, hostID, name string) error {
+	name = fleetproto.NormalizeDisplayName(name)
 	if !fleetproto.ValidDisplayName(name) {
 		return errors.New("name must be 1 through 256 UTF-8 bytes without control characters; choose a readable host name")
 	}
