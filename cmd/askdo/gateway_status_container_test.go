@@ -196,7 +196,7 @@ func TestGatewayStatusCLIContainer(t *testing.T) {
 				if args[0] == "upgrade-fleet" && (!strings.Contains(string(out), "Fleet upgrade to v1.2.4: running, offered to "+host.HostID) || !strings.Contains(string(out), "rollout=upgrading")) {
 					t.Errorf("missing rollout: %s", out)
 				}
-			} else if code != 125 || !strings.Contains(string(out), "you are not in the askdo group") || !strings.Contains(string(out), "sudo usermod -aG askdo USER") {
+			} else if code != 125 || !strings.Contains(string(out), "you are not in the askdo group") || !strings.Contains(string(out), "sudo usermod -aG askdo USER") || !strings.Contains(string(out), "Synology DSM: sudo /usr/syno/sbin/synogroup --memberadd askdo USER") {
 				t.Fatalf("nonmember lacks actionable denial: code=%d %s", code, out)
 			}
 			if strings.Contains(string(out), bearer) || strings.Contains(string(out), strings.TrimSpace(string(token))) || strings.Contains(string(out), tokenPath) || strings.Contains(string(out), cfg.Bots[0].TokenFile) {
@@ -206,6 +206,30 @@ func TestGatewayStatusCLIContainer(t *testing.T) {
 			if err := jobs.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM jobs").Scan(&count); err != nil || count != 0 {
 				t.Fatalf("status created a job: count=%d err=%v", count, err)
 			}
+		}
+	}
+	// Removing the fixture DB models a standalone host with stale gateway
+	// configuration. Neither card-free status view may initialize a new DB.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cfg.Database); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"gateway", "hosts", "list"}, {"upgrade-fleet", "--status"}} {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		command := append([]string{"-u", "askdo-human", "--", "/usr/local/bin/askdo-config"}, args...)
+		out, err := exec.CommandContext(ctx, "runuser", command...).CombinedOutput()
+		cancel()
+		if err != nil || string(out) != "no fleet gateway is configured on this host\n" {
+			t.Fatalf("missing DB %v: %v %s", args, err, out)
+		}
+		if _, err := os.Stat(cfg.Database); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("status created gateway database: %v", err)
+		}
+		var count int
+		if err := jobs.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM jobs").Scan(&count); err != nil || count != 0 {
+			t.Fatalf("status created job: %d %v", count, err)
 		}
 	}
 }

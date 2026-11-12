@@ -61,6 +61,15 @@ func upgradeFleet(args []string, out io.Writer) (err error) {
 	if len(pos) > 1 || *status && *stop || (*status || *stop) && len(pos) != 0 {
 		return errors.New(upgradeFleetUsage)
 	}
+	if *status {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		text, err := gatewayStatusAt(ctx, "fleet", *path)
+		if err == nil {
+			_, err = fmt.Fprint(out, text)
+		}
+		return err
+	}
 	c, e := loadGatewayOperator(*path)
 	if e != nil {
 		return e

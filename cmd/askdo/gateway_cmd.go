@@ -343,6 +343,13 @@ func gatewayHosts(ctx context.Context, args []string, out io.Writer) (err error)
 	if sub == "revoke" && len(pos) != 1 || sub == "rename" && len(pos) != 2 || sub != "revoke" && sub != "rename" && len(pos) != 0 {
 		return errors.New("invalid hosts positional arguments")
 	}
+	if sub == "list" {
+		text, err := gatewayStatusAt(ctx, "hosts", *path)
+		if err == nil {
+			_, err = fmt.Fprint(out, text)
+		}
+		return err
+	}
 	c, e := loadGatewayOperator(*path)
 	if e != nil {
 		return e
@@ -353,38 +360,11 @@ func gatewayHosts(ctx context.Context, args []string, out io.Writer) (err error)
 	}
 	defer func() { err = errors.Join(err, store.Close()) }()
 	if sub == "rename" {
-		if e = store.Rename(ctx, pos[0], pos[1]); e != nil {
+		name, e := store.Rename(ctx, pos[0], pos[1])
+		if e != nil {
 			return fmt.Errorf("cannot rename host (check HOST_ID with askdo-config gateway hosts list): %w", e)
 		}
-		fmt.Fprintf(out, "renamed %s to %q\n", pos[0], fleetproto.NormalizeDisplayName(pos[1]))
-		return nil
-	}
-	if sub == "list" {
-		hosts, e := store.List(ctx)
-		if e != nil {
-			return e
-		}
-		// What hosts reported about upgrades is extra: listing the enrollments never
-		// depends on it, so a database that cannot give it just lists "unknown".
-		reported := map[string]gateway.HostUpgrade{}
-		if upgrades, e := gateway.NewUpgradeStore(store); e == nil {
-			if statuses, e := upgrades.Statuses(ctx); e == nil {
-				reported = statuses
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		for _, h := range hosts {
-			if _, e = fleetproto.ParseID(h.HostID); e != nil {
-				return errors.New("invalid stored enrollment identity")
-			}
-			status, ok := reported[h.HostID]
-			if h.DisplayName != "" {
-				status.Hostname = h.DisplayName
-			}
-			fmt.Fprintf(out, "%s enabled=%t profiles=%s channels=%s default=%s%s\n", h.HostID, h.Enabled, strings.Join(h.AllowedProfiles, ","), strings.Join(h.AllowedChannels, ","), h.DefaultChannel, upgradeColumns(status, ok))
-		}
+		fmt.Fprintf(out, "renamed %s to %q\n", pos[0], name)
 		return nil
 	}
 	if sub == "revoke" {
@@ -474,6 +454,34 @@ func gatewayHosts(ctx context.Context, args []string, out io.Writer) (err error)
 		return fmt.Errorf("bundle published but enrollment activation could not be confirmed; not ready: %w", e)
 	}
 	fmt.Fprintf(out, "enrolled %s\nbundle: %s\n", host.HostID, *output)
+	return nil
+}
+
+func gatewayListHosts(ctx context.Context, store *gateway.EnrollmentStore, out io.Writer) error {
+	hosts, err := store.List(ctx)
+	if err != nil {
+		return err
+	}
+	// Upgrade metadata is optional; listing enrollments never requires it.
+	reported := map[string]gateway.HostUpgrade{}
+	if upgrades, err := gateway.NewUpgradeStore(store); err == nil {
+		if statuses, err := upgrades.Statuses(ctx); err == nil {
+			reported = statuses
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if _, err := fleetproto.ParseID(host.HostID); err != nil {
+			return errors.New("invalid stored enrollment identity")
+		}
+		status, ok := reported[host.HostID]
+		if host.DisplayName != "" {
+			status.Hostname = host.DisplayName
+		}
+		fmt.Fprintf(out, "%s enabled=%t profiles=%s channels=%s default=%s%s\n", host.HostID, host.Enabled, strings.Join(host.AllowedProfiles, ","), strings.Join(host.AllowedChannels, ","), host.DefaultChannel, upgradeColumns(status, ok))
+	}
 	return nil
 }
 

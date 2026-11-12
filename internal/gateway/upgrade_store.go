@@ -117,8 +117,10 @@ func NewUpgradeStore(e *EnrollmentStore) (*UpgradeStore, error) {
 	if e == nil {
 		return nil, errors.New("invalid upgrade store dependencies")
 	}
-	if _, err := e.db.Exec(upgradeSchema); err != nil {
-		return nil, fmt.Errorf("initialize upgrade schema: %w", err)
+	if !e.readOnly {
+		if _, err := e.db.Exec(upgradeSchema); err != nil {
+			return nil, fmt.Errorf("initialize upgrade schema: %w", err)
+		}
 	}
 	return &UpgradeStore{enrollment: e}, nil
 }
@@ -169,6 +171,12 @@ func readTarget(ctx context.Context, q queryer) (UpgradeTarget, bool, error) {
 
 // Target returns the current target, if one is set.
 func (s *UpgradeStore) Target(ctx context.Context) (UpgradeTarget, bool, error) {
+	if s.enrollment.readOnly {
+		present, err := s.statusTableExists(ctx, "gateway_upgrade_target")
+		if err != nil || !present {
+			return UpgradeTarget{}, false, err
+		}
+	}
 	return readTarget(ctx, s.db())
 }
 
@@ -234,6 +242,12 @@ func (s *UpgradeStore) ClearTarget(ctx context.Context) error {
 
 // Statuses returns what each host that has reported last said, by host ID.
 func (s *UpgradeStore) Statuses(ctx context.Context) (map[string]HostUpgrade, error) {
+	if s.enrollment.readOnly {
+		present, err := s.statusTableExists(ctx, "gateway_host_status")
+		if err != nil || !present {
+			return map[string]HostUpgrade{}, err
+		}
+	}
 	rows, err := s.db().QueryContext(ctx, "SELECT host_id,hostname,release,auto,seen_at,op,op_release,op_state,op_outcome,op_detail,op_at FROM gateway_host_status")
 	if err != nil {
 		return nil, err
@@ -256,6 +270,12 @@ func (s *UpgradeStore) Statuses(ctx context.Context) (map[string]HostUpgrade, er
 		statuses[h.HostID] = h
 	}
 	return statuses, rows.Err()
+}
+
+func (s *UpgradeStore) statusTableExists(ctx context.Context, name string) (bool, error) {
+	var exists bool
+	err := s.db().QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)", name).Scan(&exists)
+	return exists, err
 }
 
 // resultOutcome names how an upgrade result ended, for a notice and to decide

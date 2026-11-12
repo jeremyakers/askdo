@@ -85,17 +85,17 @@ func TestGatewayAdministrativeNameDoesNotRewriteFrozenTicket(t *testing.T) {
 	if len(before.Parts) != len(after.Parts) || !strings.Contains(after.Final, "office&lt;&amp;&gt;") || sub.Ticket.Display.Identity.Hostname == "office<&>" {
 		t.Fatalf("%+v", after)
 	}
-	if err := store.Rename(t.Context(), host.HostID, "new-name"); err != nil {
+	if _, err := store.Rename(t.Context(), host.HostID, "new-name"); err != nil {
 		t.Fatal(err)
 	}
 	after, err = d.renderTicket(sub.Ticket)
 	if err != nil || !strings.Contains(after.Final, "new-name") {
 		t.Fatalf("%+v %v", after, err)
 	}
-	if err := store.Rename(t.Context(), host.HostID, "injected\x00line"); err == nil {
+	if _, err := store.Rename(t.Context(), host.HostID, "injected\x00line"); err == nil {
 		t.Fatal("accepted terminal control character")
 	}
-	if err := store.Rename(t.Context(), "host_missing", "new-name"); err == nil {
+	if _, err := store.Rename(t.Context(), "host_missing", "new-name"); err == nil {
 		t.Fatal("missing host reported success")
 	}
 	current, err := store.Get(t.Context(), host.HostID)
@@ -114,12 +114,12 @@ func TestDisplayNameNormalizationAtEnrollmentBoundaries(t *testing.T) {
 	if err != nil || host.DisplayName != "north_lab" {
 		t.Fatalf("create: %+v %v", host, err)
 	}
-	for _, name := range []string{"", " ", "\t\n\u00a0"} {
-		if err := store.Rename(t.Context(), host.HostID, name); err == nil {
+	for _, name := range []string{"", " ", "\t\n\u00a0", "\u200b\u202e\u2066"} {
+		if _, err := store.Rename(t.Context(), host.HostID, name); err == nil {
 			t.Errorf("rename accepted blank name %q", name)
 		}
 	}
-	if err := store.Rename(t.Context(), host.HostID, "  south   lab "); err != nil {
+	if _, err := store.Rename(t.Context(), host.HostID, "  south   lab "); err != nil {
 		t.Fatal(err)
 	}
 	host, err = store.Get(t.Context(), host.HostID)
@@ -132,6 +132,51 @@ func TestDisplayNameNormalizationAtEnrollmentBoundaries(t *testing.T) {
 	}
 	if err := store.UpdatePolicy(t.Context(), host.HostID, policy); err == nil {
 		t.Fatal("policy update accepted blank supplied name")
+	}
+}
+
+func TestRenameAllocatesUniqueVisibleName(t *testing.T) {
+	joins, store := joinStoreFixture(t)
+	policy := EnrollmentPolicy{AllowedProfiles: []string{}, AllowedChannels: []string{"default"}, DefaultChannel: "default", DisplayName: "office_lab"}
+	first, _, err := store.Create(t.Context(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.DisplayName = "other"
+	second, _, err := store.Create(t.Context(), policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := store.Rename(t.Context(), second.HostID, "of\u200bfice\u202e lab\u2066")
+	want := "office_lab-" + strings.TrimPrefix(second.HostID, "host_")[:4]
+	if err != nil || name != want {
+		t.Fatalf("duplicate enrollment: %q %v want %q", name, err, want)
+	}
+	stored, err := store.Get(t.Context(), second.HostID)
+	if err != nil || stored.DisplayName != want {
+		t.Fatalf("stored %+v %v", stored, err)
+	}
+	name, err = store.Rename(t.Context(), second.HostID, want)
+	if err != nil || name != want {
+		t.Fatalf("renaming to own name added suffix: %q %v", name, err)
+	}
+	req, _ := joinFixtureRequest("host_" + strings.Repeat("a", 64))
+	req.Hostname = "pending_lab"
+	if _, err := joins.Create(t.Context(), req, joinFixtureEnrollment(string(req.HostID))); err != nil {
+		t.Fatal(err)
+	}
+	// Preserve legacy pending hostname fallback when sharing join allocation.
+	if _, err := store.db.Exec("UPDATE gateway_pending_joins SET policy_json=json_remove(policy_json,'$.display_name') WHERE host_id=?", string(req.HostID)); err != nil {
+		t.Fatal(err)
+	}
+	name, err = store.Rename(t.Context(), second.HostID, "pending\u200b lab")
+	want = "pending_lab-" + strings.TrimPrefix(second.HostID, "host_")[:4]
+	if err != nil || name != want {
+		t.Fatalf("duplicate pending join: %q %v want %q", name, err, want)
+	}
+	unchanged, err := store.Get(t.Context(), first.HostID)
+	if err != nil || unchanged.DisplayName != "office_lab" || !unchanged.Enabled {
+		t.Fatalf("rename changed other enrollment %+v %v", unchanged, err)
 	}
 }
 

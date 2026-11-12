@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/jeremyakers/askdo/internal/fleetproto"
 
@@ -122,9 +123,10 @@ func (p EnrollmentPolicy) validate() error {
 }
 
 type EnrollmentStore struct {
-	db    *sql.DB
-	path  string
-	owner func(os.FileInfo) bool
+	readOnly bool
+	db       *sql.DB
+	path     string
+	owner    func(os.FileInfo) bool
 	// changes wakes the dispatcher after this process commits work for it. Other
 	// processes' commits reach it through dataVersion instead.
 	changes wakeHub
@@ -146,6 +148,19 @@ func OpenEnrollmentStore(path string) (*EnrollmentStore, error) {
 }
 
 func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*EnrollmentStore, error) {
+	return openEnrollmentStoreMode(context.Background(), path, owner, false)
+}
+
+// OpenEnrollmentStatus opens only an existing database, with SQLite read-only
+// access and no schema migrations. Status must never initialize a gateway.
+func OpenEnrollmentStatus(ctx context.Context, path string) (*EnrollmentStore, error) {
+	return openEnrollmentStoreMode(ctx, path, enrollmentOwner, true)
+}
+
+func openEnrollmentStoreMode(ctx context.Context, path string, owner func(os.FileInfo) bool, readOnly bool) (*EnrollmentStore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("gateway database path must be absolute and clean")
 	}
@@ -157,14 +172,16 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 		return nil, errors.New("gateway database directory must be root-owned and not group/world writable")
 	}
 	fresh := false
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
-	if err == nil {
-		fresh = true
-		if err = file.Close(); err != nil {
+	if !readOnly {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+		if err == nil {
+			fresh = true
+			if err = file.Close(); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-	} else if !errors.Is(err, os.ErrExist) {
-		return nil, err
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -204,6 +221,9 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 	}
 	uri := url.URL{Scheme: "file", Path: path}
 	query := url.Values{}
+	if readOnly {
+		query.Set("mode", "ro")
+	}
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
 	uri.RawQuery = query.Encode()
@@ -214,10 +234,10 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 	db.SetMaxOpenConns(1)
 	fail := func(err error) (*EnrollmentStore, error) { db.Close(); return nil, err }
 	var appID, version int
-	if err = db.QueryRow("PRAGMA application_id").Scan(&appID); err != nil {
+	if err = db.QueryRowContext(ctx, "PRAGMA application_id").Scan(&appID); err != nil {
 		return fail(err)
 	}
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fail(err)
 	}
 	if fresh {
@@ -245,6 +265,8 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 		}
 	} else if appID != gatewayApplicationID || version < 1 || version > 3 {
 		return fail(errors.New("not a supported gateway enrollment database"))
+	} else if readOnly {
+		// Existing compatible schemas are projected as-is, never migrated.
 	} else if version == 1 {
 		// v1 -> v3 adds current join tables in one transaction. Existing
 		// enrollments, tickets and cursors are preserved byte for byte.
@@ -280,7 +302,7 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 			return fail(err)
 		}
 	}
-	rows, err := db.Query("SELECT host_id,bearer_hash,enabled,policy_json FROM gateway_enrollments LIMIT 0")
+	rows, err := db.QueryContext(ctx, "SELECT host_id,bearer_hash,enabled,policy_json FROM gateway_enrollments LIMIT 0")
 	if err != nil {
 		return fail(err)
 	}
@@ -289,7 +311,7 @@ func openEnrollmentStore(path string, owner func(os.FileInfo) bool) (*Enrollment
 	if err != nil || !os.SameFile(info, current) {
 		return fail(errors.New("gateway database path changed during open"))
 	}
-	return &EnrollmentStore{db: db, path: path, owner: owner}, nil
+	return &EnrollmentStore{db: db, path: path, owner: owner, readOnly: readOnly}, nil
 }
 
 func (s *EnrollmentStore) Close() error { return s.db.Close() }
@@ -441,13 +463,30 @@ func (s *EnrollmentStore) UpdatePolicy(ctx context.Context, hostID string, polic
 
 // Rename changes only the administrative label, preserving concurrent grants
 // and revocation. It never changes the host's authentication identity.
-func (s *EnrollmentStore) Rename(ctx context.Context, hostID, name string) error {
+func (s *EnrollmentStore) Rename(ctx context.Context, hostID, name string) (string, error) {
 	name = fleetproto.NormalizeDisplayName(name)
 	if !fleetproto.ValidDisplayName(name) {
-		return errors.New("name must be 1 through 256 UTF-8 bytes without control characters; choose a readable host name")
+		return "", errors.New("name must be 1 through 256 UTF-8 bytes without control characters; choose a readable host name")
 	}
-	result, err := s.db.ExecContext(ctx, "UPDATE gateway_enrollments SET policy_json=json_set(policy_json,'$.display_name',?) WHERE host_id=?", name, hostID)
-	return enrollmentAffected(result, err)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	// Take the writer lock before collecting names, preserving concurrent
+	// grants/revocation and preventing another writer from taking our label.
+	result, err := tx.ExecContext(ctx, "UPDATE gateway_enrollments SET enabled=enabled WHERE host_id=?", hostID)
+	if err = enrollmentAffected(result, err); err != nil {
+		return "", err
+	}
+	name, err = allocateDisplayName(ctx, tx, hostID, name, time.Now())
+	if err != nil {
+		return "", err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE gateway_enrollments SET policy_json=json_set(policy_json,'$.display_name',?) WHERE host_id=?", name, hostID); err != nil {
+		return "", err
+	}
+	return name, tx.Commit()
 }
 
 func enrollmentAffected(result sql.Result, err error) error {

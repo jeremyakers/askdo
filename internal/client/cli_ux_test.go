@@ -22,6 +22,7 @@ func TestConnectionErrorsGiveNextSteps(t *testing.T) {
 		text string
 	}{
 		{os.ErrPermission, "sudo usermod -aG askdo USER"},
+		{os.ErrPermission, "Synology DSM: sudo /usr/syno/sbin/synogroup --memberadd askdo USER"},
 		{os.ErrNotExist, "sudo systemctl enable --now askdo"},
 		{syscall.ECONNREFUSED, "sudo systemctl enable --now askdo"},
 	} {

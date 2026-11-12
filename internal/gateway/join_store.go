@@ -10,8 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/fleetproto"
@@ -215,69 +213,9 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 	if name == "" {
 		name = string(req.HostID)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT json_extract(policy_json,'$.display_name') FROM gateway_enrollments UNION ALL SELECT COALESCE(NULLIF(json_extract(policy_json,'$.display_name'),''),hostname) FROM gateway_pending_joins WHERE state='pending' AND expires_at>?`, now)
+	name, err = allocateDisplayName(ctx, tx, string(req.HostID), name, time.Unix(now, 0))
 	if err != nil {
 		return fleetproto.JoinResponse{}, err
-	}
-	taken := make(map[string]bool)
-	for rows.Next() {
-		var existing sql.NullString
-		if err = rows.Scan(&existing); err != nil {
-			rows.Close()
-			return fleetproto.JoinResponse{}, err
-		}
-		if existing.Valid {
-			taken[fleetproto.NormalizeDisplayName(existing.String)] = true
-		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return fleetproto.JoinResponse{}, err
-	}
-	// Older enrollments predate display names; use their reported hostnames
-	// without requiring the optional status table to exist.
-	var hasStatus int
-	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gateway_host_status'").Scan(&hasStatus); err != nil {
-		return fleetproto.JoinResponse{}, err
-	}
-	if hasStatus != 0 {
-		rows, err := tx.QueryContext(ctx, "SELECT s.hostname FROM gateway_host_status s JOIN gateway_enrollments e ON e.host_id=s.host_id WHERE COALESCE(json_extract(e.policy_json,'$.display_name'),'')=''")
-		if err != nil {
-			return fleetproto.JoinResponse{}, err
-		}
-		for rows.Next() {
-			var hostname string
-			if err = rows.Scan(&hostname); err != nil {
-				rows.Close()
-				return fleetproto.JoinResponse{}, err
-			}
-			taken[fleetproto.NormalizeDisplayName(hostname)] = true
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return fleetproto.JoinResponse{}, err
-		}
-	}
-	if taken[name] {
-		id := strings.TrimPrefix(string(req.HostID), "host_")
-		base := name
-		for width := 4; ; width++ {
-			suffix := id[:min(width, len(id))]
-			// Even a manually assigned full-ID label must not collide.
-			if width > len(id) {
-				suffix += "-" + strconv.Itoa(width-len(id)+1)
-			}
-			prefix := []rune(base)
-			for len(string(prefix))+1+len(suffix) > fleetproto.MaxJoinHostnameBytes {
-				prefix = prefix[:len(prefix)-1]
-			}
-			name = string(prefix) + "-" + suffix
-			if !taken[name] {
-				break
-			}
-		}
 	}
 	enrollment.Policy.DisplayName = name
 	policy, err = json.Marshal(enrollment.Policy)
