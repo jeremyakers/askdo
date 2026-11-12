@@ -24,7 +24,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/operator"
 )
 
-const fleetUsage = "usage: sudo askdo-config fleet join https://gateway[:port] [--ca-file PATH]\nApprove the Telegram card ONLY if its certificate-bound request code matches the host terminal."
+const fleetUsage = "usage: sudo askdo-config fleet join https://gateway[:port] [--ca-file PATH] [--name NAME]\nThis terminal prints a six-character request code. Approve the Telegram card ONLY if it shows that same code.\n--ca-file supplies a trusted gateway CA; without it, confirm the matching card at the terminal's [y/N] question.\n--name sets this host's readable fleet display name (default: hostname, with a host-ID suffix for duplicates)."
 
 type fleetConfigStore interface {
 	Config() *config.Config
@@ -95,6 +95,7 @@ func runFleet(args []string, stdout, stderr io.Writer) int {
 func runFleetJoin(parent context.Context, args []string, path string, runner fleetSetupRunner, out, stderr io.Writer) error {
 	f := gatewayFlags("fleet join")
 	caPath := f.String("ca-file", "", "optional trusted gateway CA PEM file (stays on this host)")
+	name := f.String("name", "", "readable display name for this host (default: hostname)")
 	pos, err := parseGateway(f, args, out)
 	if err != nil {
 		return err
@@ -103,13 +104,16 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 		return errors.New(fleetUsage)
 	}
 	if err := config.ValidateHTTPSURL(pos[0]); err != nil {
-		return err
+		return fmt.Errorf("%w; example: https://gateway.example:8443", err)
 	}
 	// Pin and validate retained local policy before any gateway request or
 	// credential write. The same pinned store protects SaveFleet from edits
 	// made while the operator is considering the enrollment.
 	store, err := loadFleetConfig(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("askdo is not installed here: run the installer first: curl -fsSL https://github.com/jeremyakers/askdo/releases/latest/download/install.sh | sudo sh")
+		}
 		return err
 	}
 	if err = store.Config().ValidateFleetJoinPolicy(); err != nil {
@@ -125,6 +129,12 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 	hostname, err := os.Hostname()
 	if err != nil {
 		return errors.New("could not read local hostname")
+	}
+	if *name != "" {
+		hostname = *name
+	}
+	if !fleetproto.ValidDisplayName(hostname) {
+		return errors.New("--name must be 1 through 256 UTF-8 bytes without control characters; choose a readable host name")
 	}
 	// The identity, bearer and join secret are independently generated on the
 	// host. Only hashes go in the public POST; the bearer never leaves here.
@@ -160,6 +170,10 @@ func runFleetJoin(parent context.Context, args []string, path string, runner fle
 		}
 	})
 	if err != nil {
+		var connect *fleetclient.JoinConnectError
+		if errors.As(err, &connect) {
+			return fmt.Errorf("cannot connect to %s: %s; check the gateway address and service, then rerun fleet join", pos[0], connect.Reason)
+		}
 		return err
 	}
 	if client.UsesProvisionalTrust() {
@@ -221,6 +235,7 @@ var errJoinUntrustedGateway = errors.New("fleet join: this host does not trust t
 // commitment admission. Nonces and credentials survive all transport retries.
 func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request fleetproto.JoinRequest, hostNonce fleetproto.Hash, accepted func(fleetproto.Hash)) (fleetproto.JoinResponse, error) {
 	registered := false
+	attempted := false // an earlier POST may have reached the gateway
 	announced := false
 	revealSent := false
 	for {
@@ -231,6 +246,14 @@ func waitFleetJoin(ctx context.Context, client *fleetclient.JoinClient, request 
 			response, err = client.Status(callCtx)
 		} else {
 			response, err = client.RequestJoin(callCtx, request)
+			var connect *fleetclient.JoinConnectError
+			if !attempted && errors.As(err, &connect) {
+				cancel()
+				return fleetproto.JoinResponse{}, err
+			}
+			if !errors.As(err, &connect) {
+				attempted = true
+			}
 			if errors.Is(err, fleetclient.ErrJoinDuplicate) {
 				registered = true
 				response, err = client.Status(callCtx)

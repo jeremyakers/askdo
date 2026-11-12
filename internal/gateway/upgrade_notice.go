@@ -79,6 +79,9 @@ func (d *dispatcher) sendUpgradeNotice(n UpgradeNotice) bool {
 	}
 	bot := d.bots[d.aliases[channel.Bot]]
 	delivered := err == nil && bot != nil && bot.healthy()
+	if host, lookupErr := d.store.enrollment.Get(ctx, n.HostID); lookupErr == nil && host.DisplayName != "" {
+		n.Hostname = host.DisplayName
+	}
 	text := telegram.RenderUpgradeNotice(telegram.UpgradeNoticeInput{Outcome: n.Outcome, Hostname: n.Hostname, HostID: n.HostID, Release: n.Release, Running: n.Running, Detail: n.Detail, Paused: n.Paused})
 	for _, recipient := range channel.Recipients {
 		if !delivered {

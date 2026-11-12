@@ -45,7 +45,7 @@ func TestListShowsPolicySourcesOnlyWhereThereAreSources(t *testing.T) {
 	base := proto.TimestampStatusEvent{Op: "timestamp_status", AskdoGroup: true, ReviewMode: "required", ReviewRequired: false, TimestampTimeoutSeconds: 600, RemainingSeconds: 5, AutoApprovalMaxRisk: 2, AutoApprovalThreshold: 3, AutoApprovalEffective: 3}
 
 	standalone := list(t, base)
-	want := "askdo group membership: true\nAI review mode: required; required: false; exempt: true\nTimestamp timeout: 600s; remaining on this terminal: 5s\nAuto-approval: cap 2, preference 3, effective 3 (0 = off)\n"
+	want := "askdo group membership: true\nAI review mode: required; required: false; exempt: true\nTimestamp timeout: 600s; remaining on this terminal: 5s\nAuto-approval: cap 2, preference 3, effective 3\n"
 	if standalone != want {
 		t.Fatalf("a host with no fleet is listed differently:\n%s\nwant\n%s", standalone, want)
 	}
@@ -56,7 +56,7 @@ func TestListShowsPolicySourcesOnlyWhereThereAreSources(t *testing.T) {
 	for _, line := range []string{
 		"AI review mode: required; required: false; exempt: true (source: gateway)\n",
 		"Timestamp timeout: 600s (source: host); remaining on this terminal: 5s\n",
-		"Auto-approval: cap 2 (source: host+gateway), preference 3, effective 3 (0 = off)\n",
+		"Auto-approval: cap 2 (source: host+gateway), preference 3, effective 3\n",
 	} {
 		if !strings.Contains(got, line) {
 			t.Fatalf("missing %q in:\n%s", line, got)
@@ -64,6 +64,10 @@ func TestListShowsPolicySourcesOnlyWhereThereAreSources(t *testing.T) {
 	}
 	if strings.Contains(got, "unavailable") {
 		t.Fatalf("claims the gateway was unavailable: %s", got)
+	}
+	off := list(t, proto.TimestampStatusEvent{Op: "timestamp_status", AskdoGroup: true, ReviewMode: "approval_only"})
+	if !strings.Contains(off, "Timestamp timeout: off") || !strings.Contains(off, "Auto-approval: cap off, preference off, effective off") {
+		t.Fatal(off)
 	}
 
 	fleet.GatewayUnavailable = true

@@ -243,6 +243,8 @@ func ParseJoinHostID(s string) (ID, error) {
 
 // validJoinHostname accepts the display-only label: bounded UTF-8 with no
 // control characters at all. It is rendered escaped and never trusted.
+func ValidDisplayName(s string) bool { return s != "" && validJoinHostname(s) }
+
 func validJoinHostname(s string) bool {
 	if len(s) > MaxJoinHostnameBytes || !utf8.ValidString(s) {
 		return false

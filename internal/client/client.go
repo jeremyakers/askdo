@@ -30,9 +30,12 @@ var legacyJobIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // Options supplies process streams and testable transport settings.
 type Options struct {
-	SocketPath string
-	Stdout     io.Writer
-	Stderr     io.Writer
+	// SubmissionStarted is called immediately before sending the submit frame.
+	// Before it fires, no command was submitted, even if reservation failed.
+	SubmissionStarted func()
+	SocketPath        string
+	Stdout            io.Writer
+	Stderr            io.Writer
 	// Verbose restores lifecycle diagnostics for interactive foreground jobs.
 	// Detached and other non-interactive jobs always retain them.
 	Verbose bool
@@ -57,6 +60,9 @@ type Options struct {
 // Run executes the default invocation or a status, attach, or cancel command.
 func Run(ctx context.Context, args []string, options Options) int {
 	options = withDefaults(options)
+	if commandHelp(args, options.Stdout) {
+		return 0
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "status":
@@ -377,7 +383,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	}
 	if bundle == "" && script == "" {
 		if entry != "" || len(rest) == 0 {
-			fmt.Fprintln(options.Stderr, "argv mode requires a command (use -- before command flags)")
+			fmt.Fprintln(options.Stderr, "usage: askdo [--reason TEXT] COMMAND [ARG...]\nRun askdo --help for all options (use -- before command flags).")
 			return 125
 		}
 		request.Mode, request.Argv = "argv", rest
@@ -459,7 +465,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			return usageErrorCode(options, "reservation timed out; no command submitted", 124)
 		}
-		return usageError(options, "reservation connection failed; no command submitted")
+		return usageError(options, "askdo: "+err.Error()+"; no command submitted")
 	}
 	stopReserve := context.AfterFunc(reservationCtx, func() { _ = reserveConn.Close() })
 	defer stopReserve()
@@ -546,7 +552,7 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	}
 	conn, err := dial(submitCtx, options.SocketPath)
 	if err != nil {
-		fmt.Fprintf(options.Stderr, "connect failed; recover with: askdo status %s\n", requestID)
+		fmt.Fprintf(options.Stderr, "%v; no command submitted\n", err)
 		return 125
 	}
 	defer conn.Close()
@@ -554,6 +560,9 @@ func runSubmit(ctx context.Context, args []string, options Options) (exitCode in
 	defer stopSubmit()
 	if !deadline.IsZero() {
 		_ = conn.SetWriteDeadline(deadline)
+	}
+	if options.SubmissionStarted != nil {
+		options.SubmissionStarted()
 	}
 	if err := send(conn, request); err != nil {
 		fmt.Fprintf(options.Stderr, "submission unconfirmed; recover with: askdo status %s\n", requestID)
@@ -658,6 +667,7 @@ func runAttach(ctx context.Context, args []string, options Options) int {
 	}
 	conn, err := dial(ctx, options.SocketPath)
 	if err != nil {
+		fmt.Fprintln(options.Stderr, "askdo:", err)
 		return 125
 	}
 	defer conn.Close()
@@ -709,6 +719,7 @@ func runCancel(ctx context.Context, args []string, options Options) int {
 	}
 	conn, err := dial(ctx, options.SocketPath)
 	if err != nil {
+		fmt.Fprintln(options.Stderr, "askdo:", err)
 		return 125
 	}
 	defer conn.Close()
@@ -733,6 +744,9 @@ func runCancel(ctx context.Context, args []string, options Options) int {
 		}
 		if handleFile != "" && terminalState(result.State) {
 			_ = os.Remove(handleFile)
+		}
+		if result.State == "cancelled" {
+			return 0
 		}
 		return outcomeCode(result)
 	}
@@ -1114,7 +1128,11 @@ func send(conn net.Conn, value any) error {
 }
 
 func dial(ctx context.Context, path string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "unix", path)
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, connectionError(err)
+	}
+	return conn, nil
 }
 
 func withDefaults(options Options) Options {

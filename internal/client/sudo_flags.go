@@ -170,12 +170,25 @@ func runTimestamp(ctx context.Context, action, target string, options Options) i
 		return timestampFailure(ctx, options, "askdo: invalid timestamp response")
 	}
 	if action == "list" {
-		fmt.Fprintf(options.Stdout, "askdo group membership: %t\nAI review mode: %s; required: %t; exempt: %t%s\nTimestamp timeout: %ds%s; remaining on this terminal: %ds\nAuto-approval: cap %d%s, preference %d, effective %d (0 = off)\n", event.AskdoGroup, event.ReviewMode, event.ReviewRequired, !event.ReviewRequired, policySource(event.ReviewSource), event.TimestampTimeoutSeconds, policySource(event.TimestampTimeoutSource), event.RemainingSeconds, event.AutoApprovalMaxRisk, policySource(event.AutoApprovalSource), event.AutoApprovalThreshold, event.AutoApprovalEffective)
+		fmt.Fprintf(options.Stdout, "askdo group membership: %t\nAI review mode: %s; required: %t; exempt: %t%s\nTimestamp timeout: %s%s; remaining on this terminal: %ds\nAuto-approval: cap %s%s, preference %s, effective %s\n", event.AskdoGroup, event.ReviewMode, event.ReviewRequired, !event.ReviewRequired, policySource(event.ReviewSource), offOrSeconds(event.TimestampTimeoutSeconds), policySource(event.TimestampTimeoutSource), event.RemainingSeconds, offOrNumber(event.AutoApprovalMaxRisk), policySource(event.AutoApprovalSource), offOrNumber(event.AutoApprovalThreshold), offOrNumber(event.AutoApprovalEffective))
 		if event.GatewayUnavailable {
 			fmt.Fprintln(options.Stdout, "Fleet gateway defaults: unavailable; the values above are this host's own settings only")
 		}
 	}
 	return 0
+}
+
+func offOrNumber(n int) string {
+	if n == 0 {
+		return "off"
+	}
+	return strconv.Itoa(n)
+}
+func offOrSeconds(n int64) string {
+	if n == 0 {
+		return "off"
+	}
+	return strconv.FormatInt(n, 10) + "s"
 }
 
 // policySource annotates a listed value with whose setting it is on a fleet

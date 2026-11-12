@@ -39,7 +39,7 @@ func TestReviewPolicyModeAndPreservation(t *testing.T) {
 	path := reviewPolicyFixture(t)
 	before := reviewValue(t, path)
 	code, out, errOut := reviewCLI("mode", "approval-only", "--config", path)
-	if code != 0 || !strings.Contains(out+errOut, "Telegram approval") || !strings.Contains(out+errOut, "EVERY submitting UID") {
+	if code != 0 || !strings.Contains(out+errOut, "Telegram approval") || !strings.Contains(out+errOut, "EVERY submitting UID") || !strings.Contains(errOut, "Only add trusted accounts to the askdo group") {
 		t.Fatalf("mode approval-only exit=%d out=%q err=%q", code, out, errOut)
 	}
 	after := reviewValue(t, path)

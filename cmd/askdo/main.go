@@ -20,6 +20,7 @@ import (
 	"github.com/jeremyakers/askdo/internal/providers"
 	"github.com/jeremyakers/askdo/internal/reviewer"
 	"github.com/jeremyakers/askdo/internal/reviewidentity"
+	"github.com/jeremyakers/askdo/internal/version"
 )
 
 const defaultConfigPath = "/etc/askdo/config.json"
@@ -63,6 +64,14 @@ func run(args []string) int {
 // runWithClient keeps command routing testable without allowing a test's
 // fallback command to reach the installed broker's request socket.
 func runWithClient(args []string, runClient func(context.Context, []string, client.Options) int) int {
+	if len(args) == 1 && args[0] == "--version" {
+		release := version.Release
+		if release == "" {
+			release = "development build"
+		}
+		fmt.Fprintln(os.Stdout, release)
+		return 0
+	}
 	if filepath.Base(os.Args[0]) == "askdo-config" {
 		return runConfigCLI(args, runClient)
 	}
@@ -71,7 +80,8 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 		return 0
 	}
 	if len(args) == 0 {
-		return runClient(context.Background(), args, client.Options{})
+		fmt.Fprintln(os.Stderr, "usage: askdo [--reason TEXT] COMMAND [ARG...]\nRun askdo --help for all options.")
+		return 2
 	}
 	// The broker launches the internal worker as bare `askdo reviewer`; that
 	// invocation is not an operator command, so it gets no moved notice (it
@@ -119,7 +129,7 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 
 // The daemon's two long-lived parts, which a test replaces.
 var (
-	runBroker         = broker.Run
+	runBroker         = func(ctx context.Context, path string) error { return broker.RunWithStatus(ctx, path, gatewayStatus) }
 	startUpgradeAgent = startFleetUpgrade
 )
 

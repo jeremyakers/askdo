@@ -32,6 +32,8 @@ docker run --rm --cap-add=SYS_PTRACE --network bridge --mount "type=bind,src=$re
   cp /src/contrib/askdo.sudoers /etc/sudoers.d/askdo
   chmod 0440 /etc/sudoers.d/askdo /etc/sudoers.d/askdo-defaults
   visudo -cf /etc/sudoers
+  install -d -m 0700 /root/askdo-test-tmp
+  TMPDIR=/root/askdo-test-tmp go test -race ./cmd/askdo -run "^TestGateway(RootHostRenameAndStatusProjection|StatusCLIContainer)$" -count=1 -v -timeout=120s
   go test -race -tags askdo_fleet_fixture ./internal/broker -run "^TestForeground(SudoContainer|FleetSudoContainer|TargetUserSudoContainer)$" -shuffle=on -count=1 -v -timeout=300s
 '
 if [ "$(df -Pk /var | awk 'NR==2 {print $4}')" -lt 20971520 ]; then

@@ -27,7 +27,7 @@ import (
 )
 
 const defaultGatewayConfig = "/etc/askdo-gateway/config.json"
-const gatewayUsage = "usage: askdo-config gateway init|hosts add|hosts list|hosts revoke HOST_ID|upgrade-target [TAG|--clear]|connect|check|serve [--config PATH]"
+const gatewayUsage = "usage: askdo-config gateway init|hosts add|hosts list|hosts rename HOST_ID NAME|hosts revoke HOST_ID|upgrade-target [TAG|--clear]|connect|check|serve [--config PATH]"
 
 type gatewayStrings []string
 
@@ -313,10 +313,10 @@ func loadGatewayOperator(path string) (*gateway.Config, error) {
 
 func gatewayHosts(args []string, out io.Writer) (err error) {
 	if len(args) == 0 {
-		return errors.New("hosts requires add, list or revoke")
+		return errors.New("hosts requires add, list, rename HOST_ID NAME, or revoke HOST_ID; use --help")
 	}
 	sub := args[0]
-	if sub != "add" && sub != "list" && sub != "revoke" {
+	if sub != "add" && sub != "list" && sub != "revoke" && sub != "rename" {
 		return errors.New("unknown hosts operation")
 	}
 	f := gatewayFlags("hosts " + sub)
@@ -335,7 +335,7 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 	if e != nil {
 		return e
 	}
-	if sub == "revoke" && len(pos) != 1 || sub != "revoke" && len(pos) != 0 {
+	if sub == "revoke" && len(pos) != 1 || sub == "rename" && len(pos) != 2 || sub != "revoke" && sub != "rename" && len(pos) != 0 {
 		return errors.New("invalid hosts positional arguments")
 	}
 	c, e := loadGatewayOperator(*path)
@@ -349,6 +349,13 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 	defer func() { err = errors.Join(err, store.Close()) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if sub == "rename" {
+		if e = store.Rename(ctx, pos[0], pos[1]); e != nil {
+			return fmt.Errorf("cannot rename host (check HOST_ID with askdo-config gateway hosts list): %w", e)
+		}
+		fmt.Fprintf(out, "renamed %s to %q\n", pos[0], pos[1])
+		return nil
+	}
 	if sub == "list" {
 		hosts, e := store.List(ctx)
 		if e != nil {
@@ -367,6 +374,9 @@ func gatewayHosts(args []string, out io.Writer) (err error) {
 				return errors.New("invalid stored enrollment identity")
 			}
 			status, ok := reported[h.HostID]
+			if h.DisplayName != "" {
+				status.Hostname = h.DisplayName
+			}
 			fmt.Fprintf(out, "%s enabled=%t profiles=%s channels=%s default=%s%s\n", h.HostID, h.Enabled, strings.Join(h.AllowedProfiles, ","), strings.Join(h.AllowedChannels, ","), h.DefaultChannel, upgradeColumns(status, ok))
 		}
 		return nil
