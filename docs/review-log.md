@@ -45,9 +45,12 @@ Every record has `version`, `event`, UTC `time`, `job_id`, and `submitter_uid`.
 * `unreviewed`: the same operation metadata without an AI report, plus
   `approval_reason` and typed `availability_history` failures when applicable.
 * `outcome`: final `state`, optional `result_kind` (the stored result kind),
-  `exit_code` for an exit result or `signal` for a signal result, `approval_kind`
-  (`human`/`auto`/`none`), and `decision` (`approved`, `denied`, `request_changes`, `expired`,
-  `cancelled`, or `none` when no decision occurred). Covers terminal transitions,
+  `exit_code` for an exit result (also `1` with `result_kind` `approval_required`)
+  or `signal` for a signal result, `approval_kind` (`human`/`auto`/`none`), and
+  `decision` (`approved`, `denied`, `request_changes`, `expired`, `cancelled`,
+  `approval_required` when an `askdo -n` request needed a human approval and did
+  not run, or `none` when no decision occurred). Readers should tolerate decision
+  values added by later releases. Covers terminal transitions,
   expiry sweeps, and restart invalidation. `unknown` records lost execution
   tracking honestly; it does not invent an exit code. Older version-1 records may
   lack `result_kind`/`signal`. Outcome fields are captured atomically with the
