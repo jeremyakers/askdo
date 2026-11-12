@@ -690,6 +690,9 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid operator status request; use askdo-config --help"})
 			return
 		}
+		// This is a read-only projection, not serialized job admission. A slow
+		// gateway database must not delay other clients' reserve/status/cancel.
+		admission.release()
 		d.handleOperatorStatus(conn, request.View)
 	case "timestamp":
 		var request proto.TimestampRequest

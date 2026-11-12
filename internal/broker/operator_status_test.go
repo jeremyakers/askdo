@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jeremyakers/askdo/internal/client"
 	"github.com/jeremyakers/askdo/internal/proto"
@@ -54,5 +56,60 @@ func TestOperatorStatusIsNonSecretAndNeverSubmits(t *testing.T) {
 	}
 	if len(h.daemon.jobs) != 0 || len(h.executor.Snapshot()) != 0 {
 		t.Fatal("read-only status created work")
+	}
+}
+
+func TestSlowOperatorStatusDoesNotHoldReservationAdmission(t *testing.T) {
+	h := newBrokerHarnessWithConfig(t, nil, nil, testConfig())
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(unblock) }) }
+	defer release()
+	h.daemon.operatorStatus = func(ctx context.Context, _ string) (string, error) {
+		close(started)
+		select {
+		case <-unblock:
+			return "non-secret status\n", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := client.OperatorStatus(ctx, h.socket, "hosts"); done <- err }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("status projection did not start")
+	}
+	conn, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeClient(conn, proto.ReserveRequest{Op: "reserve", ProtocolVersion: proto.CanonicalProtocolVersion}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := proto.ReadFrame(conn, proto.MaxFrameLength)
+	if err != nil {
+		t.Fatalf("slow read-only projection blocked reservation: %v", err)
+	}
+	var reserved proto.ReservedEvent
+	if err := proto.StrictUnmarshal(body, &reserved); err != nil || reserved.Validate() != nil {
+		t.Fatalf("reservation response: %s (decode %v)", body, err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("projection finished before being unblocked: %v", err)
+	default:
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
