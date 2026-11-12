@@ -17,7 +17,7 @@ done
 [ -z "${ASKDO_SOURCE_DIR:-}" ] || die 'ASKDO_SOURCE_DIR is obsolete; normal installs download releases and never compile source'
 case "$VERSION" in ''|*[!A-Za-z0-9._-]*|.*|-*) die 'invalid release tag' ;; main|master) die 'select a published release tag, not a branch' ;; esac
 if [ "$(id -u)" != 0 ]; then
-  command -v sudo >/dev/null 2>&1 || die 'run as root or install sudo'
+  command -v sudo >/dev/null 2>&1 || die 'install sudo, then rerun (apt-get install sudo on Debian/Ubuntu, or dnf install sudo)'
   if [ -f "$0" ] && [ -r "$0" ]; then
     exec sudo env ASKDO_VERSION="$VERSION" sh "$0" "$@"
   fi
@@ -47,6 +47,10 @@ if [ "$(id -u)" != 0 ]; then
   fi
 fi
 [ "$(uname -s)" = Linux ] || die 'Linux required'
+if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+  printf 'WARNING: no systemd found; askdo needs systemd for its service. Install on a systemd host before starting askdo.\n' >&2
+fi
+command -v sudo >/dev/null 2>&1 || die 'askdo requires sudo (with visudo) to validate its sudoers rule; install sudo, then rerun (apt-get install sudo or dnf install sudo)'
 case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) die 'unsupported architecture' ;; esac
 
 # DSM uses native roles and ACLs, not Linux useradd/getent semantics. A fixed
@@ -602,7 +606,8 @@ policy_check() {
 if [ "$DSM" = 0 ] && ! command -v visudo >/dev/null 2>&1; then VISUDO_TOOL=; fi
 if [ -z "$VISUDO_TOOL" ]; then
   # Never parse a newer/different runtime policy using an older bundled grammar.
-  SUDO_TOOL=$(readlink -f "$(command -v sudo)") || die 'sudo runtime required for bundled validator compatibility'
+  command -v sudo >/dev/null 2>&1 || die 'askdo requires sudo (with visudo) to validate its sudoers rule; install sudo, then rerun (apt-get install sudo or dnf install sudo)'
+  SUDO_TOOL=$(readlink -f "$(command -v sudo)") || die 'install sudo, then rerun (apt-get install sudo or dnf install sudo)'
   [ -f "$SUDO_TOOL" ] && [ -x "$SUDO_TOOL" ] && [ "$(stat -c %u:%g "$SUDO_TOOL")" = 0:0 ] || die 'unsafe sudo runtime'
   P=$SUDO_TOOL
   while [ "$P" != / ]; do
@@ -645,7 +650,8 @@ fi
 if [ "$DSM" = 1 ] && [ -z "$VALIDATOR_STAGE" ]; then
   # Native policy parser must match its installed sudo runtime, too. Never use
   # a compatible-looking alias to a different grammar/version.
-  SUDO_TOOL=$(readlink -f "$(command -v sudo)") || die 'sudo runtime required'
+  command -v sudo >/dev/null 2>&1 || die 'askdo requires sudo (with visudo) to validate its sudoers rule; install sudo, then rerun (apt-get install sudo or dnf install sudo)'
+  SUDO_TOOL=$(readlink -f "$(command -v sudo)") || die 'install sudo, then rerun (apt-get install sudo or dnf install sudo)'
   [ -f "$SUDO_TOOL" ] && [ -x "$SUDO_TOOL" ] || die 'invalid sudo runtime'
   P=$SUDO_TOOL
   while [ "$P" != / ]; do dsm_acl "$P" || die 'sudo runtime ACL check failed'; P=$(dirname "$P"); done
@@ -1004,6 +1010,12 @@ elif [ "$MIGRATING" = 1 ]; then
     printf 'WARNING: could not enumerate askdo-foreground group; no group deletion attempted\n' >&2
   fi
 fi
-printf 'askdo installed; service was NOT enabled or started. Configure /etc/askdo/config.json, then explicitly enable askdo.service. Optional fleet gateway: read-only examples in /etc/askdo/examples; askdo-gateway.service installed but NOT enabled or started; no gateway keys or credentials were created.\n'
+printf '%s\n' 'askdo installed; service was NOT enabled or started.' '' 'Next steps (standalone):'
+if [ "$DSM" = 1 ]; then
+  printf '%s\n' '  1. Add your login to askdo in DSM Control Panel > User & Group > Group > askdo > Edit > Members.' '     Or: sudo /usr/syno/sbin/synogroup --memberadd askdo USER  # replace USER with your login'
+else
+  printf '%s\n' '  1. sudo usermod -aG askdo USER  # replace USER with your login'
+fi
+printf '%s\n' '     Log out and back in before using askdo.' '  2. sudo askdo-config channel add telegram  # create a bot, then message it for ID discovery' '     sudo askdo-config reviewer add  # or: sudo askdo-config review mode approval-only' '     sudo askdo-config config check' '  3. sudo systemctl enable --now askdo' '' 'Fleet host instead: sudo askdo-config fleet join https://gateway.example:8443' '  Join requests approval, adds the invoking user to askdo, and enables the service.' '  Log out and back in after joining.' 'Optional gateway examples: /etc/askdo/examples; askdo-gateway.service was NOT enabled or started; no gateway keys or credentials were created.' 'Setup guide: https://github.com/jeremyakers/askdo#get-started'
 
 # askdo install.sh end-of-file

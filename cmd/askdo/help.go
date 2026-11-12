@@ -93,19 +93,26 @@ func writeConfigHelp(w io.Writer) {
   askdo-config auth login|status|logout [openai-codex] [--config PATH]
   askdo-config inspection check PATH [--config PATH]
   askdo-config reviewer add|edit|delete|moveup|movedown|list ...
-  askdo-config gateway init|hosts add|hosts list|hosts revoke|upgrade-target|connect|check|serve ...
-  askdo-config fleet join https://gateway[:port] [--ca-file PATH]
+  askdo-config gateway init|hosts add|hosts list|hosts rename HOST_ID NAME|hosts revoke|upgrade-target|connect|check|serve ...
+  askdo-config fleet join https://gateway[:port] [--ca-file PATH] [--name NAME]
   askdo-config upgrade [--release TAG] [--operation ID]
   askdo-config upgrade-fleet [TAG] | --status | --stop
   askdo-config logs JOB_ID [--uid UID] [--all]
   askdo-config daemon [--config PATH]                 service mode (root only)
 
-Run askdo-config as yourself; do not use sudo. Commands that change askdo's
-configuration or read root-only state (review mode/exempt/timestamp_timeout,
+After initial setup, run askdo-config as yourself; do not use sudo.
+First-time setup (channel add, reviewer add, review mode, initial config check)
+and fleet join use sudo; before the first service start there is no configured
+broker to approve setup. Commands that change askdo's
+configuration or read root-only state (review mode changes/exempt/timestamp_timeout,
 channel, config install, auth, reviewer, gateway setup, logs) automatically
 request the usual Telegram approval and run in the foreground, including
 interactive prompts. Read-only views you can already access run without
-approval. Root executes directly. Exceptions that still need sudo: fleet join
+approval. review mode (read form), gateway hosts list, and upgrade-fleet --status
+read non-secret status through the broker without approval. config check may
+require approval because it reads secret-bearing configuration. askdo -l shows
+your permissions and approval settings without approval. Root executes directly.
+Exceptions that still need sudo: fleet join
 (it has its own enrollment approval) and the service modes daemon and
 gateway serve.
 

@@ -283,14 +283,26 @@ func TestForegroundSudoContainer(t *testing.T) {
 		p.send(t, "/usr/local/bin/askdo-config review timestamp_timeout clear askdo-outsider --config "+path+"; echo CONFIG_FAILURE_EXIT=$?\n")
 		p.until(t, "has no timestamp policy")
 		p.until(t, "CONFIG_FAILURE_EXIT=1\r\n")
-		// Quiet client mode deliberately reports a generic socket connection
-		// error. Compare the real ordinary client rather than inventing a new
-		// permission-error format for askdo-config.
+		// Help and non-secret review status use the real CLI/socket without
+		// submitting either an approval or an execution request.
+		beforeRead := approvals.Load()
+		for _, args := range [][]string{{"logs", "--help"}, {"review", "mode"}} {
+			command := append([]string{"-u", "askdo-human", "--", "/usr/local/bin/askdo-config"}, args...)
+			out, code := run(10*time.Second, "runuser", command...)
+			want := "usage: askdo-config logs"
+			if args[0] == "review" {
+				want = "review mode: approval-only"
+			}
+			if code != 0 || !strings.Contains(out, want) || approvals.Load() != beforeRead {
+				t.Fatalf("%v: code=%d output=%q", args, code, out)
+			}
+		}
+		// Both clients explain the same real DAC denial and how to fix it.
 		before := approvals.Load()
 		want, wantCode := run(10*time.Second, "runuser", "-u", "askdo-outsider", "--", "/usr/local/bin/askdo", "/usr/bin/true")
 		out, code := run(10*time.Second, "runuser", "-u", "askdo-outsider", "--", "/usr/local/bin/askdo-config", "review", "timestamp_timeout", "list", "--config", path)
 		t.Logf("nonmember config socket error: %q status=%d; ordinary client: %q status=%d", out, code, want, wantCode)
-		if code != 125 || code != wantCode || out != want || !strings.Contains(out, "connection failed") || approvals.Load() != before {
+		if code != 125 || code != wantCode || out != want || !strings.Contains(out, "you are not in the askdo group") || !strings.Contains(out, "sudo usermod -aG askdo USER") || approvals.Load() != before {
 			t.Fatalf("nonmember did not get normal socket error: status=%d %q", code, out)
 		}
 		assertNoExecutor()

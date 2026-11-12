@@ -99,6 +99,7 @@ func reviewMode(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "review mode set to %s\n", positional[0])
 	if review.Mode == "approval_only" {
 		fmt.Fprintln(stderr, "WARNING: EVERY submitting UID in the socket group may request unreviewed root execution; Telegram approval is required unless a foreground approval timestamp is enabled and valid.")
+		fmt.Fprintln(stderr, "Only add trusted accounts to the askdo group; use review mode required to enable AI review.")
 	}
 	return 0
 }

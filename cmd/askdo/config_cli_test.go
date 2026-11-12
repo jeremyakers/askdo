@@ -16,9 +16,14 @@ import (
 func cliIdentity(t *testing.T, name string, euid int) {
 	t.Helper()
 	oldArgs, oldUID := os.Args, getEUID
+	oldStatus := readOperatorStatus
+	readOperatorStatus = func(context.Context, string, string) (string, error) {
+		t.Fatal("test attempted the default broker status socket; inject a private fixture")
+		return "", errors.New("missing test status fixture")
+	}
 	os.Args = []string{name}
 	getEUID = func() int { return euid }
-	t.Cleanup(func() { os.Args, getEUID = oldArgs, oldUID })
+	t.Cleanup(func() { os.Args, getEUID, readOperatorStatus = oldArgs, oldUID, oldStatus })
 }
 
 func captureCLI(t *testing.T, fn func() int) (int, string, string) {
@@ -93,7 +98,7 @@ func TestConfigNonrootApprovalAtRootGates(t *testing.T) {
 		{"config", "install", "source.json", "--config", "dest.json"},
 		{"auth", "login"}, {"auth", "login", "--token-file", "/no/such/private/token.json"},
 		{"inspection", "check", "/etc/hosts"},
-		{"gateway", "init"}, {"gateway", "hosts", "add"}, {"gateway", "hosts", "list"},
+		{"gateway", "init"}, {"gateway", "hosts", "add"},
 		{"gateway", "hosts", "revoke", "host1"}, {"gateway", "connect"}, {"gateway", "check"},
 		// Setting the fleet upgrade target is the one approval a fleet rollout needs.
 		{"gateway", "upgrade-target", "v1.0.1"}, {"gateway", "upgrade-target"}, {"gateway", "upgrade-target", "--clear"},

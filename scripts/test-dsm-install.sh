@@ -142,6 +142,10 @@ done
 export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 : > /fixture/calls
 sh /src/install.sh > /tmp/result 2>&1 || fail 'fresh DSM installation failed'
+grep -q 'DSM Control Panel > User & Group > Group > askdo > Edit > Members' /tmp/result || fail 'missing DSM group UI next step'
+grep -q 'sudo /usr/syno/sbin/synogroup --memberadd askdo USER' /tmp/result || fail 'missing native DSM membership command'
+if grep -q usermod /tmp/result; then fail 'Linux membership command shown on DSM'; fi
+grep -q 'Log out and back in before using askdo' /tmp/result || fail 'missing DSM re-login step'
 test "$(id -g askdo-review)" = 100 || fail 'native NSS primary altered'
 cmp /usr/local/bin/askdo /fixture/release/askdo-linux-amd64 || fail 'downloaded client differs'
 cmp /usr/local/libexec/askdo-launch /fixture/release/askdo-launch-linux-amd64 || fail 'downloaded helper differs'

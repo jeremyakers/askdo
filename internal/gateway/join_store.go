@@ -148,6 +148,10 @@ type JoinDecision struct {
 // the operator will enact, and stores only the hashes of the host-owned
 // bearer and join secrets. Cards remain unavailable until a valid reveal.
 func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enrollment JoinEnrollment) (fleetproto.JoinResponse, error) {
+	if req.Hostname != "" && !fleetproto.ValidDisplayName(req.Hostname) {
+		return fleetproto.JoinResponse{}, fleetproto.ErrProtocol
+	}
+	req.Hostname = fleetproto.NormalizeDisplayName(req.Hostname)
 	if _, err := fleetproto.MarshalJoinRequest(req); err != nil {
 		return fleetproto.JoinResponse{}, err
 	}
@@ -203,6 +207,21 @@ func (s *JoinStore) Create(ctx context.Context, req fleetproto.JoinRequest, enro
 		return fleetproto.JoinResponse{}, err
 	}
 	defer tx.Rollback()
+	// Choose the display name in the same transaction as admission, including
+	// pending joins so simultaneous equal hostnames remain distinguishable.
+	name := req.Hostname
+	if name == "" {
+		name = string(req.HostID)
+	}
+	name, err = allocateDisplayName(ctx, tx, string(req.HostID), name, time.Unix(now, 0))
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
+	enrollment.Policy.DisplayName = name
+	policy, err = json.Marshal(enrollment.Policy)
+	if err != nil {
+		return fleetproto.JoinResponse{}, err
+	}
 	var exists int
 	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM gateway_pending_joins WHERE host_id=?) OR EXISTS(SELECT 1 FROM gateway_enrollments WHERE host_id=?)", string(req.HostID), string(req.HostID)).Scan(&exists); err != nil {
 		return fleetproto.JoinResponse{}, err
@@ -530,6 +549,9 @@ func (s *JoinStore) CardsDue(ctx context.Context) ([]JoinCard, error) {
 			return nil, err
 		}
 		card.Profiles, card.Channel = scope.AllowedProfiles, scope.DefaultChannel
+		if scope.DisplayName != "" {
+			card.Hostname = scope.DisplayName
+		}
 		cards = append(cards, card)
 	}
 	return cards, rows.Err()

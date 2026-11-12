@@ -22,6 +22,12 @@ type FleetRendering struct {
 	Details  []string
 }
 
+// FleetHostLabel adds the gateway's administrative name separately from the
+// host's frozen display facts, with the same bounded escaping as card identity.
+func FleetHostLabel(name string) string {
+	return "<b>Fleet host:</b> " + compactLine(name, 160) + "\n"
+}
+
 // RenderFleet renders a ticket identically on the broker and the gateway. It
 // fails when Details would exceed what a Details tap may send, so neither side
 // delivers a card whose Details could never be shown.

@@ -11,6 +11,13 @@ if [ "${1:-}" != --inside ]; then
   docker start -a "$C"
   exit "$(docker inspect --format '{{.State.ExitCode}}' "$C")"
 fi
+mkdir -p /fixture/minimal-bin
+printf '#!/bin/sh\necho 0\n' > /fixture/minimal-bin/id
+printf '#!/bin/sh\necho Linux\n' > /fixture/minimal-bin/uname
+chmod 0755 /fixture/minimal-bin/id /fixture/minimal-bin/uname
+if PATH=/fixture/minimal-bin /bin/sh /src/install.sh >/fixture/prerequisite-result 2>&1; then exit 1; fi
+grep -q 'install sudo, then rerun' /fixture/prerequisite-result
+grep -q 'askdo needs systemd' /fixture/prerequisite-result
 apt-get update -qq >/dev/null && apt-get install -y -qq sudo >/dev/null
 sh scripts/test-install-release-fixture.sh
 export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -22,6 +29,12 @@ fi
 cmp /usr/local/bin/askdo /fixture/release/askdo-linux-amd64
 cmp /usr/local/libexec/askdo-launch /fixture/release/askdo-launch-linux-amd64
 test ! -s /fixture/calls
+grep -q 'Next steps' /tmp/result
+grep -q 'sudo usermod -aG askdo USER' /tmp/result
+grep -q 'Log out and back in' /tmp/result
+grep -q 'sudo askdo-config channel add telegram' /tmp/result
+grep -q 'sudo systemctl enable --now askdo' /tmp/result
+grep -q 'askdo-config fleet join https://gateway.example:8443' /tmp/result
 grep -qx 'https://github.com/jeremyakers/askdo/releases/latest/download/install-manifest.v1' /tmp/fetch-urls
 test "$(grep -c '/latest/' /tmp/fetch-urls)" = 1
 printf 'release-download installer transfer passed; zero destination Go calls\n'

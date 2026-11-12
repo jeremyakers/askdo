@@ -90,6 +90,7 @@ type daemonOptions struct {
 }
 
 type daemon struct {
+	operatorStatus func(context.Context, string) (string, error)
 	reviewLogPath  string
 	cfg            *config.Config
 	bootID         string
@@ -172,11 +173,18 @@ func (a *connectionAdmission) release() { a.once.Do(func() { close(a.successor) 
 
 // Run loads configuration and serves the broker until ctx is cancelled.
 func Run(ctx context.Context, configPath string) error {
+	return RunWithStatus(ctx, configPath, nil)
+}
+
+// RunWithStatus serves fixed non-secret gateway projections supplied by the CLI.
+// Socket DAC and peer credential checks are identical to other broker requests.
+func RunWithStatus(ctx context.Context, configPath string, status func(context.Context, string) (string, error)) error {
 	d, listener, err := newDaemon(configPath, daemonOptions{})
 	if err != nil {
 		return err
 	}
 	defer d.close()
+	d.operatorStatus = status
 	stopDrain := d.drain.Listen(ctx, d.drainPath)
 	defer stopDrain()
 	return d.serve(ctx, listener)
@@ -676,6 +684,16 @@ func (d *daemon) handleConn(conn *net.UnixConn, admission *connectionAdmission) 
 		return
 	}
 	switch discriminator.Op {
+	case "operator_status":
+		var request proto.OperatorStatusRequest
+		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {
+			_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: "invalid operator status request; use askdo-config --help"})
+			return
+		}
+		// This is a read-only projection, not serialized job admission. A slow
+		// gateway database must not delay other clients' reserve/status/cancel.
+		admission.release()
+		d.handleOperatorStatus(conn, request.View)
 	case "timestamp":
 		var request proto.TimestampRequest
 		if proto.StrictUnmarshal(body, &request) != nil || request.Validate() != nil {

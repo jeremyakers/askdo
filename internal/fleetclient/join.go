@@ -8,11 +8,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
@@ -23,6 +26,13 @@ import (
 // JoinThrottleError carries only the gateway's bounded numeric cooldown, not
 // peer diagnostics. Callers still classify it with ErrJoinThrottled.
 type JoinThrottleError struct{ After time.Duration }
+
+// JoinConnectError contains only the connection failure, never a request URL,
+// authorization header, response body, or join secret.
+type JoinConnectError struct{ Reason string }
+
+func (e *JoinConnectError) Error() string { return e.Reason }
+func (e *JoinConnectError) Unwrap() error { return &Error{Code: fleetproto.ErrCodeTransport} }
 
 func (e *JoinThrottleError) Error() string { return ErrJoinThrottled.Error() }
 func (e *JoinThrottleError) Unwrap() error { return ErrJoinThrottled }
@@ -93,6 +103,8 @@ func NewJoinClient(rawURL, hostID, joinSecret string, caPEM []byte) (*JoinClient
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	transport.DialContext = (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = 5 * time.Second
 	client := &JoinClient{base: base, host: host, secret: joinSecret, roots: roots, allowUnknown: caPEM == nil, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, transport: transport}
 	// Verification is performed explicitly so an unknown first-connection CA
 	// can be provisionally pinned before ANY HTTP bytes are sent.
@@ -166,6 +178,12 @@ func (c *JoinClient) exchange(ctx context.Context, method, target, auth string, 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// GotConn runs only after the TLS handshake succeeds. Before that point
+	// no HTTP bytes (and thus no join request) could have reached the gateway.
+	var connected atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	}))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		var certificate *JoinCertificateError
@@ -174,6 +192,20 @@ func (c *JoinClient) exchange(ctx context.Context, method, target, auth string, 
 		}
 		if errors.Is(err, ErrJoinGatewayChanged) {
 			return nil, ErrJoinGatewayChanged
+		}
+		var dial *net.OpError
+		if errors.As(err, &dial) && dial.Op == "dial" {
+			return nil, &JoinConnectError{Reason: dial.Err.Error()}
+		}
+		if !connected.Load() && ctx.Err() == nil {
+			// TLS peer errors can contain arbitrary endpoint bytes: report only
+			// the phase and a remedy, not the raw record or response.
+			reason := "TLS handshake failed; check that the gateway address serves HTTPS"
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				reason = "TLS handshake timed out; check the gateway HTTPS service"
+			}
+			return nil, &JoinConnectError{Reason: reason}
 		}
 		return nil, requestError(ctx, err)
 	}

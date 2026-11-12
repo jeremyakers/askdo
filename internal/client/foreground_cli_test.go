@@ -352,7 +352,7 @@ func TestJobSubcommandsDoNotRequireTTY(t *testing.T) {
 		{"status", `{"op":"accepted","request_id":"` + id + `","state":"reserved"}`, 0},
 		{"status-cancelled", `{"op":"result","request_id":"` + id + `","state":"cancelled","message":"cancelled before submission"}`, 0},
 		{"attach", `{"op":"result","request_id":"` + id + `","state":"denied"}`, 126},
-		{"cancel", `{"op":"result","request_id":"` + id + `","state":"cancelled"}`, 126},
+		{"cancel", `{"op":"result","request_id":"` + id + `","state":"cancelled"}`, 0},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "request.sock")

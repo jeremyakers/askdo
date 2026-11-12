@@ -241,6 +241,23 @@ func ParseJoinHostID(s string) (ID, error) {
 	return ID(s), nil
 }
 
+// NormalizeDisplayName uses the same single-token spelling as host listings.
+// Apply it before validation/storage and when comparing existing display names.
+func NormalizeDisplayName(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), "_")
+}
+
+func ValidDisplayName(s string) bool {
+	s = NormalizeDisplayName(s)
+	return s != "" && validJoinHostname(s)
+}
+
 // validJoinHostname accepts the display-only label: bounded UTF-8 with no
 // control characters at all. It is rendered escaped and never trusted.
 func validJoinHostname(s string) bool {
