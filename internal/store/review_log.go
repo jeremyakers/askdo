@@ -159,6 +159,10 @@ func outcomeForJob(job Job, consumed string) reviewlog.Event {
 	}
 	switch job.State {
 	case StateDenied:
+		if result.Kind == ResultApprovalRequired {
+			decision = "approval_required"
+			break
+		}
 		if decision != "request_changes" {
 			decision = "denied"
 		}
