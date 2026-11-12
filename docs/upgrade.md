@@ -268,7 +268,8 @@ feature **and** was produced by the release build, which embeds the release tag 
 the binary. A binary built any other way does not know which release it is, so it
 cannot tell newer from older and never upgrades by push (`hosts list` shows
 `release=unknown`). Upgrade each host and the gateway once by hand with
-`askdo-config upgrade` to the first such release; after that, set the target. (A binary
+`askdo-config upgrade` to the first such release (v1.1.0 or later); after
+that, set the target. (A binary
 you build from source reports a release only if you embed one:
 `go build -ldflags '-X github.com/jeremyakers/askdo/internal/version.Release=v1.0.1' ./cmd/askdo`.)
 

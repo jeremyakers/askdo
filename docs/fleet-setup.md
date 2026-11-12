@@ -48,7 +48,7 @@ key and token are root-private secrets:
 sudo install -d -m 0700 /etc/askdo-gateway /etc/askdo-gateway/credentials
 sudo install -m 0444 -o root -g root tls.crt /etc/askdo-gateway/tls.crt   # your cert (0400 also fine)
 sudo install -m 0600 -o root -g root tls.key /etc/askdo-gateway/tls.key   # your key
-sudo install -m 0600 -o root -g root /dev/stdin /etc/askdo-gateway/credentials/telegram.token  # paste the bot token
+sudo install -m 0600 -o root -g root /dev/stdin /etc/askdo-gateway/credentials/telegram.token  # paste the bot token, press Enter, then Ctrl-D
 sudo askdo-config gateway init \
   --url https://gateway.example.com:8443 \
   --listen 0.0.0.0:8443 \

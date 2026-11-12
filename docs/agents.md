@@ -13,7 +13,8 @@ askdo --reason 'Restart nginx so the validated site config takes effect' -- \
 - Put what and why in a specific `--reason`; it is shown to the reviewer and
   human approver.
 - Keep the printed `JOB_ID`. It identifies this request even if your client
-  disconnects.
+  disconnects. Agents without a terminal (the usual case) always get it; if
+  your command runs with a TTY, add `--verbose` to print it.
 - Do not add `--timeout` to accommodate a slow human approval. Let askdo wait.
   If you cannot wait, use `-n`: it runs only with reusable or eligible
   auto-approval and otherwise exits 1 without leaving a pending card.
@@ -53,7 +54,7 @@ wrapper outcome.
 ```md
 ### Privileged commands
 - Use `askdo --reason 'what and why' -- CMD [ARG...]`, never `sudo`.
-- Keep the printed JOB_ID. After any disconnect, timeout, or uncertain result,
+- Keep the printed JOB_ID (add `--verbose` if you run with a TTY). After any disconnect, timeout, or uncertain result,
   run `askdo status JOB_ID --json`; use `askdo attach JOB_ID` for output.
 - Never resubmit blindly: first determine whether the existing job ran and
   whether its effects landed. Never retry a denied command unchanged.

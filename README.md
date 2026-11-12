@@ -14,7 +14,8 @@ mode with no model or API key.
 
 ### Prerequisites
 
-- Linux with **systemd**, **sudo** (including `visudo`), and **curl**.
+- Linux on **amd64 (x86-64)** or **arm64**, with **systemd**, **sudo**
+  (including `visudo`), and **curl**.
 - A Telegram bot from [@BotFather](https://t.me/BotFather). The standalone
   steps below explain how to create and connect it.
 - Optional: an AI model and its credentials for automated review. You do not
