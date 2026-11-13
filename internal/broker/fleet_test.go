@@ -29,6 +29,24 @@ import (
 	"github.com/jeremyakers/askdo/internal/store"
 )
 
+func TestFleetTelegramRouteUsesGatewayTTL(t *testing.T) {
+	snapshot := fleetproto.RouteSnapshot{ChannelID: "ops", TTLSeconds: 7200}
+	for _, tc := range []struct {
+		name  string
+		fleet *config.FleetConfig
+	}{
+		{name: "omitted legacy host TTL", fleet: &config.FleetConfig{}},
+		{name: "explicit legacy host TTL", fleet: &config.FleetConfig{ApprovalTTL: 600}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			route := fleetTelegramRoute(tc.fleet, snapshot)
+			if got := route.ApprovalTTL.Value(); got != 2*time.Hour {
+				t.Fatalf("route approval TTL = %v, want 2h", got)
+			}
+		})
+	}
+}
+
 func TestRootFleetPrepareHumanOnlySelection(t *testing.T) {
 	requireRootTest(t)
 	for _, tc := range []struct {

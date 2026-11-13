@@ -101,7 +101,7 @@ func TestLegacyTelegramFormUnchanged(t *testing.T) {
 	// The legacy form must remain a single default channel routing every UID.
 	for _, uid := range []uint32{0, 1, 1001, 424242} {
 		route := cfg.Telegram.RouteForUID(uid)
-		if route.ChannelName != "default" || route.TokenFile != "/keys/token" || route.ApprovalTTL.Value() != 10*time.Minute {
+		if route.ChannelName != "default" || route.TokenFile != "/keys/token" || route.ApprovalTTL.Value() != 2*time.Hour {
 			t.Fatalf("legacy route for UID %d: %+v", uid, route)
 		}
 		if len(route.Recipients) != 1 || route.Recipients[0].ChatID != -1 || len(route.Recipients[0].OperatorUserIDs) != 1 || route.Recipients[0].OperatorUserIDs[0] != 1 {

@@ -624,7 +624,7 @@ Shared field:
 
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
-| `approval_ttl` | no | `"10m"` | At least 30 s. Approval lifetime, measured from the moment the complete Telegram request is sent, and additionally capped by the client's remaining pre-dispatch deadline. The 30 s minimum remains to allow a usable decision window; `review.request_timeout` and `review.total_timeout` are separate review budgets. With a per-channel `approval_ttl` set, that value overrides this one for the channel's jobs. |
+| `approval_ttl` | no | `"2h"` | At least 30 s. Approval lifetime, measured from the moment the complete Telegram request is sent, and additionally capped by the client's remaining pre-dispatch deadline. The 30 s minimum remains to allow a usable decision window; `review.request_timeout` and `review.total_timeout` are separate review budgets. With a per-channel `approval_ttl` set, that value overrides this one for the channel's jobs. |
 
 Each daemon handles review and approval one request at a time. While a card
 waits for a decision, later requests stay queued; a longer approval lifetime
@@ -707,7 +707,7 @@ derives the token path `…/credentials/telegram-<name>.token` from it.
 
 ```json
 "telegram": {
-  "approval_ttl": "10m",
+  "approval_ttl": "2h",
   "default_channel": "ops",
   "channels": [
     {
@@ -901,7 +901,7 @@ a credential.
     "token_file": "/etc/askdo/credentials/telegram.token",
     "operator_user_id": 0,
     "chat_id": 0,
-    "approval_ttl": "10m"
+    "approval_ttl": "2h"
   }
 }
 ```
@@ -944,7 +944,7 @@ own setting always takes precedence over them.
 | `verification_key_file` | yes | — | The gateway's **public** Ed25519 verification key (base64). Root-owned, non-writable trust file. |
 | `ca_file` | no | system roots | Additional CA for the gateway connection, explicitly supplied by the operator; same root-owned non-writable trust rule. |
 | `enrollment_bundle_files` | no | omitted | Up to 128 unique absolute clean paths of retained enrollment imports. `connect` records each source and preserves earlier paths. These are hard-protected inspection paths, not files needed for TLS or authentication; a recorded file may have been deleted. |
-| `approval_ttl` | no | `600` | **Integer seconds** (≥ 30), matching the gateway's ticket lifetime units. Note this differs from version 4 `telegram.approval_ttl`, which is a quoted Go duration string. |
+| `approval_ttl` | no | omitted | **Deprecated and ignored.** Existing integer values remain accepted (with the legacy ≥ 30 s validation when present), but approval lifetime comes only from the gateway channel's `channels[].approval_ttl`. New fleet joins/conversions omit this field. Change the gateway config and restart `askdo-gateway` to change fleet approval lifetime. |
 
 `enrollment_file`, `verification_key_file`, `ca_file` and every recorded
 `enrollment_bundle_files` path join the protected credential/trust paths: the
@@ -1096,7 +1096,7 @@ fields rejected at every depth). Example:
 | `database` | yes | — | Absolute clean path of the gateway SQLite store (enrollments, ticket/delivery bookkeeping only — never host job databases or raw model conversations). `askdo-config gateway init` defaults it to `/var/lib/askdo-gateway/gateway.db`; an explicitly chosen custom path is the operator's own responsibility (uninstall never deletes custom paths). |
 | `profiles` | yes | — | Explicit array (empty means approval-only: human Telegram decisions, no model). At most 128 entries; each entry uses the standalone [`review.models[]`](#reviewmodels) schema. Provider credential files are root:root `0600`. |
 | `bots` | yes | — | 1–128 entries: `name` plus `token_file` (root:root `0600`). One update listener per actual bot-token identity. |
-| `channels` | yes | — | 1–128 entries: `name`, `bot`, `approval_ttl` in **integer seconds** (≥ 30), and 1–8 `recipients` of `chat_id` plus 1–8 `operator_user_ids` — the same routing model as the standalone [named channels](#named-multi-channel-form). |
+| `channels` | yes | — | 1–128 entries: `name`, `bot`, `approval_ttl` in **integer seconds** (≥ 30), and 1–8 `recipients` of `chat_id` plus 1–8 `operator_user_ids` — the same routing model as the standalone [named channels](#named-multi-channel-form). `gateway init` writes `approval_ttl: 7200` (2h); this gateway value alone controls fleet approval-card lifetime. Edit it and restart `askdo-gateway` to apply a change. |
 | `reviewer_webfetch_enabled` | no | absent | Boolean default for the reviewer's `webfetch` tool on every host that does not set `review.webfetch_enabled` itself. Absent leaves it to each host. |
 | `review_defaults` | no | absent | Object of review-policy defaults published to every host, applied where a host sets nothing ([precedence table](#fleet-policy-defaults)). Keys mirror a host's `review` section and use its units and limits; every key is optional: `approval_only_users` (array of logins, no blanks or duplicates), `timestamp_timeout_users` (login → **minutes**, 0.5–60), `auto_approve_grants` (array of `{"user","max_risk"}`, `max_risk` 1–4, at most 128, no duplicate logins), `risk_policy` and `account_notes` (`{"users":{login: TEXT},"groups":{group: TEXT}}`). Each TEXT is exactly one of `{"text": "..."}` or `{"file": "/abs/clean/path"}`. A file must be a root-owned regular file with no write bits (for example mode `0444`) in root-controlled directories, like the TLS certificate; it is read **once, when the gateway starts**, so edit it and restart the gateway. Text must be UTF-8 of at most 262144 bytes with no control characters other than newline and tab (use LF, not CRLF), and the whole section may publish at most 512 KiB so the signed catalog always stays inside the 1 MiB payload limit hosts enforce. Anything a host would refuse stops the gateway from starting and fails `askdo-config gateway check`. |
 

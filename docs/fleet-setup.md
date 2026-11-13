@@ -71,6 +71,11 @@ identity is preserved (and verified against `verification.pub`), not rotated.
 Changing its credentials directory or supplying missing/mismatched identity
 files is refused; `--force` is not a signing-key rotation command.
 
+The initial channel has `approval_ttl: 7200` (2 hours). To change fleet
+approval-card lifetime, edit `channels[].approval_ttl` (integer seconds, at
+least 30) in `/etc/askdo-gateway/config.json`, then restart `askdo-gateway`.
+The legacy host-side `fleet.approval_ttl` is deprecated and ignored.
+
 Start the service explicitly when ready:
 
 ```sh
@@ -210,8 +215,9 @@ finish. The gateway's own config remains startup-loaded.
 local policy**: inspection roots/masks, limits, review mode, exemptions,
 auto-approval grants and preferences are carried over unchanged unless you
 explicitly supply `--approval-only`, which selects human-only review. Selecting
-a model profile alone does not change the existing review mode. The approval
-TTL is inherited from the host's previous Telegram/fleet setting.
+a model profile alone does not change the existing review mode. Approval
+lifetime comes only from the gateway channel, not from the host's previous
+Telegram/fleet setting.
 The enrollment files land in `<config parent>/credentials/`: the bearer as
 `<host_id>.bearer` (`0600`), the public verification key as `<host_id>.pub`
 (`0400`), and the CA as `<host_id>.ca.pem` (`0400`) when present. Re-running

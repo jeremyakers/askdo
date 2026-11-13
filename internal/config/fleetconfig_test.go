@@ -46,7 +46,7 @@ func TestFleetLoadStrictModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Fleet.ApprovalDuration() != 10*time.Minute || strings.Join(cfg.Review.GatewayProfiles, ",") != "local,fallback" || !cfg.Review.LocalOnly {
+	if cfg.Fleet.ApprovalTTL != 600 || strings.Join(cfg.Review.GatewayProfiles, ",") != "local,fallback" || !cfg.Review.LocalOnly {
 		t.Fatal("fleet values lost")
 	}
 	if got := strings.Join(cfg.CredentialPaths(), ","); got != "/keys/enrollment,/keys/verify,/keys/ca" {
@@ -107,8 +107,8 @@ func TestFleetLoadStrictModes(t *testing.T) {
 	}
 	omitted := strings.Replace(base, `,"approval_ttl":600`, "", 1)
 	cfg, err = load(omitted)
-	if err != nil || cfg.Fleet.ApprovalDuration() != 10*time.Minute {
-		t.Fatalf("default: %v", err)
+	if err != nil || cfg.Fleet.ApprovalTTL != 0 {
+		t.Fatalf("omitted legacy TTL: config=%+v err=%v", cfg.Fleet, err)
 	}
 	if _, err = load(`{"config_version":5,"inspection":{"read_roots":[]},"review":{"gateway_profiles":["local"]},"limits":{}}`); err == nil {
 		t.Fatal("implicit fleet accepted")
