@@ -201,7 +201,9 @@ hard-denied (`inspection_denied`, reason `protected_path`):
   including external paths and retained fleet enrollment bundles.
 
 Always-on masks additionally withhold `ssh_host_*_key` (SSH private host keys),
-`*.keytab`, `.gnupg` and `.password-store` components and their subtrees, even
+`*.keytab`, `.gnupg`, `.password-store`, `auth.json`, `.git-credentials`,
+`.config/gh` and browser profiles (`.mozilla`, `.config/google-chrome`,
+`.config/chromium`, `.config/BraveSoftware`) and their subtrees, even
 with an explicit `sensitive_masks` override. They use the existing `withheld`
 status and are omitted from listings; `ssh_host_*_key.pub` stays visible unless
 an administrator mask or exclusion hides it. The configurable defaults still

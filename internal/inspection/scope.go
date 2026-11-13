@@ -23,7 +23,12 @@ var defaultSensitive = sensitive.Default()
 // systemSensitive is independent of the configurable default conventions, so
 // explicit overrides cannot release these secrets or consume extra mask slots.
 var systemSensitive = func() *sensitive.Matcher {
-	m, err := sensitive.New([]string{"ssh_host_*_key", "*.keytab", ".gnupg", ".password-store"})
+	m, err := sensitive.New([]string{
+		"ssh_host_*_key", "*.keytab", ".gnupg", ".password-store",
+		// Common per-user token and session stores outside the default masks.
+		"auth.json", ".git-credentials", ".config/gh", ".mozilla",
+		".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
+	})
 	if err != nil {
 		panic("inspection: invalid system secret masks: " + err.Error())
 	}
@@ -227,12 +232,13 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 			p.hard = append(p.hard, resolved)
 		}
 	}
-	systemIDs, err := existingPathIdentities(systemDenyPaths)
-	if err != nil {
-		return fail(fmt.Errorf("system hard-deny identity: %w", err))
-	}
-	for id := range systemIDs {
-		p.hardIDs[id] = struct{}{}
+	// These paths are still denied by name; an identity that cannot be read
+	// here must not disable inspection as a whole.
+	for _, hard := range systemDenyPaths {
+		var st unix.Stat_t
+		if unix.Stat(hard, &st) == nil {
+			p.hardIDs[fileIdentity{dev: uint64(st.Dev), ino: st.Ino}] = struct{}{}
+		}
 	}
 	return p, nil
 }

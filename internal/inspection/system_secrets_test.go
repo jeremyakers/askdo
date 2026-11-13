@@ -46,10 +46,10 @@ func TestAlwaysHiddenSystemPaths(t *testing.T) {
 
 func TestSystemSecretMasksSurviveConfiguredOverride(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_rsa_key", "service.keytab", "custom.privmask", "ssh_host_ed25519_key.pub", "shadow", "readme"} {
+	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_rsa_key", "service.keytab", "custom.privmask", "ssh_host_ed25519_key.pub", "shadow", "readme", "auth.json", ".git-credentials"} {
 		writeFile(t, filepath.Join(root, name), "fixture", 0660)
 	}
-	for _, name := range []string{".gnupg", ".password-store"} {
+	for _, name := range []string{".gnupg", ".password-store", ".mozilla"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0770); err != nil {
 			t.Fatal(err)
 		}
@@ -60,7 +60,7 @@ func TestSystemSecretMasksSurviveConfiguredOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_rsa_key", "service.keytab", "custom.privmask", ".gnupg/plain", ".password-store/plain"} {
+	for _, name := range []string{"ssh_host_ed25519_key", "ssh_host_rsa_key", "service.keytab", "custom.privmask", ".gnupg/plain", ".password-store/plain", "auth.json", ".git-credentials", ".mozilla/plain"} {
 		path := filepath.Join(root, name)
 		if r := p.ReadRange(path, 0, 16, currentIdentity()); r.Status != StatusWithheld || len(r.Content) != 0 {
 			t.Errorf("%s read: %+v", name, r)
