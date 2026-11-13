@@ -362,6 +362,9 @@ func (p *Policy) ProtectedPath(path string) (protected, certain bool) {
 	if containedByAny(resolved, p.hard) {
 		return true, true
 	}
+	if _, ok := currentSystemAlias(resolved); ok {
+		return true, true
+	}
 	// A hardlink in an otherwise allowed path shares a protected key
 	// file's dev+ino identity with no lexical or symlink evidence. Stat
 	// the resolved name only (never open content, no further traversal)
@@ -446,11 +449,27 @@ type decision struct {
 	reason  Reason
 }
 
+// currentSystemAlias reports a system-secret path whose symlink target now
+// contains path. Startup resolution cannot see a protected path that became a
+// link later, and "/" is always allowed, so resolve these at request time.
+var currentSystemAlias = func(path string) (string, bool) {
+	for _, protected := range systemDenyPaths {
+		resolved, err := filepath.EvalSymlinks(protected)
+		if err == nil && resolved != protected && containsPath(resolved, path) {
+			return resolved, true
+		}
+	}
+	return "", false
+}
+
 func (p *Policy) rule(path string) decision {
 	for _, hard := range p.hard {
 		if containsPath(hard, path) {
 			return decision{rule: "protected exclusion " + hard, reason: ReasonProtectedPath}
 		}
+	}
+	if alias, ok := currentSystemAlias(path); ok {
+		return decision{rule: "protected exclusion " + alias, reason: ReasonProtectedPath}
 	}
 	best := decision{rule: "default deny", reason: ReasonOutsideScope}
 	specificity := -1

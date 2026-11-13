@@ -127,3 +127,32 @@ func TestNewSystemExclusionsKeepConfiguredRootsLoadable(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemExclusionRetargetedAfterStartupStaysDenied(t *testing.T) {
+	root := t.TempDir()
+	protected := filepath.Join(root, "credstore")
+	target := filepath.Join(root, "elsewhere")
+	if err := os.Mkdir(target, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(target, "db_password"), "fixture", 0660)
+	old := systemDenyPaths
+	systemDenyPaths = append(slices.Clone(old), protected)
+	t.Cleanup(func() { systemDenyPaths = old })
+	// The protected path does not exist when the policy starts.
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if err := os.Symlink(target, protected); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(target, "db_password")
+	if r := p.ReadRange(secret, 0, 16, currentIdentity()); r.Status != StatusInspectionDenied || r.Reason != ReasonProtectedPath || len(r.Content) != 0 {
+		t.Fatalf("secret behind a later protected link was readable: %+v", r)
+	}
+	if protectedNow, certain := p.ProtectedPath(secret); !protectedNow || !certain {
+		t.Fatalf("ProtectedPath(%s) = %v, %v", secret, protectedNow, certain)
+	}
+}
