@@ -24,7 +24,7 @@ func TestInspectionCheckMatchesCaptureWithoutContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(root, "policy.json")
-	data := fmt.Sprintf(`{"config_version":4,"inspection":{"read_roots":[%q],"trusted_executable_roots":[]},"review":{"models":[]},"limits":{},"telegram":{}}`, root)
+	data := `{"config_version":4,"inspection":{"read_roots":["/usr"],"trusted_executable_roots":[]},"review":{"models":[]},"limits":{},"telegram":{}}`
 	if err := os.WriteFile(configPath, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}

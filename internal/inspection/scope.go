@@ -20,6 +20,16 @@ import (
 // backward callers.
 var defaultSensitive = sensitive.Default()
 
+// systemSensitive is independent of the configurable default conventions, so
+// explicit overrides cannot release these secrets or consume extra mask slots.
+var systemSensitive = func() *sensitive.Matcher {
+	m, err := sensitive.New([]string{"ssh_host_*_key", "*.keytab", ".gnupg", ".password-store"})
+	if err != nil {
+		panic("inspection: invalid system secret masks: " + err.Error())
+	}
+	return m
+}()
+
 const maxMountInfoEntries = 4096
 
 var hardDenyPaths = []string{
@@ -30,6 +40,25 @@ var hardDenyPaths = []string{
 	"/proc",
 	"/sys",
 	"/dev",
+}
+
+// Additional mandatory exclusions are installed after validating configured
+// roots, so existing read_roots naming these locations remain loadable. They
+// still pass the same hard identity, symlink and mount gates on every request.
+var systemDenyPaths = []string{
+	"/etc/askdo-gateway",
+	"/var/lib/askdo-gateway",
+	"/etc/shadow",
+	"/etc/shadow-",
+	"/etc/gshadow",
+	"/etc/gshadow-",
+	"/etc/security/opasswd",
+	"/etc/ssl/private",
+	"/etc/pki/tls/private",
+	"/etc/wireguard",
+	"/etc/NetworkManager/system-connections",
+	"/var/lib/iwd",
+	"/etc/krb5.keytab",
 }
 
 var openMountInfo = func() (io.ReadCloser, error) {
@@ -54,8 +83,9 @@ type Policy struct {
 	sensitive  *sensitive.Matcher
 }
 
-// NewPolicy validates cfg and its read roots, then anchors namespace-root
-// descriptor-relative lookups. The post-open gate verifies mount identity.
+// NewPolicy adds the implicit filesystem read root and validates cfg and its
+// additive roots, then anchors namespace-root descriptor-relative lookups.
+// The post-open gate verifies mount identity.
 // A read root that does not exist yet stays in scope as spelled; the same
 // per-request gate judges whatever later appears under it.
 func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, error) {
@@ -67,7 +97,12 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 	p := &Policy{
 		denies: append([]string{}, cfg.DenyPaths...),
 		hard:   append(append([]string{}, hardDenyPaths...), protectedPaths...),
-		allows: append([]string{}, cfg.ReadRoots...),
+		allows: []string{"/"},
+	}
+	for _, root := range cfg.ReadRoots {
+		if root != "/" {
+			p.allows = append(p.allows, root)
+		}
 	}
 	// The administrator-configured sensitive masks ride the validated config;
 	// a policy built from an InspectionConfig that never passed through
@@ -183,6 +218,21 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 			}
 		}
 		unix.Close(fd)
+	}
+	// Keep the startup checks for pre-existing protected roots unchanged. New
+	// built-ins exclude inspection, not previously valid configurations.
+	for _, hard := range systemDenyPaths {
+		p.hard = append(p.hard, hard)
+		if resolved, err := filepath.EvalSymlinks(hard); err == nil && resolved != hard {
+			p.hard = append(p.hard, resolved)
+		}
+	}
+	systemIDs, err := existingPathIdentities(systemDenyPaths)
+	if err != nil {
+		return fail(fmt.Errorf("system hard-deny identity: %w", err))
+	}
+	for id := range systemIDs {
+		p.hardIDs[id] = struct{}{}
 	}
 	return p, nil
 }
@@ -318,11 +368,15 @@ func (p *Policy) ProtectedPath(path string) (protected, certain bool) {
 
 // MatchesSensitive reports whether path names a credential-like file or lies
 // beneath a credential-like directory under this policy's
-// administrator-configured sensitive masks. It is purely lexical and
-// case-sensitive; callers must evaluate both the requested spelling and the
-// symlink-resolved path so an alias cannot launder a sensitive target name.
+// always-on system masks plus administrator-configured sensitive masks.
+// It is purely lexical and case-sensitive; callers must evaluate both the
+// requested spelling and the symlink-resolved path so an alias cannot launder
+// a sensitive target name.
 // A policy built without a matcher falls back to the default conventions.
 func (p *Policy) MatchesSensitive(path string) bool {
+	if systemSensitive.Matches(path) {
+		return true
+	}
 	if p == nil || p.sensitive == nil {
 		return defaultSensitive.Matches(path)
 	}

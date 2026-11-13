@@ -169,7 +169,8 @@ func TestServiceAbsenceAndEmptyFragment(t *testing.T) {
 	}{
 		{strings.Replace(serviceOutput(""), "LoadState=loaded", "LoadState=not-found", 1), inspection.StatusNotFound, ReasonObjectNotFound},
 		{strings.Replace(serviceOutput(""), "UnitFileState=enabled", "UnitFileState=", 1), inspection.StatusUnresolved, ReasonFragmentUnresolved},
-		{serviceOutput("/outside/fragment"), inspection.StatusWithheld, ReasonPolicyWithheld},
+		{serviceOutput(filepath.Join(t.TempDir(), "fragment")), inspection.StatusNotFound, ReasonObjectNotFound},
+		{serviceOutput("/etc/askdo/fragment"), inspection.StatusWithheld, ReasonPolicyWithheld},
 	} {
 		got, status, reason := parseService(p, "demo.service", []byte(tc.output))
 		if got.ID != "" || status != tc.status || reason != tc.reason {

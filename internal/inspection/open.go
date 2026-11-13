@@ -38,12 +38,12 @@ const (
 type Reason string
 
 const (
-	// ReasonOutsideScope: the configured read_roots/deny_paths rules (or the
-	// default deny) rejected the requested, resolved or mount-alias spelling.
+	// ReasonOutsideScope: the configured deny_paths/additive read_roots rules
+	// rejected the requested, resolved or mount-alias spelling.
 	ReasonOutsideScope Reason = "outside_scope"
 	// ReasonProtectedPath: the hard-protected set (askdo state, /proc, /sys,
-	// /dev and configured protected paths) rejected the spelling, object
-	// identity or mount source. Configuration cannot widen it.
+	// /dev, system secrets and configured protected paths) rejected the spelling,
+	// object identity or mount source. Configuration cannot widen it.
 	ReasonProtectedPath Reason = "protected_path"
 	// ReasonUnverifiedIdentity: the object's identity could not be proven
 	// (multiple hardlinks, ambiguous or unmapped mount, changed descriptor).

@@ -50,8 +50,11 @@ func TestFilesystemDirectOperations(t *testing.T) {
 			t.Fatalf("dangling: %+v", r)
 		}
 		r = directCall(t, j, "stat_path", proto.StatPathRequest{Base: "host", Path: filepath.Join(root, name), Resolve: true})
-		if r.Status == "ok" && name == "escape" {
-			t.Fatalf("outside target: %+v", r)
+		if name == "escape" && (r.Status != "ok" || json.Unmarshal(r.Payload, &stat) != nil || stat.ResolvedPath != outside) {
+			t.Fatalf("outside target should remain visible: %+v", r)
+		}
+		if name == "dangling" && r.Status != "not_found" {
+			t.Fatalf("missing symlink target: %+v", r)
 		}
 	}
 	r = directCall(t, j, "stat_path", proto.StatPathRequest{Base: "host", Path: filepath.Join(root, "secret.privmask")})

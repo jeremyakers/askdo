@@ -44,7 +44,6 @@ func TestTraversalAndScopeRejection(t *testing.T) {
 	p := testPolicy(t, root)
 	for _, path := range []string{
 		root + "/../" + filepath.Base(root) + "/file",
-		filepath.Join(root, "..", "outside"),
 		"relative",
 	} {
 		if got := p.ReadRange(path, 0, 32, currentIdentity()).Status; got != StatusInspectionDenied {
@@ -423,7 +422,7 @@ func TestBindAliasInner(t *testing.T) {
 		}
 		defer unix.Unmount(child, unix.MNT_DETACH)
 		p := testPolicy(t, root)
-		if got := p.ReadRange(filepath.Join(child, "token"), 0, 64, SubmitterIdentity{UID: 0, GroupsResolved: true}).Status; got != StatusInspectionDenied {
+		if got := p.ReadRange(filepath.Join(child, "token"), 0, 64, SubmitterIdentity{UID: 0, GroupsResolved: true}).Status; got != StatusWithheld {
 			t.Fatalf("nested bind status = %s", got)
 		}
 		broad, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/"}, DenyPaths: []string{credentials}})

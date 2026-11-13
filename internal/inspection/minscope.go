@@ -6,9 +6,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// VisibleReadRoots returns a fresh snapshot of configured read-root spellings
-// and the count withheld. It never exposes canonical aliases, exclusion rules,
-// masks or protected paths. A visible root does not authorize every descendant:
+// VisibleReadRoots returns a fresh snapshot of the implicit filesystem root and
+// configured read-root spellings, and the count withheld. It never exposes
+// canonical aliases, exclusion rules, masks or protected paths. A visible root
+// does not authorize every descendant:
 // each subsequent operation must still pass its own descriptor policy gate.
 func (p *Policy) VisibleReadRoots() ([]string, int) {
 	visible := make([]string, 0, len(p.allows))

@@ -167,7 +167,7 @@ func TestLegacySecurityMatrix(t *testing.T) {
 		{"hash-mutation", TestHashExecutableChangesAndCancellation},
 		{"list-bound", TestListDirForWalkCapsMaterializedNames},
 		{"mount-mapping", TestMountMappingChangeFailsClosed},
-		{"credential-identity", TestFileOnlyRootAndProtectedCredentialAlias},
+		{"credential-identity", TestAdditiveFileRootAndProtectedCredentialAlias},
 		{"hardlink-identity", TestProtectedPathHardlinkIdentity},
 		{"cloexec", TestMetadataDescriptorIsCloseOnExec},
 		{"bind-mask", TestRootMaskedBindMountAliasWithheld},
@@ -308,7 +308,7 @@ func TestLegacyParentLinksAndMutation(t *testing.T) {
 	if m, s := p.StatPath(path, true); s != StatusOK || m.ResolvedPath != path {
 		t.Fatalf("stat = %#v %s", m, s)
 	}
-	if roots, withheld := p.VisibleReadRoots(); len(roots) != 1 || withheld != 0 {
+	if roots, withheld := p.VisibleReadRoots(); len(roots) != 2 || roots[0] != "/" || withheld != 0 {
 		t.Fatalf("scope = %v %d", roots, withheld)
 	}
 	if r := p.ListDir(filepath.Join(root, "dir"), 0, 10, currentIdentity()); r.Status != StatusOK || len(r.Entries) != 1 {

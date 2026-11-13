@@ -122,10 +122,10 @@ when the key is absent.
 
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
-| `read_roots` | yes | — | Absolute, cleaned allow paths (files or directory trees). Empty disables host-content inspection. Requested spellings are retained; no current-working-directory access is implied. A root need not exist yet (for example a temporary directory created after boot): it stays in scope as spelled, requests under it report `not_found` until it exists, and a path that appears later is inspected under the same per-request policy without a restart. Only the spelling is allowed — a root that later appears as a link to a protected, denied or out-of-scope target is still refused where it resolves. |
-| `deny_paths` | no | `[]` | Absolute, cleaned exclusions. The most-specific component-wise match wins across allow and deny rules; ties deny, and no match denies. Allow `/`, deny `/home/user`, allow `/home/user/bin` reopens only the `bin` subtree. |
+| `read_roots` | no | `[]` (implicit `/` always applies) | Absolute, cleaned **additive** read paths (files or directory trees), not an allow-list limiting inspection. The whole filesystem is in scope without configuration changes, including when this field is omitted or empty. Configured spellings remain in manifests and trust assumptions and may re-open a more-specific part of `deny_paths`; they never override hard exclusions or masks. A path need not exist yet: requests report `not_found` until it appears, then use the same per-request checks without a restart. Symlink targets are checked independently. |
+| `deny_paths` | no | `[]` | Absolute, cleaned exclusions. The most-specific component-wise match wins across the implicit `/`, configured read paths and deny rules; ties deny. Deny `/home/user`, allow `/home/user/bin` reopens only the `bin` subtree. Hard exclusions always win. |
 | `trusted_executable_roots` | no | — | **Deprecated and ignored.** Still accepted by the strict decoder so existing version 4 files that carry it keep loading, but the value has no effect: no validation, no warning, no policy decision, and no record in the frozen approval manifest. There is no trusted-code category that substitutes for the model reading code, and the reviewer does not automatically discover dependencies. Omit this field in new configurations. |
-| `sensitive_masks` | no | built-in default list | Credential-like path **name** masks. Omitting the field compiles the built-in list of 31 well-known secret-name conventions; an explicit **non-empty** array **replaces** the defaults entirely (it does not extend them), so tuning out one false positive without re-listing the others silently unprotects them. An explicit empty or `null` array is invalid — never a silent disable. At most 256 masks, each ≤ 256 bytes, valid UTF-8, no backslashes, control characters, or empty/`.`/`..` components. Mask syntax and matching semantics are defined below. |
+| `sensitive_masks` | no | built-in default list | Credential-like path **name** masks. Omitting the field compiles the built-in well-known secret-name conventions; an explicit **non-empty** array **replaces** those configurable defaults (it does not extend them), so tuning out one false positive without re-listing the others silently unprotects them. The always-on system-secret protections below apply **in addition** and cannot be replaced. An explicit empty or `null` array is invalid — never a silent disable. At most 256 configured masks, each ≤ 256 bytes, valid UTF-8, no backslashes, control characters, or empty/`.`/`..` components. Mask syntax and matching semantics are defined below. |
 | `hash_path_enabled` | no | `false` | Opt-in to bounded executable SHA-256 metadata. Does not bypass path policy, return bytes or pin a later execution. |
 | `service_status_enabled` | no | `false` | Opt-in to fixed observational metadata for one literal `.service` unit. No arbitrary properties or service actions. |
 | `sudo_policy_enabled` | no | `false` | Opt-in to sanitized policy listings for the submitting UID and explicitly authorized additional UIDs. Does not grant sudo rights. |
@@ -135,19 +135,19 @@ The three capability flags accept JSON booleans, never `null`. These fields
 apply equally to direct v4 and fleet v5 hosts, not the separate gateway-server
 v1 configuration. An unchanged old host configuration keeps all three off.
 
-Inspection scope is not execution permission. A configuration allowing only
-binary directories does not let the reviewer inspect a maintenance script in
-`/tmp` or an application's configuration elsewhere, even if the submitted
-command will use those paths. Choose read-only roots for the actual context the
-administrator intends reviewers to inspect; do not infer them from a submitted
-reason or treat a risk rubric as an access grant. Existing hard denies and
-sensitive masks still apply.
+Inspection scope is not execution permission. The reviewer can inspect live
+host context throughout `/`, including `/var/lib`, `/etc`, `/opt`, `/srv` and
+temporary maintenance scripts, subject to exclusions, sensitive masks and
+descriptor/mount checks. Narrow legacy `read_roots` do not restrict that scope.
+Use `deny_paths` for administrator exclusions. `inspection_scope` reports `/`
+alongside any safe configured roots; it is not a promise that every descendant
+is readable. Existing budgets and optional capability flags are unchanged.
 
 For a generated Bash script, `askdo --script PATH` captures only that selected
 file using the existing bundle mechanism. Its captured copy is reviewable
-without adding all of `/tmp` to host read roots. Related live host files still
-need their own configured inspection access. This source feature does not alter
-an installed host's configuration or remove genuine missing context.
+without requiring host read-root changes. Related live host files use the same
+filesystem-wide inspection policy. Capturing a script does not remove genuine
+missing context or bypass host exclusions.
 
 A mask is a slash-separated glob over Linux path components, matched purely
 lexically and **case-sensitively** (Linux semantics):
@@ -175,7 +175,8 @@ model; a masked path outside policy is denied like any other.
 The shipped `askdo-config.example.json` lists every built-in default
 mask explicitly. Because an explicit array replaces the defaults, that file
 **pins the default set until edited**: removing or renaming an entry
-narrows protection, and adding entries extends it.
+narrows the configurable protection, and adding entries extends it. Neither
+operation changes the always-on protections below.
 
 Requested and opened names and reachable same-object mount aliases must pass
 the same policy. Regular files with multiple hardlinks are conservatively
@@ -184,11 +185,31 @@ Client-side bundle capture likewise refuses multiply linked files before
 reading them; a separately copied secret under an ordinary name is not
 detectable by name masks.
 Mountinfo coordinates unreachable in the current namespace are not aliases.
-Regardless of these lists, the broker hard-denies host inspection of
-`/etc/askdo`, `/var/lib/askdo`, `/var/lib/askdo-review`,
-`/run/askdo`, configured credential files (even outside `/etc`), and the
-pseudo-filesystems `/proc`, `/sys`, `/dev`. Hard
-denies apply to host inspection only, never to submitted bundle content.
+Regardless of configured lists, these paths and their descendants are always
+hard-denied (`inspection_denied`, reason `protected_path`):
+
+- askdo state: `/etc/askdo`, `/var/lib/askdo`, `/var/lib/askdo-review`,
+  `/run/askdo`, `/etc/askdo-gateway`, `/var/lib/askdo-gateway`;
+- kernel interfaces: `/proc`, `/sys`, `/dev`;
+- password databases: `/etc/shadow`, `/etc/shadow-`, `/etc/gshadow`,
+  `/etc/gshadow-`, `/etc/security/opasswd`;
+- private TLS keys: `/etc/ssl/private`, `/etc/pki/tls/private`;
+- network credentials: `/etc/wireguard`,
+  `/etc/NetworkManager/system-connections`, `/var/lib/iwd`;
+- Kerberos host credentials: `/etc/krb5.keytab`;
+- the selected configuration and configured credential/protected files,
+  including external paths and retained fleet enrollment bundles.
+
+Always-on masks additionally withhold `ssh_host_*_key` (SSH private host keys),
+`*.keytab`, `.gnupg` and `.password-store` components and their subtrees, even
+with an explicit `sensitive_masks` override. They use the existing `withheld`
+status and are omitted from listings; `ssh_host_*_key.pub` stays visible unless
+an administrator mask or exclusion hides it. The configurable defaults still
+cover `.ssh` (including `/root/.ssh`) and the other conventions listed in the
+example config. No generic `shadow` mask hides unrelated files by that name.
+
+Hard denies apply to host inspection only, never to submitted bundle content.
+The always-on masks also apply wherever the policy's sensitive matcher is used.
 
 `askdo-config inspection check <path> [--config PATH]` runs as root and prints
 ALLOWED or DENIED with the decisive rule and resolved path where available.
@@ -244,12 +265,12 @@ Obtain approval **per host** for the binary
 upgrade, specific flag/UID/path values, queue drain and askdo restart. This is
 not authorization to change running configuration or restart shared services;
 OpenCode/GPU services are outside this rollout. Retain existing denies,
-protected paths and all 31 default masks (plus any operator additions).
-Do not replace narrow roots with all of `/etc` merely to use sudo metadata:
-the required **additions** to existing `read_roots` are `/etc/sudoers`,
-`/etc/sudoers.d`, and `/etc/passwd`. Other configured sudo source paths and
-returned command paths remain subject to their own policy checks. Keep flags
-off until their owner-approved policy is installed and checked.
+protected paths and default masks (plus any operator additions).
+No `read_roots` additions are needed for `/etc/sudoers`, `/etc/sudoers.d` or
+`/etc/passwd`: the implicit `/` already covers them. Administrator exclusions,
+other configured sudo source paths and returned command paths remain subject
+to their own policy checks. Keep flags off until their owner-approved policy
+is installed and checked.
 
 If the operator chooses to inspect an additional account, an illustrative
 field is `"sudo_policy_uids": [1000]` inside the existing inspection object.
@@ -857,8 +878,8 @@ Choose the explicit approval-only policy above if no reviewer is needed, or run
 bot token and IDs (or `askdo-config channel add telegram NAME` for the named
 multi-channel form with several bots and admins). Add each submitting user to
 the `askdo` socket group.
-If your agent's scripts live outside the shipped
-`inspection.read_roots`, add that directory to the file directly. Then run
+No script-directory additions to `inspection.read_roots` are needed: `/` is
+always in scope. Configure `deny_paths` for exclusions, then run
 `askdo-config config check`.
 
 ### Minimal local-only test config
@@ -871,7 +892,7 @@ a credential.
 {
   "config_version": 4,
   "inspection": {
-    "read_roots": ["/usr/bin", "/usr/local/bin"],
+    "read_roots": [],
     "deny_paths": []
   },
   "review": {
@@ -907,7 +928,8 @@ a credential.
 ```
 
 This excerpt omits `inspection.sensitive_masks`, so the built-in default mask
-list applies; add the field only to replace that list wholesale.
+list applies; add the field only to replace that configurable list. Always-on
+system-secret protections remain in either case.
 
 Replace the model ID and both zero Telegram IDs with your own values before
 validation; add the submitting user to the `askdo` socket group and
