@@ -19,7 +19,7 @@ import (
 // the same policy and without a restart. Whatever materializes still passes
 // the per-request descriptor gate: masks, deny_paths and the hard-deny set
 // apply under the new root, and a root that appears as an alias of a
-// protected or out-of-scope directory never gains read permission through its
+// protected or denied directory never gains read permission through its
 // allowed spelling. Runs on both resolvers via TestLegacySecurityMatrix.
 func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	existing := t.TempDir()
@@ -28,7 +28,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	later := filepath.Join(scratch, "boot", "later")
 	alias := filepath.Join(scratch, "alias")
 	dangling := filepath.Join(scratch, "dangling")
-	if err := os.Symlink(filepath.Join(scratch, "never-created"), dangling); err != nil {
+	if err := os.Symlink("never-created", dangling); err != nil {
 		t.Fatal(err)
 	}
 	protected := filepath.Join(scratch, "protected")
@@ -40,7 +40,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "token"), "never returned", 0600)
 	}
 	denied := filepath.Join(later, "denied")
-	cfg := config.InspectionConfig{ReadRoots: []string{existing, later, alias, dangling}, DenyPaths: []string{denied}, SensitiveMasks: []string{"*.privmask"}}
+	cfg := config.InspectionConfig{ReadRoots: []string{existing, scratch, later, alias, dangling}, DenyPaths: []string{denied, outside}, SensitiveMasks: []string{"*.privmask"}}
 	p, err := NewPolicy(cfg, protected)
 	if err != nil {
 		t.Fatalf("NewPolicy with absent read roots: %v", err)
@@ -61,7 +61,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	if check := p.Check(file); check.Allowed || !errors.Is(check.Err, unix.ENOENT) {
 		t.Fatalf("absent root check = %#v", check)
 	}
-	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{existing}) || omitted != 3 {
+	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{"/", existing, scratch}) || omitted != 3 {
 		t.Fatalf("visible=%q omitted=%d before creation", visible, omitted)
 	}
 	if r := p.ReadRange(filepath.Join(existing, "present"), 0, 64, identity); r.Status != StatusOK || string(r.Content) != "present" {
@@ -82,7 +82,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	if check := p.Check(file); !check.Allowed || check.Rule != "read_roots "+later {
 		t.Fatalf("later root check = %#v", check)
 	}
-	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{existing, later}) || omitted != 2 {
+	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{"/", existing, scratch, later}) || omitted != 2 {
 		t.Fatalf("visible=%q omitted=%d after creation", visible, omitted)
 	}
 
@@ -101,7 +101,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	}
 
 	// An absent root that later appears as a link to a protected or
-	// out-of-scope directory is still judged by where it resolves.
+	// denied directory is still judged by where it resolves.
 	for _, target := range []string{protected, outside} {
 		if err := os.Symlink(target, alias); err != nil {
 			t.Fatal(err)
@@ -123,13 +123,13 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A link that was dangling at startup contributed no resolved alias, so a
-	// target created later is outside scope unless independently configured.
+	// A dangling link's later target must still pass the target policy. The
+	// relative link works on both resolvers without the legacy absolute-link limit.
 	if err := os.Mkdir(filepath.Join(scratch, "never-created"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(scratch, "never-created", "file"), "never returned", 0600)
-	if r := p.ReadRange(filepath.Join(dangling, "file"), 0, 64, identity); r.Status == StatusOK || len(r.Content) != 0 {
+	writeFile(t, filepath.Join(scratch, "never-created", "file"), "now visible", 0600)
+	if r := p.ReadRange(filepath.Join(dangling, "file"), 0, 64, identity); r.Status != StatusOK || string(r.Content) != "now visible" {
 		t.Fatalf("formerly dangling root read = %#v", r)
 	}
 }

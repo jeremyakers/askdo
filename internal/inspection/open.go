@@ -38,12 +38,12 @@ const (
 type Reason string
 
 const (
-	// ReasonOutsideScope: the configured read_roots/deny_paths rules (or the
-	// default deny) rejected the requested, resolved or mount-alias spelling.
+	// ReasonOutsideScope: the configured deny_paths/additive read_roots rules
+	// rejected the requested, resolved or mount-alias spelling.
 	ReasonOutsideScope Reason = "outside_scope"
 	// ReasonProtectedPath: the hard-protected set (askdo state, /proc, /sys,
-	// /dev and configured protected paths) rejected the spelling, object
-	// identity or mount source. Configuration cannot widen it.
+	// /dev, system secrets and configured protected paths) rejected the spelling,
+	// object identity or mount source. Configuration cannot widen it.
 	ReasonProtectedPath Reason = "protected_path"
 	// ReasonUnverifiedIdentity: the object's identity could not be proven
 	// (multiple hardlinks, ambiguous or unmapped mount, changed descriptor).
@@ -52,6 +52,10 @@ const (
 	// inspectable by this operation (special file, pseudo-filesystem, a
 	// directory read as content, or an unsupported legacy symlink follow).
 	ReasonUnsupportedObject Reason = "unsupported_object"
+	// ReasonNotWorldReadable: content under the implicit filesystem root lacks
+	// other-read on the file or other-search on a traversed ancestor directory.
+	// Metadata remains available; configured non-"/" roots grant content access.
+	ReasonNotWorldReadable Reason = "not_world_readable"
 )
 
 // Knowledge records whether a supported deterministic fact is present, absent,
@@ -137,7 +141,7 @@ func (p *Policy) ReadRange(path string, offset int64, maxBytes int, identity Sub
 	if offset < 0 || maxBytes < 1 || maxBytes > 16384 || offset > math.MaxInt64-int64(maxBytes) {
 		return RangeResult{Status: StatusLimitExceeded}
 	}
-	fd, auth, err := p.authorizedOpen(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC)
+	fd, auth, err := p.contentOpen(path)
 	if err != nil {
 		r := resultForError(err)
 		return RangeResult{Status: r.Status, Reason: r.Reason, Err: r.Err}

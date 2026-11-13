@@ -172,7 +172,7 @@ func TestHashExecutableChangesAndCancellation(t *testing.T) {
 	assertHashStatus(t, got, status, StatusUnknown)
 }
 
-func TestVisibleReadRootsConfiguredOnly(t *testing.T) {
+func TestVisibleReadRootsImplicitAndConfigured(t *testing.T) {
 	root := t.TempDir()
 	plain := filepath.Join(root, "plain")
 	masked := filepath.Join(root, "private.privmask")
@@ -197,7 +197,7 @@ func TestVisibleReadRootsConfiguredOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	want := []string{root, child, plainAlias}
+	want := []string{"/", root, child, plainAlias}
 	got, omitted := p.VisibleReadRoots()
 	if omitted != 3 || !reflect.DeepEqual(got, want) {
 		t.Fatalf("roots=%q omitted=%d want=%q", got, omitted, want)
@@ -296,7 +296,7 @@ func TestVisibleReadRootsRetargetToProtected(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, omitted := p.VisibleReadRoots()
-	if len(got) != 0 || omitted != 1 {
+	if !reflect.DeepEqual(got, []string{"/"}) || omitted != 1 {
 		t.Fatalf("protected root disclosed: %q omitted=%d", got, omitted)
 	}
 }
@@ -416,7 +416,7 @@ func TestVisibleReadRootsMaskedFile(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Close() })
 	got, omitted := p.VisibleReadRoots()
-	if !reflect.DeepEqual(got, []string{root}) || omitted != 2 {
+	if !reflect.DeepEqual(got, []string{"/", root}) || omitted != 2 {
 		t.Fatalf("credential root disclosed: %q omitted=%d", got, omitted)
 	}
 }

@@ -35,7 +35,11 @@ func TestReadRangeDenialReasonsFromAuthoritativeDecision(t *testing.T) {
 	if err := unix.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := testPolicy(t, root, excluded)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{root, outside}, DenyPaths: []string{excluded}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	for _, tc := range []struct {
 		name   string
 		path   string
@@ -43,7 +47,7 @@ func TestReadRangeDenialReasonsFromAuthoritativeDecision(t *testing.T) {
 		reason Reason
 	}{
 		{"permitted", allowed, StatusOK, ""},
-		{"default deny", outside, StatusInspectionDenied, ReasonOutsideScope},
+		{"additional configured file", outside, StatusOK, ""},
 		{"deny_paths", denied, StatusInspectionDenied, ReasonOutsideScope},
 		{"protected spelling", "/etc/askdo/config.json", StatusInspectionDenied, ReasonProtectedPath},
 		{"protected pseudo-filesystem", "/proc/self/exe", StatusInspectionDenied, ReasonProtectedPath},
@@ -62,7 +66,11 @@ func TestReadRangeDenialReasonsFromAuthoritativeDecision(t *testing.T) {
 				t.Fatalf("%s: status=%s reason=%q err=%v, want %s/%q", tc.path, got.Status, got.Reason, got.Err, tc.status, tc.reason)
 			}
 			if tc.status == StatusOK {
-				if string(got.Content) != "exact bytes" || !got.EOF {
+				want := "exact bytes"
+				if tc.path == outside {
+					want = "outside"
+				}
+				if string(got.Content) != want || !got.EOF {
 					t.Fatalf("permitted read changed: %+v", got)
 				}
 			} else if len(got.Content) != 0 {
@@ -85,7 +93,7 @@ func TestStatAndMountDenialReasons(t *testing.T) {
 	if err := os.Symlink(outside, escape); err != nil {
 		t.Fatal(err)
 	}
-	p := testPolicy(t, root)
+	p := testPolicy(t, root, outside)
 	if m, status, reason := p.StatPathReason(file, false); status != StatusOK || reason != "" || m.Type != "file" {
 		t.Fatalf("permitted stat: %+v %s %q", m, status, reason)
 	}
@@ -128,8 +136,8 @@ func TestListDirDenialReason(t *testing.T) {
 	if r := p.ListDir(sub, 0, 10, currentIdentity()); r.Status != StatusInspectionDenied || r.Reason != ReasonOutsideScope || len(r.Entries) != 0 {
 		t.Fatalf("excluded listing: %+v", r)
 	}
-	if r := p.ListDir(filepath.Join(t.TempDir(), "other"), 0, 10, currentIdentity()); r.Status != StatusInspectionDenied || r.Reason != ReasonOutsideScope {
-		t.Fatalf("outside listing: %+v", r)
+	if r := p.ListDir(filepath.Join(t.TempDir(), "other"), 0, 10, currentIdentity()); r.Status != StatusNotFound || r.Reason != "" {
+		t.Fatalf("missing outside listing: %+v", r)
 	}
 	if r := p.ListDir(root, 0, 10, currentIdentity()); r.Status != StatusOK || r.Reason != "" {
 		t.Fatalf("permitted listing: %+v", r)

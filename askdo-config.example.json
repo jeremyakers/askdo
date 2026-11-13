@@ -1,7 +1,7 @@
 {
   "config_version": 4,
   "inspection": {
-    "read_roots": ["/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/bin", "/sbin"],
+    "read_roots": [],
     "deny_paths": [],
     "sensitive_masks": [".env", ".env.*", ".envrc", ".netrc", ".npmrc", ".pypirc", ".pgpass", ".my.cnf", "credentials", "*.key", "*.pem", "*.p12", "*.pfx", "*.jks", "*.keystore", "*.kubeconfig", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", ".ssh", ".aws", ".git", ".docker", ".kube", ".config/gcloud", "*.tfvars", "*.tfvars.json", "terraform.tfstate*", "*.secret", "*.secrets"]
   },

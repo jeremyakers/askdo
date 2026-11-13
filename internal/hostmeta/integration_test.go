@@ -62,7 +62,7 @@ func TestRealSudoRootFixture(t *testing.T) {
 		}
 	}
 	// Both source locations must pass the independent pre-launch policy gate.
-	denied, err := inspection.NewPolicy(config.InspectionConfig{ReadRoots: []string{"/etc/passwd", "/etc/sudoers"}, SensitiveMasks: []string{"*.secret"}})
+	denied, err := inspection.NewPolicy(config.InspectionConfig{ReadRoots: []string{"/etc/passwd", "/etc/sudoers"}, DenyPaths: []string{"/etc/sudoers.d"}, SensitiveMasks: []string{"*.secret"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,15 +26,16 @@ func directJobWithInspection(t *testing.T, inspectionCfg config.InspectionConfig
 	t.Helper()
 	cfg := testConfig()
 	cfg.Inspection = inspectionCfg
-	p, err := inspection.NewPolicy(cfg.Inspection)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = p.Close() })
 	spool, err := createSpool(filepath.Join(t.TempDir(), "spool"), []byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Match the real daemon's protected state paths even with temporary spools.
+	p, err := inspection.NewPolicy(cfg.Inspection, spool.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	s, err := store.Open(filepath.Join(t.TempDir(), "jobs.sqlite3"))
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +107,8 @@ func TestDirectHostReadAndSearchNoCapture(t *testing.T) {
 	if err := os.WriteFile(public, []byte("hello public\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	j := directJob(t, root, nil)
+	outside := filepath.Join(t.TempDir(), "outside")
+	j := directJobWithInspection(t, config.InspectionConfig{ReadRoots: []string{root, outside}, SensitiveMasks: []string{"*.privmask"}}, nil)
 	r := directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: public, Offset: 0, MaxBytes: 64})
 	var read proto.ReadPathResult
 	if r.Status != "ok" || json.Unmarshal(r.Payload, &read) != nil || read.Content != "hello public\n" || !read.EOF {
@@ -121,14 +123,16 @@ func TestDirectHostReadAndSearchNoCapture(t *testing.T) {
 	if err != nil || len(index.Files) != 0 {
 		t.Fatalf("host direct created capture: %+v %v", index, err)
 	}
-	for _, path := range []string{filepath.Join(t.TempDir(), "outside"), j.spool.request} {
-		if path != j.spool.request {
-			_ = os.WriteFile(path, []byte("outside"), 0600)
-		}
-		r = directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: path, MaxBytes: 32})
-		if r.Status != "inspection_denied" || len(r.Payload) != 0 {
-			t.Fatalf("denied %s: %+v", path, r)
-		}
+	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r = directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: outside, MaxBytes: 32})
+	if r.Status != "ok" {
+		t.Fatalf("additive roots excluded external path: %+v", r)
+	}
+	r = directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: j.spool.request, MaxBytes: 32})
+	if r.Status != "inspection_denied" || r.ReasonCode != "protected_path" || len(r.Payload) != 0 {
+		t.Fatalf("protected state: %+v", r)
 	}
 	if err := os.WriteFile(filepath.Join(root, "binary"), []byte{0xff, 0}, 0600); err != nil {
 		t.Fatal(err)

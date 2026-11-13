@@ -168,6 +168,7 @@ func TestDirectOperationDenialReasons(t *testing.T) {
 				{"inspection_denied", "", true}, {"withheld", "", true}, {"not_found", "", true}, {"unknown", "", true},
 				{"inspection_denied", "outside_scope", true}, {"inspection_denied", "protected_path", true},
 				{"inspection_denied", "unverified_identity", true}, {"inspection_denied", "unsupported_object", true},
+				{"inspection_denied", "not_world_readable", true}, {"withheld", "not_world_readable", false},
 				{"inspection_denied", "disabled", false}, {"inspection_denied", "unauthorized_uid", false}, {"inspection_denied", "not_executable", false},
 				{"inspection_denied", "deny_paths /srv/private", false}, {"inspection_denied", "default deny", false},
 				{"withheld", "policy_withheld", false}, {"not_found", "object_not_found", false}, {"not_found", "outside_scope", false},
@@ -186,6 +187,7 @@ func TestDirectOperationDenialReasons(t *testing.T) {
 				valid          bool
 			}{
 				{"inspection_denied", "protected_path", true}, {"inspection_denied", "unverified_identity", true}, {"inspection_denied", "unsupported_object", true},
+				{"inspection_denied", "not_world_readable", true}, {"withheld", "not_world_readable", false},
 				{"inspection_denied", "deny_paths /srv/private", false}, {"not_found", "protected_path", false}, {"withheld", "outside_scope", false},
 			} {
 				res := InspectResult{Type: "inspect_result", RequestSeq: req.RequestSeq, Status: tc.status, ReasonCode: tc.reason}

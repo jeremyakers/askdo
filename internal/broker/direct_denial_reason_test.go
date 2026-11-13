@@ -41,7 +41,7 @@ func TestDirectDenialReasonsFromRootPolicyDecision(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	j := directJobWithInspection(t, config.InspectionConfig{ReadRoots: []string{root}, DenyPaths: []string{excluded}, SensitiveMasks: []string{"*.privmask"}}, nil)
+	j := directJobWithInspection(t, config.InspectionConfig{ReadRoots: []string{root}, DenyPaths: []string{excluded, outsideDir}, SensitiveMasks: []string{"*.privmask"}}, nil)
 
 	type expectation struct {
 		name   string
@@ -51,7 +51,7 @@ func TestDirectDenialReasonsFromRootPolicyDecision(t *testing.T) {
 		reason string
 	}
 	cases := []expectation{
-		{"read outside configured roots", "read_path", proto.ReadPathRequest{Base: "host", Path: outside, MaxBytes: 64}, "inspection_denied", "outside_scope"},
+		{"read external exclusion", "read_path", proto.ReadPathRequest{Base: "host", Path: outside, MaxBytes: 64}, "inspection_denied", "outside_scope"},
 		{"read deny_paths exclusion", "read_path", proto.ReadPathRequest{Base: "host", Path: ruled, MaxBytes: 64}, "inspection_denied", "outside_scope"},
 		{"read protected askdo state", "read_path", proto.ReadPathRequest{Base: "host", Path: "/etc/askdo/config.json", MaxBytes: 64}, "inspection_denied", "protected_path"},
 		{"read a directory as content", "read_path", proto.ReadPathRequest{Base: "host", Path: root, MaxBytes: 64}, "inspection_denied", "unsupported_object"},

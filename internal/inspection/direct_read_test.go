@@ -62,12 +62,13 @@ func TestReadRangeDenials(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "blocked.txt")
 	writeFile(t, path, "secret", 0600)
-	outside := filepath.Join(t.TempDir(), "outside.txt")
+	outside := filepath.Join(root, "allowed.txt")
 	writeFile(t, outside, "outside", 0600)
 	p := testPolicy(t, root, path)
-	for _, name := range []string{path, outside, "/etc/askdo/config.json"} {
+	for _, name := range []string{path, "/etc/askdo/config.json"} {
 		assertRange(t, p.ReadRange(name, 0, 16, currentIdentity()), StatusInspectionDenied)
 	}
+	assertRange(t, p.ReadRange(outside, 0, 16, currentIdentity()), StatusOK)
 	assertRange(t, p.ReadRange(root, 0, 16, currentIdentity()), StatusInspectionDenied)
 	for _, tc := range []struct {
 		offset int64
