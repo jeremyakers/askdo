@@ -12,11 +12,21 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jeremyakers/askdo/internal/client"
 	"github.com/jeremyakers/askdo/internal/upgrade"
+)
+
+const (
+	upgradeSourcePrefix = "askdo-upgrade-"
+	// A receipt normally makes the source redundant immediately. Without a usable
+	// operation mapping or receipt, allow a week for scheduling review and approval,
+	// then the complete existing operation and rollback budgets. Only this conservative
+	// age bound can clean up after a scheduling job died before staging.
+	retainedUpgradeSourceMaxAge = 7*24*time.Hour + upgrade.OperationTimeout + upgrade.RollbackTimeout
 )
 
 type upgradeCLIOptions struct {
@@ -25,6 +35,74 @@ type upgradeCLIOptions struct {
 	receiptRoot, tempRoot string
 	random                io.Reader
 	wait                  func(context.Context) error
+	owned                 func(os.FileInfo) bool
+	removeAll             func(string) error
+}
+
+// clearRetainedSources removes only this user's real source directories directly
+// under the temporary root. A receipt is published only after root staging has
+// copied and re-verified the source, so any readable receipt proves it redundant.
+// Without one, only the age bound above proves an abandoned source is no longer
+// needed. Every error is deliberately ignored: cleanup never changes an upgrade.
+func (options upgradeCLIOptions) clearRetainedSources(operation string) {
+	root := options.tempRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	owned := options.owned
+	if owned == nil {
+		owned = ownedByThisUser
+	}
+	removeAll := options.removeAll
+	if removeAll == nil {
+		removeAll = os.RemoveAll
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), upgradeSourcePrefix) || !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !owned(info) {
+			continue
+		}
+		dir := filepath.Join(root, entry.Name())
+		id := retainedUpgradeSourceOperation(dir)
+		if operation != "" && id != operation {
+			continue
+		}
+		redundant := false
+		if id != "" {
+			_, receiptErr := upgrade.ReadReceipt(options.receiptRoot, id)
+			redundant = receiptErr == nil
+		}
+		if redundant || now.After(info.ModTime().Add(retainedUpgradeSourceMaxAge)) {
+			_ = removeAll(dir)
+		}
+	}
+}
+
+func retainedUpgradeSourceOperation(dir string) string {
+	path := filepath.Join(dir, upgrade.PlanFileName)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > upgrade.PlanMaxBytes {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var plan struct {
+		Operation string `json:"operation"`
+	}
+	if json.Unmarshal(data, &plan) != nil {
+		return ""
+	}
+	return plan.Operation
 }
 
 func writeUpgradeHelp(out io.Writer) {
@@ -71,6 +149,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		}
 		return 125
 	}
+	options.clearRetainedSources("")
 	source, removeSource := "", true
 	defer func() {
 		if source == "" {
@@ -87,7 +166,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	clientCode := 0
 	if !operationSet {
 		var err error
-		source, err = os.MkdirTemp(options.tempRoot, "askdo-upgrade-")
+		source, err = os.MkdirTemp(options.tempRoot, upgradeSourcePrefix)
 		if err != nil {
 			fmt.Fprintln(stderr, "upgrade temporary directory:", err)
 			return 125
@@ -156,6 +235,7 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 	ctx, cancel := context.WithTimeout(parent, upgrade.OperationTimeout+upgrade.RollbackTimeout+2*time.Minute)
 	defer cancel()
 	lastState := ""
+	receiptConfirmed := false
 	lineOpen := false
 	// finishLine ends an unterminated progress line before a diagnostic.
 	finishLine := func() {
@@ -174,6 +254,12 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 				return clientCode
 			}
 			return 125
+		}
+		if !receiptConfirmed {
+			// A resume has no source path of its own; find the retained directory by
+			// its operation now that the receipt proves root staging took ownership.
+			options.clearRetainedSources(*operation)
+			receiptConfirmed = true
 		}
 		if err := ctx.Err(); err != nil {
 			finishLine()

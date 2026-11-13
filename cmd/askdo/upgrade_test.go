@@ -418,6 +418,136 @@ func TestUpgradeCLIDisconnectBeforeReceiptRetainsPrivateSource(t *testing.T) {
 	}
 }
 
+func writeRetainedUpgradeSource(t *testing.T, root, name, operation string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(upgrade.Plan{Operation: operation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, upgrade.PlanFileName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestUpgradeCLICleansRetainedSourcesAtStartup(t *testing.T) {
+	// Given: retained sources in the same temporary root as a later resume.
+	root, temps := t.TempDir(), t.TempDir()
+	id := func(hexDigit string) string { return "up_" + strings.Repeat(hexDigit, 32) }
+	confirmedID, pendingID, staleID, resumeID := id("1"), id("2"), id("3"), id("4")
+	confirmed := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-confirmed", confirmedID)
+	pending := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-pending", pendingID)
+	stale := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-stale", staleID)
+	unmapped := filepath.Join(temps, "askdo-upgrade-unmapped")
+	if err := os.Mkdir(unmapped, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resumed := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-resumed", resumeID)
+	writeCLIReceipt(t, root, confirmedID, "v3.2.1", "succeeded")
+	writeCLIReceipt(t, root, resumeID, "v3.2.1", "succeeded")
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	for _, path := range []string{stale, unmapped} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nonmatching := filepath.Join(temps, "unrelated")
+	if err := os.Mkdir(nonmatching, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victimRoot := t.TempDir()
+	victim := writeRetainedUpgradeSource(t, victimRoot, "victim", confirmedID)
+	precious := filepath.Join(victim, "precious")
+	if err := os.WriteFile(precious, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(temps, "askdo-upgrade-link")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+
+	// When: a later upgrade resumes and observes the confirmed receipt.
+	code := runUpgradeWith(t.Context(), []string{"--operation", resumeID}, upgradeCLIOptions{receiptRoot: root, tempRoot: temps}, &stdout, &stderr)
+
+	// Then: receipts prove the confirmed sources redundant, and age alone proves
+	// the stale receiptless source redundant. A fresh unconfirmed source stays.
+	if code != 0 {
+		t.Fatalf("resume code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	for _, path := range []string{confirmed, stale, unmapped, resumed} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("redundant source %s was retained: %v", path, err)
+		}
+	}
+	for _, path := range []string{pending, nonmatching, link, precious} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("unrelated or unconfirmed path %s was touched: %v", path, err)
+		}
+	}
+}
+
+func TestUpgradeCLICleanupLeavesOtherUsersSources(t *testing.T) {
+	root, temps := t.TempDir(), t.TempDir()
+	mineID, theirsID, resumeID := cliUpgradeID, "up_"+strings.Repeat("2", 32), "up_"+strings.Repeat("3", 32)
+	mine := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-mine", mineID)
+	theirs := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-theirs", theirsID)
+	for _, id := range []string{mineID, theirsID, resumeID} {
+		writeCLIReceipt(t, root, id, "v3.2.1", "succeeded")
+	}
+	var stdout, stderr bytes.Buffer
+	deps := upgradeCLIOptions{receiptRoot: root, tempRoot: temps, owned: func(info os.FileInfo) bool {
+		return info.Name() != filepath.Base(theirs)
+	}}
+
+	code := runUpgradeWith(t.Context(), []string{"--operation", resumeID}, deps, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("resume code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if _, err := os.Stat(mine); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("this user's confirmed source was retained: %v", err)
+	}
+	if _, err := os.Stat(theirs); err != nil {
+		t.Fatalf("another user's source was touched: %v", err)
+	}
+}
+
+func TestUpgradeCLICleanupFailureDoesNotChangeExitCode(t *testing.T) {
+	root, temps := t.TempDir(), t.TempDir()
+	blockedID, cleanedID, resumeID := cliUpgradeID, "up_"+strings.Repeat("2", 32), "up_"+strings.Repeat("3", 32)
+	blocked := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-blocked", blockedID)
+	cleaned := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-cleaned", cleanedID)
+	for _, id := range []string{blockedID, cleanedID, resumeID} {
+		writeCLIReceipt(t, root, id, "v3.2.1", "succeeded")
+	}
+	cleanupCalls := 0
+	deps := upgradeCLIOptions{receiptRoot: root, tempRoot: temps, removeAll: func(path string) error {
+		if path == blocked {
+			cleanupCalls++
+			return errors.New("fixture cleanup failure")
+		}
+		return os.RemoveAll(path)
+	}}
+	var stdout, stderr bytes.Buffer
+
+	code := runUpgradeWith(t.Context(), []string{"--operation", resumeID}, deps, &stdout, &stderr)
+
+	if code != 0 || cleanupCalls == 0 {
+		t.Fatalf("cleanup failure changed outcome: code=%d calls=%d stdout=%s stderr=%s", code, cleanupCalls, &stdout, &stderr)
+	}
+	if _, err := os.Stat(blocked); err != nil {
+		t.Fatalf("failed cleanup unexpectedly removed source: %v", err)
+	}
+	if _, err := os.Stat(cleaned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup stopped after a failure: %v", err)
+	}
+}
+
 func TestUpgradeCLIOperationWatchIsBounded(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// Given: a permanently scheduled operation, under the fake clock.
