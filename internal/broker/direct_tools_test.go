@@ -107,7 +107,8 @@ func TestDirectHostReadAndSearchNoCapture(t *testing.T) {
 	if err := os.WriteFile(public, []byte("hello public\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	j := directJob(t, root, nil)
+	outside := filepath.Join(t.TempDir(), "outside")
+	j := directJobWithInspection(t, config.InspectionConfig{ReadRoots: []string{root, outside}, SensitiveMasks: []string{"*.privmask"}}, nil)
 	r := directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: public, Offset: 0, MaxBytes: 64})
 	var read proto.ReadPathResult
 	if r.Status != "ok" || json.Unmarshal(r.Payload, &read) != nil || read.Content != "hello public\n" || !read.EOF {
@@ -122,7 +123,6 @@ func TestDirectHostReadAndSearchNoCapture(t *testing.T) {
 	if err != nil || len(index.Files) != 0 {
 		t.Fatalf("host direct created capture: %+v %v", index, err)
 	}
-	outside := filepath.Join(t.TempDir(), "outside")
 	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
 		t.Fatal(err)
 	}

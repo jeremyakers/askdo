@@ -162,6 +162,7 @@ func TestLegacySecurityMatrix(t *testing.T) {
 		{"nul", TestNULPathRejected},
 		{"special-magic", TestDevicesFIFOsSocketsAndMagicLinksRejected},
 		{"read", TestReadRangeTextAndEOF},
+		{"content-permissions", TestContentPermissionsSymlinksAndRevalidation},
 		{"denial", TestReadRangeDenials},
 		{"hash", TestHashExecutableBinaryAndBounds},
 		{"hash-mutation", TestHashExecutableChangesAndCancellation},

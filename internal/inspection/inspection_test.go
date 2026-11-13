@@ -489,7 +489,7 @@ func TestTmpfsRootInner(t *testing.T) {
 	writeFile(t, filepath.Join(root, "app.sh"), "#!/bin/sh\necho ok\n", 0755)
 
 	p := testPolicy(t, root)
-	broad, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/"}})
+	broad, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/", root}})
 	if err != nil {
 		t.Fatal(err)
 	}

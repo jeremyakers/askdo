@@ -62,7 +62,7 @@ func TestReadRangeDenials(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "blocked.txt")
 	writeFile(t, path, "secret", 0600)
-	outside := filepath.Join(t.TempDir(), "outside.txt")
+	outside := filepath.Join(root, "allowed.txt")
 	writeFile(t, outside, "outside", 0600)
 	p := testPolicy(t, root, path)
 	for _, name := range []string{path, "/etc/askdo/config.json"} {

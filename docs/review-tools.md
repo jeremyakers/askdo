@@ -93,6 +93,13 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
   checked, but no content crosses to the model. On the legacy backend a read
   through a terminal symlink or an absolute-path symlink is denied rather than
   followed; the `inspection_scope` `compatibility` leaf reports this.
+- **Host content permissions:** unless a non-`/` configured read root grants
+  content access, the file must have other-read (`0004`) and every traversed
+  ancestor directory must have other-search (`0001`). Otherwise the result is
+  payload-free `inspection_denied`, reason `not_world_readable`. An explicit
+  `/` is still subject to this rule. Hard denies, masks and exclusions always
+  apply. Metadata tools (including executable hashes) and names-only directory
+  listings retain their existing behavior on private objects.
 - **Bundle reads:** served from the root-only staged copy; the staged bytes
   are re-hashed against the capture index on every read. A staged file the
   broker classified as masked (admin `Masked` policy or a client
@@ -396,13 +403,21 @@ of the trust boundary — enforces:
    `unsupported_object` distinguish other policy/object boundaries when the
    same decision establishes them. Unknown causes are not guessed from errno
    text or a later check, and reasons never include private rule/path spellings.
+- **Content permissions:** the implicit `/` grants file content only when the
+  file is world-readable and all traversed ancestor directories are
+  world-searchable. Configured non-`/` roots grant private-tree content access;
+  they do not override named secret protections. A refused file read/search
+  returns `inspection_denied` with `reason_code: "not_world_readable"`.
+  Directory searches skip these files, counting them in `skipped_masked`, so
+  public matches remain available without revealing private content.
 - **Sensitive name masks:** a permitted host path or staged bundle path whose
   requested or resolved name matches the always-on system-secret masks,
   `inspection.sensitive_masks` (or a client `sensitive_inclusions` opt-in) is
   answered `withheld` without
   content, or skipped with a `skipped_masked` count in list/search/find results.
-  Masks match **names, not content**: a credential copied under an ordinary
-  filename, or a secret value placed in argv, the environment, or `--reason`,
+  Masks match **names, not content**: a credential copied into a world-readable
+  file or explicitly granted private tree under an ordinary filename, or a
+  secret value placed in argv, the environment, or `--reason`,
   can still leak. The broker records every reference it withheld (host
   spellings and masked bundle paths) as a factual access-policy signal — not
    a completeness assessment — and the reviewed Telegram card discloses the

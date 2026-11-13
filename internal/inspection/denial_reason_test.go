@@ -35,7 +35,11 @@ func TestReadRangeDenialReasonsFromAuthoritativeDecision(t *testing.T) {
 	if err := unix.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
-	p := testPolicy(t, root, excluded)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{root, outside}, DenyPaths: []string{excluded}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
 	for _, tc := range []struct {
 		name   string
 		path   string
@@ -43,7 +47,7 @@ func TestReadRangeDenialReasonsFromAuthoritativeDecision(t *testing.T) {
 		reason Reason
 	}{
 		{"permitted", allowed, StatusOK, ""},
-		{"outside configured roots", outside, StatusOK, ""},
+		{"additional configured file", outside, StatusOK, ""},
 		{"deny_paths", denied, StatusInspectionDenied, ReasonOutsideScope},
 		{"protected spelling", "/etc/askdo/config.json", StatusInspectionDenied, ReasonProtectedPath},
 		{"protected pseudo-filesystem", "/proc/self/exe", StatusInspectionDenied, ReasonProtectedPath},

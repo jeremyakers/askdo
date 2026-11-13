@@ -40,7 +40,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 		writeFile(t, filepath.Join(dir, "token"), "never returned", 0600)
 	}
 	denied := filepath.Join(later, "denied")
-	cfg := config.InspectionConfig{ReadRoots: []string{existing, later, alias, dangling}, DenyPaths: []string{denied, outside}, SensitiveMasks: []string{"*.privmask"}}
+	cfg := config.InspectionConfig{ReadRoots: []string{existing, scratch, later, alias, dangling}, DenyPaths: []string{denied, outside}, SensitiveMasks: []string{"*.privmask"}}
 	p, err := NewPolicy(cfg, protected)
 	if err != nil {
 		t.Fatalf("NewPolicy with absent read roots: %v", err)
@@ -61,7 +61,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	if check := p.Check(file); check.Allowed || !errors.Is(check.Err, unix.ENOENT) {
 		t.Fatalf("absent root check = %#v", check)
 	}
-	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{"/", existing}) || omitted != 3 {
+	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{"/", existing, scratch}) || omitted != 3 {
 		t.Fatalf("visible=%q omitted=%d before creation", visible, omitted)
 	}
 	if r := p.ReadRange(filepath.Join(existing, "present"), 0, 64, identity); r.Status != StatusOK || string(r.Content) != "present" {
@@ -82,7 +82,7 @@ func TestAbsentReadRootMaterializesLater(t *testing.T) {
 	if check := p.Check(file); !check.Allowed || check.Rule != "read_roots "+later {
 		t.Fatalf("later root check = %#v", check)
 	}
-	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{"/", existing, later}) || omitted != 2 {
+	if visible, omitted := p.VisibleReadRoots(); !reflect.DeepEqual(visible, []string{"/", existing, scratch, later}) || omitted != 2 {
 		t.Fatalf("visible=%q omitted=%d after creation", visible, omitted)
 	}
 

@@ -21,7 +21,7 @@ func TestPolicyOverridesAndLinks(t *testing.T) {
 	for _, name := range []string{filepath.Join(base, "other"), filepath.Join(denied, "private"), filepath.Join(allowed, "tool")} {
 		writeFile(t, name, "test", 0600)
 	}
-	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/", allowed}, DenyPaths: []string{denied}})
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/", base, allowed}, DenyPaths: []string{denied}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestAdditiveFileRootAndProtectedCredentialAlias(t *testing.T) {
 	sibling := filepath.Join(root, "sibling")
 	writeFile(t, file, "allowed", 0600)
 	writeFile(t, sibling, "also allowed", 0600)
-	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{file}})
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{file, sibling}})
 	if err != nil {
 		t.Fatal(err)
 	}

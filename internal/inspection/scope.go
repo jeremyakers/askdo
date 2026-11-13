@@ -456,9 +456,10 @@ func (p *Policy) selectRoot(requested string) (rootAnchor, string, bool) {
 // names the winning spelling); reason is the closed classification of a
 // rejection and is empty for an allowed path.
 type decision struct {
-	allowed bool
-	rule    string
-	reason  Reason
+	allowed  bool
+	explicit bool // winning allow is a configured root other than "/"
+	rule     string
+	reason   Reason
 }
 
 // currentSystemAlias reports a system-secret path whose symlink target now
@@ -521,13 +522,13 @@ func (p *Policy) rule(path string) decision {
 	for _, allow := range p.allows {
 		if containsPath(allow, path) && len(allow) > specificity {
 			specificity = len(allow)
-			best = decision{allowed: true, rule: "read_roots " + allow}
+			best = decision{allowed: true, explicit: allow != "/", rule: "read_roots " + allow}
 		}
 	}
 	for _, alias := range p.canonical {
-		if containsPath(alias, path) && len(alias) > specificity {
+		if containsPath(alias, path) && (len(alias) > specificity || (len(alias) == specificity && best.allowed && !best.explicit)) {
 			specificity = len(alias)
-			best = decision{allowed: true, rule: "resolved read_roots " + alias}
+			best = decision{allowed: true, explicit: true, rule: "resolved read_roots " + alias}
 		}
 	}
 	return best
