@@ -66,6 +66,8 @@ var systemDenyPaths = []string{
 	"/etc/NetworkManager/system-connections",
 	"/var/lib/iwd",
 	"/etc/krb5.keytab",
+	"/etc/ppp/chap-secrets",
+	"/etc/ppp/pap-secrets",
 	// Runtime and systemd credential stores hold arbitrary secret file names.
 	"/run/secrets",
 	"/run/credentials",

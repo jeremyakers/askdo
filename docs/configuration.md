@@ -195,7 +195,8 @@ hard-denied (`inspection_denied`, reason `protected_path`):
   `/etc/gshadow-`, `/etc/security/opasswd`;
 - private TLS keys: `/etc/ssl/private`, `/etc/pki/tls/private`;
 - network credentials: `/etc/wireguard`,
-  `/etc/NetworkManager/system-connections`, `/var/lib/iwd`;
+  `/etc/NetworkManager/system-connections`, `/var/lib/iwd`,
+  `/etc/ppp/chap-secrets`, `/etc/ppp/pap-secrets`;
 - Kerberos host credentials: `/etc/krb5.keytab`;
 - runtime and systemd credential stores: `/run/secrets`, `/run/credentials`,
   `/etc/credstore`, `/etc/credstore.encrypted`,

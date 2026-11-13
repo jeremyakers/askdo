@@ -21,7 +21,7 @@ func TestAlwaysHiddenSystemPaths(t *testing.T) {
 		"/etc/askdo-gateway", "/var/lib/askdo-gateway", "/proc", "/sys", "/dev",
 		"/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-",
 		"/etc/security/opasswd", "/etc/ssl/private", "/etc/pki/tls/private",
-		"/etc/wireguard", "/etc/NetworkManager/system-connections", "/var/lib/iwd", "/etc/krb5.keytab",
+		"/etc/wireguard", "/etc/NetworkManager/system-connections", "/var/lib/iwd", "/etc/krb5.keytab", "/etc/ppp/chap-secrets", "/etc/ppp/pap-secrets",
 		"/run/secrets", "/run/credentials", "/etc/credstore", "/etc/credstore.encrypted", "/var/lib/systemd/credential.secret",
 		"/var/lib/kubelet/pods", "/var/lib/kubelet/pki", "/etc/kubernetes", "/etc/rancher", "/var/lib/rancher/k3s/server", "/var/lib/rancher/rke2/server",
 	} {
