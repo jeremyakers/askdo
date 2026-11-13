@@ -74,12 +74,10 @@ type fleetManifest struct {
 // source of the fleet approval route: a job's j.route and the daemon's
 // timestamp-authority checks must build it identically, or a fleet-created
 // window can never be recognized. No Telegram credential is projected.
-func fleetTelegramRoute(fleet *config.FleetConfig, snapshot fleetproto.RouteSnapshot) config.TelegramRoute {
-	route := config.TelegramRoute{ChannelName: string(snapshot.ChannelID)}
-	if fleet != nil {
-		route.ApprovalTTL = config.Duration(min(fleet.ApprovalDuration(), time.Duration(snapshot.TTLSeconds)*time.Second))
-	} else {
-		route.ApprovalTTL = config.Duration(time.Duration(snapshot.TTLSeconds) * time.Second)
+func fleetTelegramRoute(_ *config.FleetConfig, snapshot fleetproto.RouteSnapshot) config.TelegramRoute {
+	route := config.TelegramRoute{
+		ChannelName: string(snapshot.ChannelID),
+		ApprovalTTL: config.Duration(time.Duration(snapshot.TTLSeconds) * time.Second),
 	}
 	for _, recipient := range snapshot.Recipients {
 		route.Recipients = append(route.Recipients, config.TelegramRecipient{ChatID: recipient.ChatID, OperatorUserIDs: append([]int64(nil), recipient.OperatorUserIDs...)})

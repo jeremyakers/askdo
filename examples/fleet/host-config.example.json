@@ -23,7 +23,6 @@
     "host_id": "<host_id from: askdo-config gateway hosts add>",
     "enrollment_file": "/etc/askdo/credentials/fleet-enrollment",
     "verification_key_file": "/etc/askdo/fleet-verify.key",
-    "ca_file": "/etc/askdo/fleet-ca.crt",
-    "approval_ttl": 600
+    "ca_file": "/etc/askdo/fleet-ca.crt"
   }
 }

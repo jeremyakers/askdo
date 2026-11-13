@@ -759,7 +759,7 @@ func TestChannelListSanitized(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"telegram", tokenPath, "(present)", "12345", "67890", "10m0s"} {
+	for _, want := range []string{"telegram", tokenPath, "(present)", "12345", "67890", "2h0m0s"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("channel list missing %q:\n%s", want, out)
 		}

@@ -573,8 +573,7 @@ func connectFleet(store fleetConfigStore, bundle gateway.EnrollmentBundle, selec
 	if e = fleetTrustedDirectory(opts.credentialsDir, true); e != nil {
 		return e
 	}
-	ttl := old.FleetConversionApprovalTTL()
-	fleet := config.FleetConfig{URL: bundle.URL, HostID: bundle.HostID, EnrollmentFile: filepath.Join(opts.credentialsDir, bundle.HostID+".bearer"), VerificationKeyFile: filepath.Join(opts.credentialsDir, bundle.HostID+".pub"), ApprovalTTL: ttl, EnrollmentBundleFiles: protectedBundles}
+	fleet := config.FleetConfig{URL: bundle.URL, HostID: bundle.HostID, EnrollmentFile: filepath.Join(opts.credentialsDir, bundle.HostID+".bearer"), VerificationKeyFile: filepath.Join(opts.credentialsDir, bundle.HostID+".pub"), EnrollmentBundleFiles: protectedBundles}
 	tx := newFleetFiles()
 	defer func() { err = errors.Join(err, tx.rollback()) }()
 	install := func(path string, bytes []byte, kind operator.CredentialKind) error {

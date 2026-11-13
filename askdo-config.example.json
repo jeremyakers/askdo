@@ -23,6 +23,6 @@
     "token_file": "/etc/askdo/credentials/telegram.token",
     "operator_user_id": 0,
     "chat_id": 0,
-    "approval_ttl": "10m"
+    "approval_ttl": "2h"
   }
 }

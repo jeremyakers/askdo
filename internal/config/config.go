@@ -24,7 +24,7 @@ import (
 const (
 	defaultRequestTimeout   = 2 * time.Minute
 	defaultTotalTimeout     = 20 * time.Minute
-	defaultApprovalTTL      = 10 * time.Minute
+	defaultApprovalTTL      = 2 * time.Hour
 	maxInspectedBytes       = int64(66060288)
 	MaxHashFileBytes        = int64(32 << 20)
 	MaxHashedBytesPerReview = int64(64 << 20)
@@ -132,7 +132,6 @@ func (c *Config) hasLocalFleetSections() bool {
 }
 
 // FleetConfig is an explicit v5 connection, never inferred from a URL or version.
-// ApprovalTTL is in seconds, matching the gateway's ticket lifetime units.
 type FleetConfig struct {
 	URL            string `json:"url"`
 	HostID         string `json:"host_id"`
@@ -142,11 +141,9 @@ type FleetConfig struct {
 	EnrollmentBundleFiles []string `json:"enrollment_bundle_files,omitempty"`
 	VerificationKeyFile   string   `json:"verification_key_file"`
 	CAFile                string   `json:"ca_file,omitempty"`
-	ApprovalTTL           int64    `json:"approval_ttl"`
-}
-
-func (f FleetConfig) ApprovalDuration() time.Duration {
-	return time.Duration(f.ApprovalTTL) * time.Second
+	// ApprovalTTL is deprecated and ignored. Approval lifetime comes from the
+	// gateway channel's signed route; this field remains for legacy config loads.
+	ApprovalTTL int64 `json:"approval_ttl,omitempty"`
 }
 
 // ValidateEnrollmentBundleFiles checks provenance syntax only. These paths
@@ -256,8 +253,11 @@ func (c *Config) validateMode() error {
 	if _, err := fleetproto.ParseID(f.HostID); err != nil {
 		return fmt.Errorf("fleet.host_id: %w", err)
 	}
-	if err := validateFleetTTL(f.ApprovalTTL); err != nil {
-		return err
+	fields, _ := objectField(c.present.top, "fleet")
+	if f.ApprovalTTL != 0 || hasField(fields, "approval_ttl") {
+		if err := validateFleetTTL(f.ApprovalTTL); err != nil {
+			return err
+		}
 	}
 	for _, file := range []struct {
 		name, path string
@@ -724,9 +724,6 @@ func (c *Config) ValidateFleetJoinPolicy() error {
 	if err := c.ValidateFleetConversionPolicy(); err != nil {
 		return err
 	}
-	if err := validateFleetTTL(c.FleetConversionApprovalTTL()); err != nil {
-		return err
-	}
 	next := c.WithFleet(FleetConfig{}, []string{"join-preflight"}, false)
 	if err := next.validatePresence(); err != nil {
 		return err
@@ -744,24 +741,6 @@ func (c *Config) ValidateFleetJoinPolicy() error {
 		return err
 	}
 	return next.validateLimits()
-}
-
-// FleetConversionApprovalTTL preserves the previous connection's approval
-// lifetime when converting to fleet mode, defaulting to two hours.
-func (c *Config) FleetConversionApprovalTTL() int64 {
-	if c.Fleet != nil {
-		return c.Fleet.ApprovalTTL
-	}
-	ttl := int64(7200)
-	if c.Telegram.ApprovalTTL.Value() > 0 {
-		ttl = int64(c.Telegram.ApprovalTTL.Value() / time.Second)
-	}
-	for _, ch := range c.Telegram.Channels {
-		if ch.Name == c.Telegram.DefaultChannel && ch.ApprovalTTL.Value() > 0 {
-			ttl = int64(ch.ApprovalTTL.Value() / time.Second)
-		}
-	}
-	return ttl
 }
 
 // WithFleet preserves all local policy, budgets and retained decode presence,
@@ -1263,12 +1242,6 @@ func applyDefaults(c *Config) {
 	}
 	if c.Limits.MaxHashedBytesPerReview == 0 && !hasField(c.present.limits, "max_hashed_bytes_per_review") {
 		c.Limits.MaxHashedBytesPerReview = MaxHashedBytesPerReview
-	}
-	if c.Fleet != nil {
-		fields, _ := objectField(c.present.top, "fleet")
-		if !hasField(fields, "approval_ttl") && c.Fleet.ApprovalTTL == 0 {
-			c.Fleet.ApprovalTTL = 600
-		}
 	}
 	if c.Review.Mode == "" && !hasField(c.present.review, "mode") {
 		c.Review.Mode = "required"

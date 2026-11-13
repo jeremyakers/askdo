@@ -100,7 +100,7 @@ func TestLoadStrictNestedFieldsAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Review.MaxOutputTokens != 8192 || time.Duration(cfg.Telegram.ApprovalTTL) != 10*time.Minute {
+	if cfg.Review.MaxOutputTokens != 8192 || time.Duration(cfg.Telegram.ApprovalTTL) != 2*time.Hour {
 		t.Fatal("defaults not applied")
 	}
 	if len(cfg.Warnings) != 0 {

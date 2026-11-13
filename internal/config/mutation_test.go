@@ -31,8 +31,8 @@ func TestDecodeForMutation(t *testing.T) {
 	if time.Duration(cfg.Review.RequestTimeout) != defaultRequestTimeout {
 		t.Fatalf("default request timeout not applied: %v", cfg.Review.RequestTimeout)
 	}
-	if time.Duration(cfg.Telegram.ApprovalTTL) != defaultApprovalTTL {
-		t.Fatalf("default approval TTL not applied: %v", cfg.Telegram.ApprovalTTL)
+	if time.Duration(cfg.Telegram.ApprovalTTL) != 2*time.Hour {
+		t.Fatalf("default approval TTL = %v, want 2h", cfg.Telegram.ApprovalTTL)
 	}
 	if cfg.Limits.MaxInspectedFiles != 256 {
 		t.Fatalf("default limits not applied: %d", cfg.Limits.MaxInspectedFiles)

@@ -15,7 +15,7 @@ func TestFleetJoinPreflightRetainedPolicy(t *testing.T) {
 		{name: "invalid review", change: `"models":[]`, replacement: `"models":[],"max_output_tokens":-1`, wantErr: true},
 		{name: "invalid mode", change: `"models":[]`, replacement: `"models":[],"mode":""`, wantErr: true},
 		{name: "invalid inspection", change: `"read_roots":[]`, replacement: `"read_roots":null`, wantErr: true},
-		{name: "invalid inherited TTL", change: `"token_file":"/placeholder"`, replacement: `"approval_ttl":"1s","token_file":"/placeholder"`, wantErr: true},
+		{name: "discarded invalid TTL", change: `"token_file":"/placeholder"`, replacement: `"approval_ttl":"1s","token_file":"/placeholder"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Given a strict but not yet connected local configuration. Direct
