@@ -200,6 +200,9 @@ hard-denied (`inspection_denied`, reason `protected_path`):
 - runtime and systemd credential stores: `/run/secrets`, `/run/credentials`,
   `/etc/credstore`, `/etc/credstore.encrypted`,
   `/var/lib/systemd/credential.secret`;
+- Kubernetes node credentials: `/var/lib/kubelet/pods` (secret and projected
+  volumes), `/var/lib/kubelet/pki`, `/etc/kubernetes`, `/etc/rancher`,
+  `/var/lib/rancher/k3s/server`, `/var/lib/rancher/rke2/server`;
 - the selected configuration and configured credential/protected files,
   including external paths and retained fleet enrollment bundles.
 

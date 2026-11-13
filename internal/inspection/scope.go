@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/sensitive"
@@ -70,6 +72,14 @@ var systemDenyPaths = []string{
 	"/etc/credstore",
 	"/etc/credstore.encrypted",
 	"/var/lib/systemd/credential.secret",
+	// Kubernetes node credentials: secret/projected pod volumes, cluster
+	// kubeconfigs and PKI, and k3s/RKE2 server tokens.
+	"/var/lib/kubelet/pods",
+	"/var/lib/kubelet/pki",
+	"/etc/kubernetes",
+	"/etc/rancher",
+	"/var/lib/rancher/k3s/server",
+	"/var/lib/rancher/rke2/server",
 }
 
 var openMountInfo = func() (io.ReadCloser, error) {
@@ -452,14 +462,41 @@ type decision struct {
 // currentSystemAlias reports a system-secret path whose symlink target now
 // contains path. Startup resolution cannot see a protected path that became a
 // link later, and "/" is always allowed, so resolve these at request time.
+// Resolutions are reused for a short interval so a large listing or search
+// does not re-walk every protected path for each entry.
 var currentSystemAlias = func(path string) (string, bool) {
-	for _, protected := range systemDenyPaths {
-		resolved, err := filepath.EvalSymlinks(protected)
-		if err == nil && resolved != protected && containsPath(resolved, path) {
+	for _, resolved := range systemAliases.current() {
+		if containsPath(resolved, path) {
 			return resolved, true
 		}
 	}
 	return "", false
+}
+
+const systemAliasRefresh = time.Second
+
+var systemAliases aliasCache
+
+type aliasCache struct {
+	mu       sync.Mutex
+	at       time.Time
+	resolved []string
+}
+
+func (c *aliasCache) current() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resolved != nil && time.Since(c.at) < systemAliasRefresh {
+		return c.resolved
+	}
+	c.resolved = []string{}
+	for _, protected := range systemDenyPaths {
+		if resolved, err := filepath.EvalSymlinks(protected); err == nil && resolved != protected {
+			c.resolved = append(c.resolved, resolved)
+		}
+	}
+	c.at = time.Now()
+	return c.resolved
 }
 
 func (p *Policy) rule(path string) decision {

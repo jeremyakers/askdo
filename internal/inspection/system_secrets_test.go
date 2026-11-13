@@ -23,6 +23,7 @@ func TestAlwaysHiddenSystemPaths(t *testing.T) {
 		"/etc/security/opasswd", "/etc/ssl/private", "/etc/pki/tls/private",
 		"/etc/wireguard", "/etc/NetworkManager/system-connections", "/var/lib/iwd", "/etc/krb5.keytab",
 		"/run/secrets", "/run/credentials", "/etc/credstore", "/etc/credstore.encrypted", "/var/lib/systemd/credential.secret",
+		"/var/lib/kubelet/pods", "/var/lib/kubelet/pki", "/etc/kubernetes", "/etc/rancher", "/var/lib/rancher/k3s/server", "/var/lib/rancher/rke2/server",
 	} {
 		t.Run(path, func(t *testing.T) {
 			for _, name := range []string{path, path + "/fixture"} {
@@ -148,6 +149,9 @@ func TestSystemExclusionRetargetedAfterStartupStaysDenied(t *testing.T) {
 	if err := os.Symlink(target, protected); err != nil {
 		t.Fatal(err)
 	}
+	systemAliases.mu.Lock()
+	systemAliases.resolved = nil
+	systemAliases.mu.Unlock()
 	secret := filepath.Join(target, "db_password")
 	if r := p.ReadRange(secret, 0, 16, currentIdentity()); r.Status != StatusInspectionDenied || r.Reason != ReasonProtectedPath || len(r.Content) != 0 {
 		t.Fatalf("secret behind a later protected link was readable: %+v", r)
