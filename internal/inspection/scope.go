@@ -64,6 +64,12 @@ var systemDenyPaths = []string{
 	"/etc/NetworkManager/system-connections",
 	"/var/lib/iwd",
 	"/etc/krb5.keytab",
+	// Runtime and systemd credential stores hold arbitrary secret file names.
+	"/run/secrets",
+	"/run/credentials",
+	"/etc/credstore",
+	"/etc/credstore.encrypted",
+	"/var/lib/systemd/credential.secret",
 }
 
 var openMountInfo = func() (io.ReadCloser, error) {

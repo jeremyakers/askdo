@@ -22,6 +22,7 @@ func TestAlwaysHiddenSystemPaths(t *testing.T) {
 		"/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-",
 		"/etc/security/opasswd", "/etc/ssl/private", "/etc/pki/tls/private",
 		"/etc/wireguard", "/etc/NetworkManager/system-connections", "/var/lib/iwd", "/etc/krb5.keytab",
+		"/run/secrets", "/run/credentials", "/etc/credstore", "/etc/credstore.encrypted", "/var/lib/systemd/credential.secret",
 	} {
 		t.Run(path, func(t *testing.T) {
 			for _, name := range []string{path, path + "/fixture"} {

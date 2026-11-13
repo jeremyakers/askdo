@@ -197,6 +197,9 @@ hard-denied (`inspection_denied`, reason `protected_path`):
 - network credentials: `/etc/wireguard`,
   `/etc/NetworkManager/system-connections`, `/var/lib/iwd`;
 - Kerberos host credentials: `/etc/krb5.keytab`;
+- runtime and systemd credential stores: `/run/secrets`, `/run/credentials`,
+  `/etc/credstore`, `/etc/credstore.encrypted`,
+  `/var/lib/systemd/credential.secret`;
 - the selected configuration and configured credential/protected files,
   including external paths and retained fleet enrollment bundles.
 
