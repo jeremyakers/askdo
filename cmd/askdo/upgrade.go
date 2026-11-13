@@ -44,7 +44,7 @@ type upgradeCLIOptions struct {
 // copied and re-verified the source, so any readable receipt proves it redundant.
 // Without one, only the age bound above proves an abandoned source is no longer
 // needed. Every error is deliberately ignored: cleanup never changes an upgrade.
-func (options upgradeCLIOptions) clearRetainedSources(operation string) {
+func (options upgradeCLIOptions) clearRetainedSources() {
 	root := options.tempRoot
 	if root == "" {
 		root = os.TempDir()
@@ -72,9 +72,6 @@ func (options upgradeCLIOptions) clearRetainedSources(operation string) {
 		}
 		dir := filepath.Join(root, entry.Name())
 		id := retainedUpgradeSourceOperation(dir)
-		if operation != "" && id != operation {
-			continue
-		}
 		redundant := false
 		if id != "" {
 			_, receiptErr := upgrade.ReadReceipt(options.receiptRoot, id)
@@ -149,7 +146,10 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 		}
 		return 125
 	}
-	options.clearRetainedSources("")
+	if !operationSet {
+		// A resume sweeps only after its receipt read has validated the ID.
+		options.clearRetainedSources()
+	}
 	source, removeSource := "", true
 	defer func() {
 		if source == "" {
@@ -256,9 +256,9 @@ func runUpgradeWith(parent context.Context, args []string, options upgradeCLIOpt
 			return 125
 		}
 		if !receiptConfirmed {
-			// A resume has no source path of its own; find the retained directory by
-			// its operation now that the receipt proves root staging took ownership.
-			options.clearRetainedSources(*operation)
+			// The receipt read validated the operation ID and proves root staging
+			// took ownership of this operation's retained source; sweep now.
+			options.clearRetainedSources()
 			receiptConfirmed = true
 		}
 		if err := ctx.Err(); err != nil {

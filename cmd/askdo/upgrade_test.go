@@ -491,6 +491,23 @@ func TestUpgradeCLICleansRetainedSourcesAtStartup(t *testing.T) {
 	}
 }
 
+func TestUpgradeCLIInvalidResumeIDSweepsNothing(t *testing.T) {
+	root, temps := t.TempDir(), t.TempDir()
+	confirmedID := "up_" + strings.Repeat("1", 32)
+	confirmed := writeRetainedUpgradeSource(t, temps, "askdo-upgrade-confirmed", confirmedID)
+	writeCLIReceipt(t, root, confirmedID, "v3.2.1", "succeeded")
+	var stdout, stderr bytes.Buffer
+
+	code := runUpgradeWith(t.Context(), []string{"--operation", "../escape"}, upgradeCLIOptions{receiptRoot: root, tempRoot: temps}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("invalid resume ID succeeded: stdout=%s stderr=%s", &stdout, &stderr)
+	}
+	if _, err := os.Stat(confirmed); err != nil {
+		t.Fatalf("rejected invocation removed a retained source: %v", err)
+	}
+}
+
 func TestUpgradeCLICleanupLeavesOtherUsersSources(t *testing.T) {
 	root, temps := t.TempDir(), t.TempDir()
 	mineID, theirsID, resumeID := cliUpgradeID, "up_"+strings.Repeat("2", 32), "up_"+strings.Repeat("3", 32)
