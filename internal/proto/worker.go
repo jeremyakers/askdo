@@ -1115,6 +1115,12 @@ func validateBootstrap(m Bootstrap) error {
 	return validateProjectionMode(m.ConfigProjection, m.ApprovalOnly, m.FleetMode)
 }
 
+// OperationPath is the PATH of every approved operation. It matches sudo's
+// default secure_path, so administrative tools that run helpers such as
+// sysctl, iptables or ip by bare name find them in the sbin directories exactly
+// as they do under sudo.
+const OperationPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
 // MaxExecutionHomeBytes is the worker bootstrap's HOME value byte limit.
 const MaxExecutionHomeBytes = 4096
 
@@ -1128,7 +1134,7 @@ func validateExecutionEnvironment(m Bootstrap) error {
 	if len(m.ExecutionEnvironment) == 0 {
 		return nil
 	}
-	fixed := map[string]string{"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "PWD": m.Operation.CWD}
+	fixed := map[string]string{"PATH": OperationPath, "LANG": "C.UTF-8", "PWD": m.Operation.CWD}
 	want := len(fixed) + 1 // HOME
 	if m.TargetUID == 0 && !m.LoginShell {
 		fixed["HOME"] = "/root"

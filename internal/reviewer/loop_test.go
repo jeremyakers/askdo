@@ -14,7 +14,7 @@ import (
 )
 
 func bootstrap(max int, deadline time.Time) proto.Bootstrap {
-	return proto.Bootstrap{Type: "bootstrap", Host: "host", RequestID: "0123456789abcdef0123456789abcdef", SubmitterName: "1000", Operation: proto.WorkerOperation{Mode: "bundle", CWD: "/home/agent", BundleDir: "/spool/bundle", Entry: "entry.py"}, ExecutionEnvironment: []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PWD=/home/agent"}, ReviewDeadlineUnixMS: deadline.UnixMilli(), ConfigProjection: proto.ConfigProjection{Models: []proto.ProjectedModel{{Name: "fake", Model: "fake", RequestTimeoutMS: 1000}}, Limits: proto.WorkerLimits{MaxModelCallsPerAttempt: max, MaxOutputTokens: 100}}}
+	return proto.Bootstrap{Type: "bootstrap", Host: "host", RequestID: "0123456789abcdef0123456789abcdef", SubmitterName: "1000", Operation: proto.WorkerOperation{Mode: "bundle", CWD: "/home/agent", BundleDir: "/spool/bundle", Entry: "entry.py"}, ExecutionEnvironment: []string{"PATH=" + proto.OperationPath, "HOME=/root", "LANG=C.UTF-8", "PWD=/home/agent"}, ReviewDeadlineUnixMS: deadline.UnixMilli(), ConfigProjection: proto.ConfigProjection{Models: []proto.ProjectedModel{{Name: "fake", Model: "fake", RequestTimeoutMS: 1000}}, Limits: proto.WorkerLimits{MaxModelCallsPerAttempt: max, MaxOutputTokens: 100}}}
 }
 
 func call(id, name, args string) reviewer.ToolCall {
@@ -82,7 +82,7 @@ func TestModelReceivesCommandWithoutInternalCaptureMetadata(t *testing.T) {
 	if got.TargetUID == nil || *got.TargetUID != 0 || got.SubmitterUID == nil || *got.SubmitterUID != 4242 || got.SubmitterName != "sample-agent" || got.Host != "execution-host" || got.Container != "docker" {
 		t.Fatalf("broker-known execution identity absent: %+v", got)
 	}
-	for key, want := range map[string]string{"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "PWD": "/home/agent"} {
+	for key, want := range map[string]string{"PATH": proto.OperationPath, "HOME": "/root", "LANG": "C.UTF-8", "PWD": "/home/agent"} {
 		if got.Environment[key] != want {
 			t.Fatalf("model environment[%q]=%q, want %q: %+v", key, got.Environment[key], want, got.Environment)
 		}
