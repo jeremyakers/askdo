@@ -24,6 +24,7 @@ type InspectionCapabilities struct {
 	HashPathEnabled      bool `json:"hash_path_enabled"`
 	ServiceStatusEnabled bool `json:"service_status_enabled"`
 	SudoPolicyEnabled    bool `json:"sudo_policy_enabled"`
+	FleetHostsEnabled    bool `json:"fleet_hosts_enabled,omitempty"`
 }
 
 // Closed backend enum spellings for the optional scope compatibility leaf.
@@ -67,6 +68,7 @@ type ServiceStatusRequest struct {
 type SudoPolicyRequest struct {
 	UID uint32 `json:"uid"`
 }
+type FleetHostsRequest struct{}
 
 // InspectionScopeResult exposes candidate read roots, not blanket permission.
 // Exclusion details stay private; ExclusionsRemain declares that policy applies.
@@ -132,6 +134,12 @@ type SudoPolicyResult struct {
 	WithheldRuleCount uint32     `json:"withheld_rule_count"`
 }
 
+// FleetHostsResult carries the same non-secret text projection as
+// askdo-config gateway hosts list, never raw enrollment records.
+type FleetHostsResult struct {
+	Hosts string `json:"hosts"`
+}
+
 var serviceUnitPattern = regexp.MustCompile(`^[A-Za-z0-9_.@][A-Za-z0-9_.@-]*\.service$`)
 var serviceStatePattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
 var sudoAccountPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,31}\$?$`)
@@ -143,7 +151,7 @@ func ValidServiceUnit(unit string) bool {
 }
 
 func isMetadataOp(op string) bool {
-	return oneOf(op, "inspection_scope", "hash_path", "service_status", "sudo_policy")
+	return oneOf(op, "inspection_scope", "hash_path", "service_status", "sudo_policy", "fleet_hosts")
 }
 
 func decodeMetadataRequest(r InspectRequest) (any, error) {
@@ -157,6 +165,8 @@ func decodeMetadataRequest(r InspectRequest) (any, error) {
 		p = &ServiceStatusRequest{}
 	case "sudo_policy":
 		p = &SudoPolicyRequest{}
+	case "fleet_hosts":
+		p = &FleetHostsRequest{}
 	default:
 		return nil, errors.New("unknown metadata operation")
 	}
@@ -180,6 +190,8 @@ func decodeMetadataRequest(r InspectRequest) (any, error) {
 		}
 		return *v, nil
 	case *SudoPolicyRequest:
+		return *v, nil
+	case *FleetHostsRequest:
 		return *v, nil
 	}
 	return nil, errors.New("invalid metadata request")
@@ -213,6 +225,8 @@ func DecodeInspectionMetadataResult(request InspectRequest, result InspectResult
 		dst = &ServiceStatusResult{}
 	case "sudo_policy":
 		dst = &SudoPolicyResult{}
+	case "fleet_hosts":
+		dst = &FleetHostsResult{}
 	}
 	if err := strictUnmarshalWorker(result.Payload, dst); err != nil {
 		return nil, err
@@ -269,6 +283,8 @@ func DecodeInspectionMetadataResult(request InspectRequest, result InspectResult
 				}
 			}
 		}
+		return *p, nil
+	case *FleetHostsResult:
 		return *p, nil
 	}
 	return nil, errors.New("unknown metadata result")

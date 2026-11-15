@@ -131,8 +131,9 @@ report; it never substitutes invented risk, effects or reversibility.
 
 The host-evidence tools are separate from existing foreground-helper sudo
 hardening. The host's root broker, config parser and reviewer must be upgraded
-together before using their fields. The default registry is eight tools, at most twelve with
-all four opt-ins. See [rollout constraints](configuration.md#optional-host-evidence-and-rollout).
+together before using their fields. The default registry is eight tools, at most thirteen with
+all optional tools, including the automatically detected fleet-hosts projection.
+See [rollout constraints](configuration.md#optional-host-evidence-and-rollout).
 
 ### Reviewer instruction layers
 

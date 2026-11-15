@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
-	"github.com/jeremyakers/askdo/internal/fleetproto"
 	"github.com/jeremyakers/askdo/internal/gateway"
 	"github.com/jeremyakers/askdo/internal/upgrade"
 )
@@ -121,39 +119,6 @@ func showGatewayUpgradeTarget(ctx context.Context, upgrades *gateway.UpgradeStor
 	return nil
 }
 
-// upgradeColumns is what `gateway hosts list` appends for a host: the release it
-// reported, whether it applies pushed upgrades, how its last upgrade ended and
-// when it last reported. A host that never reported says so.
 func upgradeColumns(h gateway.HostUpgrade, reported bool) string {
-	// Every value is one token: what a host reported may hold spaces, and must not
-	// be able to pass for another column.
-	name, release, last := strings.Join(strings.Fields(h.Hostname), "_"), strings.Join(strings.Fields(h.Release), "_"), "none"
-	if name == "" {
-		name = "-"
-	}
-	if !reported {
-		return " name=" + name + " release=unknown auto_upgrade=unknown upgrade=none seen=never"
-	}
-	if release == "" {
-		release = "unknown"
-	}
-	if h.Result != nil {
-		last = lastUpgrade(*h.Result)
-	}
-	seen := "never"
-	if !h.Seen.IsZero() {
-		seen = h.Seen.Local().Format(time.RFC3339)
-	}
-	return fmt.Sprintf(" name=%s release=%s auto_upgrade=%t upgrade=%s seen=%s", name, release, h.Auto, last, seen)
-}
-
-func lastUpgrade(r fleetproto.UpgradeResult) string {
-	text := r.State
-	if r.Outcome != "" {
-		text += "/" + r.Outcome
-	}
-	if r.Release != "" {
-		text += "(" + r.Release + ")"
-	}
-	return strings.Join(strings.Fields(text), "_")
+	return gateway.UpgradeColumns(h, reported)
 }

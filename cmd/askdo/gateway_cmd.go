@@ -458,31 +458,7 @@ func gatewayHosts(ctx context.Context, args []string, out io.Writer) (err error)
 }
 
 func gatewayListHosts(ctx context.Context, store *gateway.EnrollmentStore, out io.Writer) error {
-	hosts, err := store.List(ctx)
-	if err != nil {
-		return err
-	}
-	// Upgrade metadata is optional; listing enrollments never requires it.
-	reported := map[string]gateway.HostUpgrade{}
-	if upgrades, err := gateway.NewUpgradeStore(store); err == nil {
-		if statuses, err := upgrades.Statuses(ctx); err == nil {
-			reported = statuses
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	for _, host := range hosts {
-		if _, err := fleetproto.ParseID(host.HostID); err != nil {
-			return errors.New("invalid stored enrollment identity")
-		}
-		status, ok := reported[host.HostID]
-		if host.DisplayName != "" {
-			status.Hostname = host.DisplayName
-		}
-		fmt.Fprintf(out, "%s enabled=%t profiles=%s channels=%s default=%s%s\n", host.HostID, host.Enabled, strings.Join(host.AllowedProfiles, ","), strings.Join(host.AllowedChannels, ","), host.DefaultChannel, upgradeColumns(status, ok))
-	}
-	return nil
+	return gateway.WriteHostsStatus(ctx, store, out)
 }
 
 func gatewayConnect(args []string, out io.Writer) (err error) {

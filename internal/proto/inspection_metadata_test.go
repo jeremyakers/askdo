@@ -16,6 +16,7 @@ func TestMetadataRequestShapes(t *testing.T) {
 		{"hash_path", `{"path":"/usr/bin/sudo"}`, true},
 		{"service_status", `{"unit":"foo@instance.service"}`, true},
 		{"sudo_policy", `{"uid":0}`, true},
+		{"fleet_hosts", `{}`, true},
 		{"sudo_policy", `{}`, false}, {"sudo_policy", `{"uid":null}`, false},
 		{"sudo_policy", `{"uid":1,"uid":2}`, false},
 		{"hash_path", `{"path":"/a","base":"host"}`, false},
@@ -53,6 +54,7 @@ func TestMetadataTypedResultsAndStrictFields(t *testing.T) {
 		{"hash_path", HashPathRequest{Path: "/usr/bin/sudo"}, HashPathResult{Source: "host", RequestedPath: "/usr/bin/sudo", ResolvedPath: "/usr/bin/sudo", SHA256: strings.Repeat("a", 64), Size: 1, Mode: 0755, Inode: 1, ObservedAtUnixMS: 1}},
 		{"service_status", ServiceStatusRequest{Unit: "foo.service"}, ServiceStatusResult{ID: "foo.service", LoadState: "loaded", ActiveState: "active", SubState: "running", UnitFileState: "enabled", CanonicalFragmentPath: "/usr/lib/systemd/system/foo.service", UMask: "0022", ObservedAtUnixMS: 1}},
 		{"sudo_policy", SudoPolicyRequest{UID: 1000}, SudoPolicyResult{UID: 1000, Rules: []SudoRule{{RunAsUsers: []string{"root"}, RunAsGroups: []string{}, CommandScope: "path", Path: "/usr/bin/opencode", ArgConstraint: "unrestricted", Auth: "not_required"}}, Complete: true, ObservedAtUnixMS: 1}},
+		{"fleet_hosts", FleetHostsRequest{}, FleetHostsResult{Hosts: "host_office enabled=true name=office-desktop release=v1.2.3\n"}},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
 			req, res := metadataExchange(t, tc.op, tc.args, tc.result)
@@ -220,7 +222,7 @@ func TestCapabilitiesWireCompatibility(t *testing.T) {
 	if err := strictUnmarshalWorker(raw, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	limits.InspectionCaps = InspectionCapabilities{HashPathEnabled: true, ServiceStatusEnabled: true, SudoPolicyEnabled: true}
+	limits.InspectionCaps = InspectionCapabilities{HashPathEnabled: true, ServiceStatusEnabled: true, SudoPolicyEnabled: true, FleetHostsEnabled: true}
 	raw, err = json.Marshal(limits)
 	if err != nil {
 		t.Fatal(err)

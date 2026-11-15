@@ -12,6 +12,9 @@ import (
 
 func TestGatewayRootHostRenameAndStatusProjection(t *testing.T) {
 	_, path := gatewayOperatorFixture(t)
+	if !gatewayHostsAvailableAt(t.Context(), path) {
+		t.Fatal("existing gateway database did not enable fleet host inspection")
+	}
 	cfg, err := gateway.LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +68,9 @@ func TestGatewayRootHostRenameAndStatusProjection(t *testing.T) {
 		}
 		if err := os.Remove(cfg.Database); err != nil {
 			t.Fatal(err)
+		}
+		if gatewayHostsAvailableAt(t.Context(), path) {
+			t.Fatal("missing gateway database enabled fleet host inspection")
 		}
 		for _, view := range []string{"hosts", "fleet"} {
 			text, err := gatewayStatusAt(t.Context(), view, path)

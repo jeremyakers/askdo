@@ -129,7 +129,9 @@ func runWithClient(args []string, runClient func(context.Context, []string, clie
 
 // The daemon's two long-lived parts, which a test replaces.
 var (
-	runBroker         = func(ctx context.Context, path string) error { return broker.RunWithStatus(ctx, path, gatewayStatus) }
+	runBroker = func(ctx context.Context, path string) error {
+		return broker.RunWithStatus(ctx, path, gatewayStatus, gatewayHostsAvailable)
+	}
 	startUpgradeAgent = startFleetUpgrade
 )
 

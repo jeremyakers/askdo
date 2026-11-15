@@ -135,6 +135,11 @@ The three capability flags accept JSON booleans, never `null`. These fields
 apply equally to direct v4 and fleet v5 hosts, not the separate gateway-server
 v1 configuration. An unchanged old host configuration keeps all three off.
 
+There is no `fleet_hosts_enabled` configuration field. The broker adds that
+read-only reviewer capability automatically when its fleet gateway configuration
+and database pass the existing read-only status existence check; otherwise the
+`fleet_hosts` tool is absent. See [review tools](review-tools.md#automatic-fleet_hosts).
+
 Inspection scope is not execution permission. The reviewer can inspect live
 host context throughout `/`, including `/var/lib`, `/etc`, `/opt`, `/srv` and
 temporary maintenance scripts, subject to exclusions, sensitive masks and
@@ -290,7 +295,7 @@ The broker must understand the new operations, bootstrap capability projection
 and fixed tool registry; upgrading only the reader/reviewer is insufficient.
 
 The fleet wire already relays typed tool-definition arrays (up to 32), so an
-existing compatible gateway can relay the new maximum twelve-tool registry
+existing compatible gateway can relay the new maximum thirteen-tool registry
 without a gateway-side tool-name allowlist change. Host-local root code still
 enforces the exact offered definitions and inspection policy. No new gateway
 config flags or signing keys are needed; verify deployed version compatibility

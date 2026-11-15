@@ -8,7 +8,9 @@ and worker-side `submit_review`: eight tools by default
 root-owned inspection flags optionally add `hash_path`, `service_status`, and
 `sudo_policy`; all default to false. Worker-side `webfetch` is separately
 offered only with `review.webfetch_enabled: true` (also false by default).
-The maximum registry is twelve tools. Configuration cannot redefine tools;
+`fleet_hosts` is offered automatically only on a host with its fleet gateway
+configuration and database present. The maximum registry is thirteen tools.
+Configuration cannot redefine tools;
 calls execute strictly sequentially. Broker operations use private-pipe
 `inspect_request`/`inspect_result` exchanges with fixed, strictly typed shapes.
 
@@ -206,7 +208,8 @@ it before a report.
 - **Arguments:** required `cursor` (string ≤ 128; `""` for the first page,
   returned `next_cursor` thereafter). No `base`, path or caller-selected policy.
 - **Result:** `read_roots` (≤ 128 per page), `next_cursor`,
-  `exclusions_remain: true`, `capabilities` (the three enabled booleans),
+  `exclusions_remain: true`, `capabilities` (the three configured booleans plus
+  the automatically detected `fleet_hosts_enabled` boolean),
   `max_read_bytes`, `max_inspected_files`, `max_inspected_bytes`,
   `max_hash_file_bytes`, `max_hashed_bytes_per_review`, `sudo_policy_uids`,
   and an optional typed `compatibility` leaf. The UID list is empty when sudo
@@ -313,6 +316,28 @@ non-group/world-writable ancestors, use only `PATH=/usr/bin:/bin`, `LANG=C`,
 `LC_ALL=C`, cwd `/`, and no inherited stdin. Each has a two-second timeout and
 a combined stdout/stderr limit of 16 KiB; no caller-selected flags, executable
 or environment are accepted.
+
+### Automatic `fleet_hosts`
+
+On a host where the root broker can open its configured fleet gateway database
+with the existing read-only, no-migration status path, the reviewer is offered
+`fleet_hosts` with an empty `{}` argument object. No configuration flag enables
+it on other hosts, and a missing gateway configuration or database leaves the
+tool absent. Availability is measured once per review job so the bootstrap,
+scope projection and frozen evidence agree.
+
+The result has one `hosts` string containing the same non-secret projection as
+`askdo-config gateway hosts list`: host IDs, display names, enabled state,
+profile/channel policy, reported release, automatic-upgrade and last-upgrade
+state, and last-seen time where available. It contains no bearer value or hash,
+signing key, bot token, profile credential or other gateway secret. Use it to
+confirm which enrolled machine a host ID refers to; it is observational and
+cannot rename, revoke, enroll or upgrade a host.
+
+The result shares the metadata tools' 16 KiB per-result ceiling. An oversized
+projection returns `limit_exceeded` with reason `output_limit`; a database that
+disappears, is locked or otherwise cannot be read returns an ordinary sanitized
+failure result. Neither outcome aborts the review or prevents `submit_review`.
 
 ### 8. `submit_review`
 
@@ -447,7 +472,7 @@ inspection or assessment complete by itself.
 
 ### Inspection budgets and audit evidence
 
-The root broker limits the four new operations together to 32 requests and
+The root broker limits the five metadata operations together to 32 requests and
 256 KiB of successful payloads per job (≤ 16 KiB each; hash results ≤ 1024
 bytes). A separate 256-observation cap spans all broker inspection tools.
 Disabled/denied requests consume the metadata request budget when dispatched;
