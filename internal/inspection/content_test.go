@@ -11,14 +11,7 @@ import (
 // Also run by TestLegacySecurityMatrix: parent-directory relative links work
 // on both resolvers; no test changes the supported terminal-link behavior.
 func TestContentPermissionsSymlinksAndRevalidation(t *testing.T) {
-	root, err := os.MkdirTemp("", "inspection-content-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := os.Chmod(root, 0755); err != nil {
-		t.Fatal(err)
-	}
+	root := publicTempRoot(t, "inspection-content-")
 	public := filepath.Join(root, "public")
 	private := filepath.Join(root, "private")
 	for _, dir := range []string{public, private} {
@@ -82,6 +75,42 @@ func TestContentPermissionsSymlinksAndRevalidation(t *testing.T) {
 		rangeReadHooks.Delete(p)
 		if err := os.Chmod(public, 0755); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// publicTempRoot creates a world-traversable fixture root under the runner's
+// temporary directory. The implicit-root content rule requires every ancestor
+// to be world-searchable, so a private TMPDIR cannot model a public tree.
+func publicTempRoot(t *testing.T, pattern string) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Inspection traverses the canonical path, so check the ancestors of the
+	// absolute, symlink-resolved root (this also handles a relative TMPDIR).
+	resolved, err := filepath.Abs(root)
+	if err == nil {
+		resolved, err = filepath.EvalSymlinks(resolved)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir := filepath.Dir(resolved); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0001 == 0 {
+			t.Skipf("temporary directory ancestor %s is not world-searchable; set TMPDIR to a world-searchable directory to run this test", dir)
+		}
+		if filepath.Dir(dir) == dir {
+			return resolved
 		}
 	}
 }
