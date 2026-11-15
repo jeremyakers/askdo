@@ -59,6 +59,9 @@ func TestFleetLoadStrictModes(t *testing.T) {
 	if _, err := load(string(encoded)); err != nil {
 		t.Fatal("fleet JSON roundtrip failed", err)
 	}
+	if _, err := load(strings.Replace(base, `"read_roots":[]`, "", 1)); err != nil {
+		t.Fatal("fleet config with omitted additive roots rejected", err)
+	}
 	tests := []string{
 		strings.Replace(base, `"gateway_profiles":["local","fallback"]`, `"gateway_profiles":[]`, 1),
 		strings.Replace(base, `"gateway_profiles":["local","fallback"]`, `"gateway_profiles":null`, 1),
@@ -72,7 +75,6 @@ func TestFleetLoadStrictModes(t *testing.T) {
 		strings.Replace(base, `"approval_ttl":600`, `"approval_ttl":9223372036854775807`, 1),
 		strings.Replace(base, `"local_only":true`, `"mode":"", "local_only":true`, 1),
 		strings.Replace(base, `"local_only":true`, `"max_output_tokens":0, "local_only":true`, 1),
-		strings.Replace(base, `"read_roots":[]`, `"deny_paths":[]`, 1),
 		strings.Replace(base, `"host_id":"host-a"`, `"host_id":""`, 1),
 	}
 	for i, raw := range tests {

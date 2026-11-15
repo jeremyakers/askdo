@@ -184,6 +184,7 @@ func TestModelReceivesClosedDenialReasonInToolResult(t *testing.T) {
 	}{
 		{"outside_scope", `{"reason_code":"outside_scope","status":"inspection_denied"}`},
 		{"protected_path", `{"reason_code":"protected_path","status":"inspection_denied"}`},
+		{"not_world_readable", `{"reason_code":"not_world_readable","status":"inspection_denied"}`},
 		{"", `{"status":"inspection_denied"}`},
 		{"deny_paths /srv/private-share", `{"error":"invalid inspection reason_code","status":"error"}`},
 	} {

@@ -12,11 +12,13 @@ import (
 )
 
 type authorization struct {
-	resolved  string
-	mountID   uint64
-	stat      unix.Stat_t
-	rule      string
-	sensitive bool
+	resolved      string
+	mountID       uint64
+	stat          unix.Stat_t
+	rule          string
+	sensitive     bool
+	implicitPaths []string // spellings allowed only by the implicit filesystem root
+	content       bool     // revalidation must also recheck content permissions
 }
 
 // denialError is the one policy-denial error. Its text is an operator
@@ -108,6 +110,9 @@ func (p *Policy) authorizeFD(fd int, requested string) (authorization, error) {
 		}
 		a.rule = d.rule
 		a.sensitive = a.sensitive || p.MatchesSensitive(name)
+		if !d.explicit && (len(a.implicitPaths) == 0 || a.implicitPaths[len(a.implicitPaths)-1] != name) {
+			a.implicitPaths = append(a.implicitPaths, name)
+		}
 	}
 	a.mountID, err = mountID(fd)
 	if err != nil {
@@ -195,8 +200,12 @@ func (p *Policy) checkMountAliases(a *authorization, mounts []mountInfoEntry) er
 		if st.Dev != a.stat.Dev || st.Ino != a.stat.Ino {
 			continue
 		} // overmounted, not an alias
-		if d := p.rule(alias); !d.allowed {
+		d := p.rule(alias)
+		if !d.allowed {
 			return denied(d.reason, "mount alias "+alias+" is "+d.rule)
+		}
+		if !d.explicit && alias != a.resolved && len(a.implicitPaths) > 0 {
+			a.implicitPaths = append(a.implicitPaths, alias)
 		}
 	}
 	return nil
@@ -229,9 +238,14 @@ func (p *Policy) authorizedOpen(path string, flags int) (int, authorization, err
 		dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 		return dup, a, err
 	}
+	readFD, err := readableDescriptor(fd, a, flags)
+	return readFD, a, err
+}
+
+func readableDescriptor(fd int, a authorization, flags int) (int, error) {
 	readFD, err := unix.Open("/proc/self/fd/"+strconv.Itoa(fd), flags, 0)
 	if err != nil {
-		return -1, a, err
+		return -1, err
 	}
 	var st unix.Stat_t
 	if err = unix.Fstat(readFD, &st); err == nil && (st.Dev != a.stat.Dev || st.Ino != a.stat.Ino) {
@@ -246,9 +260,9 @@ func (p *Policy) authorizedOpen(path string, flags int) (int, authorization, err
 	}
 	if err != nil {
 		unix.Close(readFD)
-		return -1, a, err
+		return -1, err
 	}
-	return readFD, a, nil
+	return readFD, nil
 }
 
 func (p *Policy) revalidate(path string, before authorization) error {
@@ -259,6 +273,9 @@ func (p *Policy) revalidate(path string, before authorization) error {
 	defer unix.Close(fd)
 	if after.stat.Dev != before.stat.Dev || after.stat.Ino != before.stat.Ino || after.mountID != before.mountID || after.resolved != before.resolved || after.sensitive != before.sensitive {
 		return denied(ReasonUnverifiedIdentity, "requested path or mount mapping changed")
+	}
+	if before.content {
+		return p.checkContentAccess(after)
 	}
 	return nil
 }

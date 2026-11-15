@@ -265,7 +265,7 @@ func TestGatewayRootConnectRejectsInvalidRetainedInspection(t *testing.T) {
 	if code := runGateway([]string{"hosts", "add", "--config", path, "--output", bundle, "--channel", "default", "--default-channel", "default"}, &out, &stderr); code != 0 {
 		t.Fatalf("add %d %s", code, stderr.String())
 	}
-	for _, inspection := range []string{`{"read_roots":[],"sensitive_masks":[]}`, `{"read_roots":[],"sensitive_masks":null}`, `{"read_roots":null}`, `{}`} {
+	for _, inspection := range []string{`{"read_roots":[],"sensitive_masks":[]}`, `{"read_roots":[],"sensitive_masks":null}`, `{"read_roots":null}`} {
 		host := filepath.Join(dir, "host.json")
 		creds := filepath.Join(dir, "host-credentials")
 		before := []byte(`{"config_version":4,"inspection":` + inspection + `,"review":{"mode":"approval_only","models":[{"name":"placeholder","api":"placeholder","base_url":"placeholder","model":"placeholder"}]},"limits":{},"telegram":{"token_file":"/placeholder","operator_user_id":0,"chat_id":0}}`)

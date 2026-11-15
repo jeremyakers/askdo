@@ -21,7 +21,7 @@ func TestPolicyOverridesAndLinks(t *testing.T) {
 	for _, name := range []string{filepath.Join(base, "other"), filepath.Join(denied, "private"), filepath.Join(allowed, "tool")} {
 		writeFile(t, name, "test", 0600)
 	}
-	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/", allowed}, DenyPaths: []string{denied}})
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/", base, allowed}, DenyPaths: []string{denied}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,13 +234,13 @@ func TestRulesWithoutMount(t *testing.T) {
 	}
 }
 
-func TestFileOnlyRootAndProtectedCredentialAlias(t *testing.T) {
+func TestAdditiveFileRootAndProtectedCredentialAlias(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "only")
 	sibling := filepath.Join(root, "sibling")
 	writeFile(t, file, "allowed", 0600)
-	writeFile(t, sibling, "denied", 0600)
-	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{file}})
+	writeFile(t, sibling, "also allowed", 0600)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{file, sibling}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,8 +248,8 @@ func TestFileOnlyRootAndProtectedCredentialAlias(t *testing.T) {
 	if r := p.ReadRange(file, 0, 64, currentIdentity()); r.Status != StatusOK {
 		t.Fatalf("file root: %#v", r)
 	}
-	if r := p.ReadRange(sibling, 0, 64, currentIdentity()); r.Status != StatusInspectionDenied {
-		t.Fatalf("file root admitted sibling: %#v", r)
+	if r := p.ReadRange(sibling, 0, 64, currentIdentity()); r.Status != StatusOK {
+		t.Fatalf("additive file root excluded sibling: %#v", r)
 	}
 	alias := filepath.Join(root, "alias")
 	if err := os.Symlink(file, alias); err != nil {

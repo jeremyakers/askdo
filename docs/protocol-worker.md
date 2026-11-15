@@ -305,10 +305,11 @@ For `read_path`, `list_path`, `search_path`, `stat_path`, `find_path` and
 
 | `reason_code` | Root-authoritative meaning |
 |---|---|
-| `outside_scope` | Configured read roots, configured exclusions or default deny rejected a requested/resolved/mount-alias spelling. |
+| `outside_scope` | A configured exclusion rejected a requested/resolved/mount-alias spelling. The implicit `/` keeps paths outside configured read roots in scope. |
 | `protected_path` | A mandatory protected path, object identity or mount source was rejected; adding a read root cannot override it. |
 | `unverified_identity` | The required object or mount identity could not be established, for example an ambiguous alias or multiple hard links. |
 | `unsupported_object` | The object kind cannot be inspected by this operation, for example a content read of a directory or special file. |
+| `not_world_readable` | A host content read/search outside configured non-`/` roots lacks file other-read or ancestor-directory other-search permission. Metadata remains available. |
 
 The classification comes from the same policy/open attempt as the denial, not a
 second filesystem check or parsing a private error string. An unclassified

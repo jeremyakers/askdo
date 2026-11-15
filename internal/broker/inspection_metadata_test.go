@@ -202,7 +202,7 @@ func TestRootMetadataScopePaginationPrivacyAndCapabilities(t *testing.T) {
 			break
 		}
 	}
-	if !reflect.DeepEqual(found, roots) {
+	if !reflect.DeepEqual(found, append([]string{"/"}, roots...)) {
 		t.Fatal("scope dropped or reordered roots")
 	}
 	if caps := j.bootstrap().ConfigProjection.Limits.InspectionCaps; caps != j.inspectionCapabilities() {

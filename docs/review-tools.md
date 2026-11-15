@@ -83,16 +83,23 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
   returns the payload-free status `"binary"` instead of any bytes.
 - **Host enforcement:** the broker opens the path descriptor-relative
   (openat2 with `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, or the legacy
-  `os.Root` fallback where `openat2` is absent) under
-  `inspection.read_roots`, applies `deny_paths`, the hard-deny set and the
-  `sensitive_masks` name policy against both the requested and resolved
-  spellings on the authorized opened descriptor **before** reading, and
+  `os.Root` fallback where `openat2` is absent) under the implicit `/` read
+  root, applies `deny_paths`, the hard-deny set and the always-on plus
+  configured `sensitive_masks` name policy against both the requested and
+  resolved spellings on the authorized opened descriptor **before** reading, and
   revalidates the path and object identity **after** the bounded read; any
   change fails the call (`changed_during_capture`). A permitted path matching
   a sensitive name mask returns payload-free `withheld` — metadata policy is
   checked, but no content crosses to the model. On the legacy backend a read
   through a terminal symlink or an absolute-path symlink is denied rather than
   followed; the `inspection_scope` `compatibility` leaf reports this.
+- **Host content permissions:** unless a non-`/` configured read root grants
+  content access, the file must have other-read (`0004`) and every traversed
+  ancestor directory must have other-search (`0001`). Otherwise the result is
+  payload-free `inspection_denied`, reason `not_world_readable`. An explicit
+  `/` is still subject to this rule. Hard denies, masks and exclusions always
+  apply. Metadata tools (including executable hashes) and names-only directory
+  listings retain their existing behavior on private objects.
 - **Bundle reads:** served from the root-only staged copy; the staged bytes
   are re-hashed against the capture index on every read. A staged file the
   broker classified as masked (admin `Masked` policy or a client
@@ -190,9 +197,11 @@ host isolation.
 
 ### 7. `inspection_scope`
 
-Call this tool early, preferably first, to discover the available declared host
-scope rather than guessing roots. It is always offered; the current loop does
-**not** automatically invoke it or mechanically require it before a report.
+Call this tool early, preferably first, to discover host scope and budgets.
+The implicit `/` makes the whole filesystem a candidate, with configured
+`read_roots` additive rather than limiting visibility. It is always offered;
+the current loop does **not** automatically invoke it or mechanically require
+it before a report.
 
 - **Arguments:** required `cursor` (string ≤ 128; `""` for the first page,
   returned `next_cursor` thereafter). No `base`, path or caller-selected policy.
@@ -378,28 +387,37 @@ of the trust boundary — enforces:
    (see [wire reference](protocol-worker.md#inspect_result-bw)).
   Denial is an ordinary tool result, not proof that the guessed path exists;
   the model can still submit its report.
-- **Inspection policy:** descriptor-relative, read-only, openat2-based access
-  confined to `inspection.read_roots`, with `deny_paths` and the hard-deny
-  set (`/etc/askdo`, `/var/lib/askdo`, `/var/lib/askdo-review`, `/run/askdo`, `/proc`,
-  `/sys`, `/dev`) always denied. For configured allow and deny paths, the
+- **Inspection policy:** descriptor-relative, read-only access throughout `/`,
+  even with omitted, empty or narrow legacy `inspection.read_roots`. Configured
+  `deny_paths` and the [always-hidden paths](configuration.md#inspection)
+  still exclude access. For configured additive read and deny paths, the
   most-specific path rule wins and ties deny. Policy is evaluated on the
   authorized opened descriptor — object type, pseudo-filesystem rejection,
   protected identities, multi-hardlink regular file refusal, both path
   spellings and reachable same-object mount aliases — and the object and path
-  are revalidated after each bounded read. `read_roots` may exclude a host
-   file the operation will execute: the model then receives a denied tool
-   result and can say so in its report.
-   `outside_scope` identifies a configured-scope refusal, not a universal
+  are revalidated after each bounded read. Exclusions may still hide a host
+   file the operation will execute: the model receives a denied tool result
+   and can say so in its report.
+   `outside_scope` identifies a configured exclusion, not a universal
    inability to inspect; `protected_path`, `unverified_identity` and
    `unsupported_object` distinguish other policy/object boundaries when the
    same decision establishes them. Unknown causes are not guessed from errno
    text or a later check, and reasons never include private rule/path spellings.
+- **Content permissions:** the implicit `/` grants file content only when the
+  file is world-readable and all traversed ancestor directories are
+  world-searchable. Configured non-`/` roots grant private-tree content access;
+  they do not override named secret protections. A refused file read/search
+  returns `inspection_denied` with `reason_code: "not_world_readable"`.
+  Directory searches skip these files, counting them in `skipped_masked`, so
+  public matches remain available without revealing private content.
 - **Sensitive name masks:** a permitted host path or staged bundle path whose
-  requested or resolved name matches `inspection.sensitive_masks` (or a
-  client `sensitive_inclusions` opt-in) is answered `withheld` without
+  requested or resolved name matches the always-on system-secret masks,
+  `inspection.sensitive_masks` (or a client `sensitive_inclusions` opt-in) is
+  answered `withheld` without
   content, or skipped with a `skipped_masked` count in list/search/find results.
-  Masks match **names, not content**: a credential copied under an ordinary
-  filename, or a secret value placed in argv, the environment, or `--reason`,
+  Masks match **names, not content**: a credential copied into a world-readable
+  file or explicitly granted private tree under an ordinary filename, or a
+  secret value placed in argv, the environment, or `--reason`,
   can still leak. The broker records every reference it withheld (host
   spellings and masked bundle paths) as a factual access-policy signal — not
    a completeness assessment — and the reviewed Telegram card discloses the
@@ -422,11 +440,10 @@ of the trust boundary — enforces:
 
 For a generated self-contained Bash file, the source CLI's `--script PATH`
 submits only that file through existing bundle capture. The staged copy is
-available to the reviewer even if its original `/tmp` or application path is
-outside host read roots. Ordinary argv does not gain implicit file capture or
-host-inspection access. Related live configuration remains subject to the
-administrator's roots and masks; capture does not make a model's inspection or
-assessment complete by itself.
+available to the reviewer independently of live host exclusions. Ordinary argv
+does not gain implicit file capture. Related live configuration remains subject
+to the administrator's exclusions and masks; capture does not make a model's
+inspection or assessment complete by itself.
 
 ### Inspection budgets and audit evidence
 

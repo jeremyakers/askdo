@@ -277,9 +277,10 @@ func DecodeInspectionMetadataResult(request InspectRequest, result InspectResult
 // directDenialReason reports the closed classes a direct path operation may
 // attach to an inspection_denied result. They mirror the broker policy's
 // denial reasons: configured scope, the hard-protected set, an unverifiable
-// object identity, or an object kind the operation cannot inspect.
+// object identity, an object kind the operation cannot inspect, or private
+// content outside explicitly configured read roots.
 func directDenialReason(code string) bool {
-	return oneOf(code, "outside_scope", "protected_path", "unverified_identity", "unsupported_object")
+	return oneOf(code, "outside_scope", "protected_path", "unverified_identity", "unsupported_object", "not_world_readable")
 }
 
 func validateInspectionReason(op string, r InspectResult) error {

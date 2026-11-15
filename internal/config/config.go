@@ -700,9 +700,6 @@ func (c *Config) ValidateFleetConversionPolicy() error {
 		if c.present.inspection == nil || c.present.review == nil || c.present.limits == nil {
 			return errors.New("retained configuration sections must be objects")
 		}
-		if !hasField(c.present.inspection, "read_roots") {
-			return errors.New("missing required field read_roots")
-		}
 		for _, field := range []string{"read_roots", "deny_paths"} {
 			if raw, ok := c.present.inspection[field]; ok && string(raw) == "null" {
 				return fmt.Errorf("inspection.%s must be an array", field)
@@ -793,7 +790,7 @@ func (c *Config) Validate() error {
 		c.Limits.MaxHashedBytesPerReview = MaxHashedBytesPerReview
 	}
 	if len(c.Inspection.ReadRoots) == 0 {
-		c.Warnings = append(c.Warnings, "inspection.read_roots is empty; host content inspection is disabled")
+		c.Warnings = append(c.Warnings, "inspection.read_roots is empty; the whole filesystem remains inspectable except protected and denied paths")
 	}
 	if err := c.validatePresence(); err != nil {
 		return err
@@ -1249,6 +1246,9 @@ func applyDefaults(c *Config) {
 	if c.Inspection.DenyPaths == nil && !hasField(c.present.inspection, "deny_paths") {
 		c.Inspection.DenyPaths = []string{}
 	}
+	if c.Inspection.ReadRoots == nil && !hasField(c.present.inspection, "read_roots") {
+		c.Inspection.ReadRoots = []string{}
+	}
 	if c.Inspection.SensitiveMasks == nil && !hasField(c.present.inspection, "sensitive_masks") {
 		c.Inspection.SensitiveMasks = sensitive.DefaultMasks()
 	}
@@ -1501,13 +1501,8 @@ func (c *Config) validatePresence() error {
 	if c.present.top == nil {
 		return nil
 	}
-	for _, item := range []struct {
-		m map[string]json.RawMessage
-		n string
-	}{{c.present.top, "config_version"}, {c.present.inspection, "read_roots"}} {
-		if _, ok := item.m[item.n]; !ok {
-			return fmt.Errorf("missing required field %s", item.n)
-		}
+	if !hasField(c.present.top, "config_version") {
+		return errors.New("missing required field config_version")
 	}
 	if c.Fleet != nil {
 		if !hasField(c.present.review, "gateway_profiles") || string(c.present.review["gateway_profiles"]) == "null" {

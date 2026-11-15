@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/sensitive"
@@ -20,6 +22,21 @@ import (
 // backward callers.
 var defaultSensitive = sensitive.Default()
 
+// systemSensitive is independent of the configurable default conventions, so
+// explicit overrides cannot release these secrets or consume extra mask slots.
+var systemSensitive = func() *sensitive.Matcher {
+	m, err := sensitive.New([]string{
+		"ssh_host_*_key", "*.keytab", ".gnupg", ".password-store",
+		// Common per-user token and session stores outside the default masks.
+		"auth.json", ".git-credentials", ".config/gh", ".mozilla",
+		".config/google-chrome", ".config/chromium", ".config/BraveSoftware",
+	})
+	if err != nil {
+		panic("inspection: invalid system secret masks: " + err.Error())
+	}
+	return m
+}()
+
 const maxMountInfoEntries = 4096
 
 var hardDenyPaths = []string{
@@ -30,6 +47,41 @@ var hardDenyPaths = []string{
 	"/proc",
 	"/sys",
 	"/dev",
+}
+
+// Additional mandatory exclusions are installed after validating configured
+// roots, so existing read_roots naming these locations remain loadable. They
+// still pass the same hard identity, symlink and mount gates on every request.
+var systemDenyPaths = []string{
+	"/etc/askdo-gateway",
+	"/var/lib/askdo-gateway",
+	"/etc/shadow",
+	"/etc/shadow-",
+	"/etc/gshadow",
+	"/etc/gshadow-",
+	"/etc/security/opasswd",
+	"/etc/ssl/private",
+	"/etc/pki/tls/private",
+	"/etc/wireguard",
+	"/etc/NetworkManager/system-connections",
+	"/var/lib/iwd",
+	"/etc/krb5.keytab",
+	"/etc/ppp/chap-secrets",
+	"/etc/ppp/pap-secrets",
+	// Runtime and systemd credential stores hold arbitrary secret file names.
+	"/run/secrets",
+	"/run/credentials",
+	"/etc/credstore",
+	"/etc/credstore.encrypted",
+	"/var/lib/systemd/credential.secret",
+	// Kubernetes node credentials: secret/projected pod volumes, cluster
+	// kubeconfigs and PKI, and k3s/RKE2 server tokens.
+	"/var/lib/kubelet/pods",
+	"/var/lib/kubelet/pki",
+	"/etc/kubernetes",
+	"/etc/rancher",
+	"/var/lib/rancher/k3s/server",
+	"/var/lib/rancher/rke2/server",
 }
 
 var openMountInfo = func() (io.ReadCloser, error) {
@@ -54,8 +106,9 @@ type Policy struct {
 	sensitive  *sensitive.Matcher
 }
 
-// NewPolicy validates cfg and its read roots, then anchors namespace-root
-// descriptor-relative lookups. The post-open gate verifies mount identity.
+// NewPolicy adds the implicit filesystem read root and validates cfg and its
+// additive roots, then anchors namespace-root descriptor-relative lookups.
+// The post-open gate verifies mount identity.
 // A read root that does not exist yet stays in scope as spelled; the same
 // per-request gate judges whatever later appears under it.
 func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, error) {
@@ -67,7 +120,12 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 	p := &Policy{
 		denies: append([]string{}, cfg.DenyPaths...),
 		hard:   append(append([]string{}, hardDenyPaths...), protectedPaths...),
-		allows: append([]string{}, cfg.ReadRoots...),
+		allows: []string{"/"},
+	}
+	for _, root := range cfg.ReadRoots {
+		if root != "/" {
+			p.allows = append(p.allows, root)
+		}
 	}
 	// The administrator-configured sensitive masks ride the validated config;
 	// a policy built from an InspectionConfig that never passed through
@@ -183,6 +241,22 @@ func NewPolicy(cfg config.InspectionConfig, protectedPaths ...string) (*Policy, 
 			}
 		}
 		unix.Close(fd)
+	}
+	// Keep the startup checks for pre-existing protected roots unchanged. New
+	// built-ins exclude inspection, not previously valid configurations.
+	for _, hard := range systemDenyPaths {
+		p.hard = append(p.hard, hard)
+		if resolved, err := filepath.EvalSymlinks(hard); err == nil && resolved != hard {
+			p.hard = append(p.hard, resolved)
+		}
+	}
+	// These paths are still denied by name; an identity that cannot be read
+	// here must not disable inspection as a whole.
+	for _, hard := range systemDenyPaths {
+		var st unix.Stat_t
+		if unix.Stat(hard, &st) == nil {
+			p.hardIDs[fileIdentity{dev: uint64(st.Dev), ino: st.Ino}] = struct{}{}
+		}
 	}
 	return p, nil
 }
@@ -300,6 +374,9 @@ func (p *Policy) ProtectedPath(path string) (protected, certain bool) {
 	if containedByAny(resolved, p.hard) {
 		return true, true
 	}
+	if _, ok := currentSystemAlias(resolved); ok {
+		return true, true
+	}
 	// A hardlink in an otherwise allowed path shares a protected key
 	// file's dev+ino identity with no lexical or symlink evidence. Stat
 	// the resolved name only (never open content, no further traversal)
@@ -318,11 +395,15 @@ func (p *Policy) ProtectedPath(path string) (protected, certain bool) {
 
 // MatchesSensitive reports whether path names a credential-like file or lies
 // beneath a credential-like directory under this policy's
-// administrator-configured sensitive masks. It is purely lexical and
-// case-sensitive; callers must evaluate both the requested spelling and the
-// symlink-resolved path so an alias cannot launder a sensitive target name.
+// always-on system masks plus administrator-configured sensitive masks.
+// It is purely lexical and case-sensitive; callers must evaluate both the
+// requested spelling and the symlink-resolved path so an alias cannot launder
+// a sensitive target name.
 // A policy built without a matcher falls back to the default conventions.
 func (p *Policy) MatchesSensitive(path string) bool {
+	if systemSensitive.Matches(path) {
+		return true
+	}
 	if p == nil || p.sensitive == nil {
 		return defaultSensitive.Matches(path)
 	}
@@ -375,9 +456,50 @@ func (p *Policy) selectRoot(requested string) (rootAnchor, string, bool) {
 // names the winning spelling); reason is the closed classification of a
 // rejection and is empty for an allowed path.
 type decision struct {
-	allowed bool
-	rule    string
-	reason  Reason
+	allowed  bool
+	explicit bool // winning allow is a configured root other than "/"
+	rule     string
+	reason   Reason
+}
+
+// currentSystemAlias reports a system-secret path whose symlink target now
+// contains path. Startup resolution cannot see a protected path that became a
+// link later, and "/" is always allowed, so resolve these at request time.
+// Resolutions are reused for a short interval so a large listing or search
+// does not re-walk every protected path for each entry.
+var currentSystemAlias = func(path string) (string, bool) {
+	for _, resolved := range systemAliases.current() {
+		if containsPath(resolved, path) {
+			return resolved, true
+		}
+	}
+	return "", false
+}
+
+const systemAliasRefresh = time.Second
+
+var systemAliases aliasCache
+
+type aliasCache struct {
+	mu       sync.Mutex
+	at       time.Time
+	resolved []string
+}
+
+func (c *aliasCache) current() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.resolved != nil && time.Since(c.at) < systemAliasRefresh {
+		return c.resolved
+	}
+	c.resolved = []string{}
+	for _, protected := range systemDenyPaths {
+		if resolved, err := filepath.EvalSymlinks(protected); err == nil && resolved != protected {
+			c.resolved = append(c.resolved, resolved)
+		}
+	}
+	c.at = time.Now()
+	return c.resolved
 }
 
 func (p *Policy) rule(path string) decision {
@@ -385,6 +507,9 @@ func (p *Policy) rule(path string) decision {
 		if containsPath(hard, path) {
 			return decision{rule: "protected exclusion " + hard, reason: ReasonProtectedPath}
 		}
+	}
+	if alias, ok := currentSystemAlias(path); ok {
+		return decision{rule: "protected exclusion " + alias, reason: ReasonProtectedPath}
 	}
 	best := decision{rule: "default deny", reason: ReasonOutsideScope}
 	specificity := -1
@@ -397,13 +522,13 @@ func (p *Policy) rule(path string) decision {
 	for _, allow := range p.allows {
 		if containsPath(allow, path) && len(allow) > specificity {
 			specificity = len(allow)
-			best = decision{allowed: true, rule: "read_roots " + allow}
+			best = decision{allowed: true, explicit: allow != "/", rule: "read_roots " + allow}
 		}
 	}
 	for _, alias := range p.canonical {
-		if containsPath(alias, path) && len(alias) > specificity {
+		if containsPath(alias, path) && (len(alias) > specificity || (len(alias) == specificity && best.allowed && !best.explicit)) {
 			specificity = len(alias)
-			best = decision{allowed: true, rule: "resolved read_roots " + alias}
+			best = decision{allowed: true, explicit: true, rule: "resolved read_roots " + alias}
 		}
 	}
 	return best

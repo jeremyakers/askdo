@@ -180,22 +180,30 @@ func (p *Policy) mountDetails(fd int, path string, a authorization) (MountDetail
 // ReadSearchFile bounds one whole-file text observation on one descriptor. It
 // rechecks identity and timestamps after reading and verifies the path again.
 func (p *Policy) ReadSearchFile(path string, limit int64) ([]byte, Status) {
+	data, status, _ := p.ReadSearchFileReason(path, limit)
+	return data, status
+}
+
+// ReadSearchFileReason preserves the authoritative policy reason for a denied
+// content read, independently of the metadata-only search-tree traversal.
+func (p *Policy) ReadSearchFileReason(path string, limit int64) ([]byte, Status, Reason) {
 	if limit < 1 || limit > 1<<20 {
-		return nil, StatusLimitExceeded
+		return nil, StatusLimitExceeded, ""
 	}
-	fd, a, err := p.authorizedOpen(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC)
+	fd, a, err := p.contentOpen(path)
 	if err != nil {
-		return nil, resultForError(err).Status
+		r := resultForError(err)
+		return nil, r.Status, r.Reason
 	}
 	defer unix.Close(fd)
 	if a.sensitive {
-		return nil, StatusWithheld
+		return nil, StatusWithheld, ""
 	}
 	if a.stat.Mode&unix.S_IFMT != unix.S_IFREG {
-		return nil, StatusInspectionDenied
+		return nil, StatusInspectionDenied, ""
 	}
 	if a.stat.Size > limit {
-		return nil, StatusLimitExceeded
+		return nil, StatusLimitExceeded, ""
 	}
 	if value, ok := rangeReadHooks.Load(p); ok {
 		if hook := value.(rangeHooks).beforeRead; hook != nil {
@@ -207,7 +215,7 @@ func (p *Policy) ReadSearchFile(path string, limit int64) ([]byte, Status) {
 	for n < len(buf) {
 		count, e := unix.Pread(fd, buf[n:], int64(n))
 		if e != nil {
-			return nil, StatusUnknown
+			return nil, StatusUnknown, ""
 		}
 		if count == 0 {
 			break
@@ -221,13 +229,13 @@ func (p *Policy) ReadSearchFile(path string, limit int64) ([]byte, Status) {
 	}
 	var after unix.Stat_t
 	if err := unix.Fstat(fd, &after); err != nil || rangeChanged(a.stat, after) || p.revalidate(path, a) != nil {
-		return nil, StatusChangedDuringCapture
+		return nil, StatusChangedDuringCapture, ""
 	}
 	if n > int(limit) {
-		return nil, StatusLimitExceeded
+		return nil, StatusLimitExceeded, ""
 	}
 	if int64(n) != a.stat.Size {
-		return nil, StatusChangedDuringCapture
+		return nil, StatusChangedDuringCapture, ""
 	}
-	return buf[:n], StatusOK
+	return buf[:n], StatusOK, ""
 }
