@@ -69,6 +69,32 @@ func TestSystemExecutorExitCodesAndSignals(t *testing.T) {
 	})
 }
 
+func TestSystemExecutorPreservesSubmittedArgv0AndPinsExecutable(t *testing.T) {
+	requested := filepath.Join(t.TempDir(), "multicall")
+	if err := os.Symlink("/bin/sh", requested); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveExecutableMetadata(requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := testOperation(t, `printf '%s' "$0"`)
+	op.Argv = []string{requested, "-c", op.Argv[2]}
+	op.Executable = resolved
+	// The approved executable remains pinned even if the submitted link is
+	// retargeted before the privileged launch.
+	if err := os.Remove(requested); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/false", requested); err != nil {
+		t.Fatal(err)
+	}
+	result, stdout, stderr := runSystem(t, op)
+	if result.Kind != store.ResultExit || result.ExitCode == nil || *result.ExitCode != 0 || stdout != requested || stderr != "" {
+		t.Fatalf("result=%+v stdout=%q stderr=%q", result, stdout, stderr)
+	}
+}
+
 func TestCWDDuplicateIsAtomicallyCloseOnExec(t *testing.T) {
 	op := testOperation(t, "pwd")
 	fd, err := duplicateCWD(op.CWDFd)
@@ -107,6 +133,8 @@ func TestSystemExecutorValidation(t *testing.T) {
 		{"no argv", func(op *Operation) { op.Argv = nil }},
 		{"relative executable", func(op *Operation) { op.Argv[0] = "bash" }},
 		{"unclean executable", func(op *Operation) { op.Argv[0] = "/bin/../bin/bash" }},
+		{"relative resolved executable", func(op *Operation) { op.Executable = "bash" }},
+		{"unclean resolved executable", func(op *Operation) { op.Executable = "/bin/../bin/bash" }},
 		{"relative cwd", func(op *Operation) { op.CWD = "tmp" }},
 		{"missing bound fd", func(op *Operation) { op.CWDFd = nil }},
 		{"empty env", func(op *Operation) { op.Env = nil }},
@@ -121,6 +149,12 @@ func TestSystemExecutorValidation(t *testing.T) {
 				t.Fatal("invalid operation launched")
 			}
 		})
+	}
+	op := testOperation(t, "exit 0")
+	op.Argv[0] = "multicall-name"
+	op.Executable = "/bin/bash"
+	if err := validateOperation(op); err != nil {
+		t.Fatalf("opaque argv[0] rejected with a valid executable: %v", err)
 	}
 }
 

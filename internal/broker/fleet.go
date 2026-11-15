@@ -381,8 +381,9 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 		}
 	}
 	operation := strings.Join(quoted, " ")
+	reviewOperation := j.bootstrap().Operation
 	var capturedStdinBytes int64
-	if captured := j.bootstrap().Operation.CapturedStdin; captured != nil {
+	if captured := reviewOperation.CapturedStdin; captured != nil {
 		capturedStdinBytes = captured.Size
 	}
 	refs, count := j.withheldFacts(index)
@@ -406,7 +407,7 @@ func (j *jobRuntime) freezeFleet(report *proto.ReviewReport, history []proto.Mod
 			targetName = ""
 		}
 	}
-	display := fleetproto.Display{Operation: operation, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: targetName, TargetLogin: targetLogin}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
+	display := fleetproto.Display{Operation: operation, Executable: reviewOperation.Executable, Reason: j.req.Reason, CWD: j.req.CWD, CapturedStdinBytes: capturedStdinBytes, Identity: fleetproto.Identity{Hostname: j.executionHost, Username: j.submitterName, SubmitterUID: j.uid, TargetUID: j.target.UID, TargetUser: targetName, TargetLogin: targetLogin}, Report: report, UnreviewedReason: reason, AvailabilityHistory: failures, ModelHistory: proto.NonNilSlice(history), Withholding: withholding}
 	display.CapturedStdinKind = j.capturedKind()
 	profilesHash, err := fleetproto.HashProfiles(f.selection.Profiles)
 	if err != nil {

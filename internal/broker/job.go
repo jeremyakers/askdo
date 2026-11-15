@@ -50,6 +50,7 @@ type jobRuntime struct {
 	executionContainer string
 	cwd                *cwdBinding
 	resolvedArgv       []string
+	resolvedExecutable string
 	target             ExecutionTarget                 // resolved at admission; zero value is root
 	foreground         *foregroundPeer                 // immutable after queue submission
 	handoffReady       chan proto.ForegroundReadyEvent // original submit follower only
@@ -1615,7 +1616,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	if len(j.resolvedArgv) != 0 {
 		argv = j.resolvedArgv
 	}
-	operation := proto.WorkerOperation{Mode: j.req.Mode, Argv: append([]string{}, argv...), Entry: j.req.Entry, Args: append([]string{}, j.req.Args...), CWD: j.req.CWD, Reason: j.req.Reason}
+	operation := proto.WorkerOperation{Mode: j.req.Mode, Argv: append([]string{}, argv...), Executable: executableEvidence(argv, j.resolvedExecutable), Entry: j.req.Entry, Args: append([]string{}, j.req.Args...), CWD: j.req.CWD, Reason: j.req.Reason}
 	if j.req.CapturedStdinBase64 != "" {
 		data, _ := base64.StdEncoding.DecodeString(j.req.CapturedStdinBase64)
 		digest := sha256.Sum256(data)
@@ -1691,7 +1692,7 @@ func (j *jobRuntime) operation() Operation {
 	}
 	target := j.target
 	target.Groups = j.target.groups()
-	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd, Target: target}
+	return Operation{Mode: j.req.Mode, Argv: argv, Executable: j.resolvedExecutable, Env: env, CWD: cwd, Target: target}
 }
 
 func decodeStoredResult(job store.Job) store.Result {

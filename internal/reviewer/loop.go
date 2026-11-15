@@ -91,6 +91,7 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 		Mode             string               `json:"mode"`
 		CapturedStdin    *proto.CapturedInput `json:"captured_stdin,omitempty"`
 		Argv             []string             `json:"argv,omitempty"`
+		Executable       string               `json:"executable,omitempty"`
 		Entry            string               `json:"entry,omitempty"`
 		Args             []string             `json:"args,omitempty"`
 		CWD              string               `json:"cwd"`
@@ -105,12 +106,16 @@ func (l *Loop) Run(ctx context.Context) (proto.ReviewComplete, error) {
 		Host             string               `json:"host"`
 		Container        string               `json:"container,omitempty"`
 		Environment      map[string]string    `json:"environment"`
-	}{Mode: l.Bootstrap.Operation.Mode, CapturedStdin: l.Bootstrap.Operation.CapturedStdin, Argv: l.Bootstrap.Operation.Argv, Entry: l.Bootstrap.Operation.Entry, Args: l.Bootstrap.Operation.Args, CWD: l.Bootstrap.Operation.CWD, Reason: l.Bootstrap.Operation.Reason, TargetUID: l.Bootstrap.TargetUID, TargetUser: l.Bootstrap.TargetName, TargetGID: l.Bootstrap.TargetGID, TargetGroups: l.Bootstrap.TargetGroups, TargetGroupNames: l.Bootstrap.TargetGroupNames, SubmitterUID: l.Bootstrap.SubmitterUID, SubmitterName: l.Bootstrap.SubmitterName, Host: l.Bootstrap.Host, Container: l.Bootstrap.Container, Environment: environment}
+	}{Mode: l.Bootstrap.Operation.Mode, CapturedStdin: l.Bootstrap.Operation.CapturedStdin, Argv: l.Bootstrap.Operation.Argv, Executable: l.Bootstrap.Operation.Executable, Entry: l.Bootstrap.Operation.Entry, Args: l.Bootstrap.Operation.Args, CWD: l.Bootstrap.Operation.CWD, Reason: l.Bootstrap.Operation.Reason, TargetUID: l.Bootstrap.TargetUID, TargetUser: l.Bootstrap.TargetName, TargetGID: l.Bootstrap.TargetGID, TargetGroups: l.Bootstrap.TargetGroups, TargetGroupNames: l.Bootstrap.TargetGroupNames, SubmitterUID: l.Bootstrap.SubmitterUID, SubmitterName: l.Bootstrap.SubmitterName, Host: l.Bootstrap.Host, Container: l.Bootstrap.Container, Environment: environment}
 	operation, err := json.Marshal(modelOperation)
 	if err != nil {
 		return proto.ReviewComplete{}, err
 	}
-	messages := []Message{{Role: "system", Content: SystemInstructions(l.Bootstrap.RiskPolicy, l.Bootstrap.AccountNotes...)}, {Role: "user", Content: "Review this proposed command; use the path tools as you see fit, then finish with submit_review:\n" + string(operation)}}
+	reviewPrompt := "Review this proposed command; use the path tools as you see fit, then finish with submit_review:\n" + string(operation)
+	if executable := l.Bootstrap.Operation.Executable; executable != "" && len(l.Bootstrap.Operation.Argv) > 0 && executable != l.Bootstrap.Operation.Argv[0] {
+		reviewPrompt += fmt.Sprintf("\nargv[0] %q resolves to %q", l.Bootstrap.Operation.Argv[0], executable)
+	}
+	messages := []Message{{Role: "system", Content: SystemInstructions(l.Bootstrap.RiskPolicy, l.Bootstrap.AccountNotes...)}, {Role: "user", Content: reviewPrompt}}
 	choice := l.Choice
 	if choice.Name == "" {
 		choice = l.Bootstrap.ConfigProjection.Models[0]

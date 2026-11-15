@@ -2,6 +2,7 @@ package broker
 
 import (
 	"encoding/base64"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,58 @@ import (
 	"github.com/jeremyakers/askdo/internal/store"
 	"github.com/jeremyakers/askdo/internal/telegram"
 )
+
+func TestFreezeFleetBindsOriginalResolvedExecutable(t *testing.T) {
+	j, _ := rootFleetReceiptFixture()
+	db, err := store.Open(filepath.Join(t.TempDir(), "jobs.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	j.daemon.store = db
+	j.fleet.ticket = fleetproto.Ticket{}
+	j.route.ApprovalTTL = config.Duration(time.Minute)
+	j.executionHost, j.submitterName = "fixture", "requester"
+	j.req.Mode, j.req.CWD = "argv", "/work"
+	alias := filepath.Join(t.TempDir(), "multicall")
+	if err := os.Symlink("/bin/sh", alias); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.req.Argv = []string{alias}
+	j.resolvedArgv = []string{alias}
+	j.resolvedExecutable = resolved
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/false", alias); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := j.freezeFleet(nil, nil, "administrator skipped review", nil, nil, captureIndex{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	display := j.fleet.ticket.Display
+	if display.Operation != alias || display.Executable != resolved {
+		t.Fatalf("fleet display lost pinned executable: %+v", display)
+	}
+	rendered, err := telegram.RenderFleet(j.fleet.ticket)
+	if err != nil || !strings.Contains(rendered.Final, "<b>Resolves to:</b> <code>"+resolved+"</code>") {
+		t.Fatalf("fleet card lost resolution: %+v err=%v", rendered, err)
+	}
+	originalHash := manifest.DisplayHash
+	display.Executable = "/usr/bin/false"
+	changedHash, err := fleetproto.HashDisplay(display)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedHash == originalHash {
+		t.Fatal("fleet display hash does not bind the resolved executable")
+	}
+}
 
 func TestFreezeFleetProjectsSubmitterFacts(t *testing.T) {
 	for _, mode := range []string{"argv", "bundle", "captured"} {

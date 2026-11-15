@@ -152,6 +152,9 @@ type Identity struct {
 type Display struct {
 	CapturedStdinKind proto.DeliveryKind `json:"captured_stdin_kind,omitempty"`
 	Operation         string             `json:"operation"`
+	// Executable binds a distinct submission-time resolved binary. Its absence
+	// preserves legacy display hashes and means the submitted argv[0] is executed.
+	Executable string `json:"executable,omitempty"`
 	// Optional facts preserve the hashes of legacy displays when absent. Reason
 	// is submitter-stated purpose; UnreviewedReason is why AI review was absent.
 	Reason              string                `json:"reason,omitempty"`

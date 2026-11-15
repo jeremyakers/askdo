@@ -103,7 +103,12 @@ func launch(spec LaunchSpec, cwdFD, terminal *os.File, control *Control, jobCont
 	}
 	dir := os.NewFile(uintptr(dup), "held cwd")
 	defer dir.Close()
-	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
+	executable := spec.Executable
+	if executable == "" {
+		executable = spec.Argv[0]
+	}
+	cmd := exec.Command(executable, spec.Argv[1:]...)
+	cmd.Args[0] = spec.Argv[0]
 	cmd.Dir = "/proc/self/fd/" + strconv.Itoa(dup)
 	cmd.Env = append([]string{}, spec.Env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = terminal, terminal, terminal

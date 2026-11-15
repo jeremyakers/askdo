@@ -92,6 +92,21 @@ func TestModelReceivesCommandWithoutInternalCaptureMetadata(t *testing.T) {
 	}
 }
 
+func TestModelReceivesResolvedExecutable(t *testing.T) {
+	b := bootstrap(1, time.Now().Add(time.Minute))
+	b.Operation = proto.WorkerOperation{Mode: "argv", Argv: []string{"sh"}, Executable: "/usr/bin/dash", CWD: "/home/agent", Reason: "test multicall resolution"}
+	m := &fakemodel.Model{Steps: []fakemodel.Step{{Response: reviewer.ModelResponse{ToolCalls: []reviewer.ToolCall{call("report", "submit_review", reviewerTestReport("unknown"))}}}}}
+	if _, err := (&reviewer.Loop{Model: m, Tools: reviewer.NewToolExecutor(b, entryBroker{}), Bootstrap: b}).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	visible := m.Requests[0].Messages[1].Content
+	for _, want := range []string{`"argv":["sh"]`, `"executable":"/usr/bin/dash"`, `argv[0] "sh" resolves to "/usr/bin/dash"`} {
+		if !strings.Contains(visible, want) {
+			t.Fatalf("model review lacks %q: %s", want, visible)
+		}
+	}
+}
+
 func TestModelReceivesTargetCredential(t *testing.T) {
 	b := bootstrap(1, time.Now().Add(time.Minute))
 	// Inject the bootstrap wire fields so this regression also compiles on the

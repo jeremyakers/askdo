@@ -106,10 +106,13 @@ func strictObject(raw []byte, dest *map[string]json.RawMessage) error {
 }
 
 type LaunchSpec struct {
-	Argv      []string `json:"argv"`
-	Env       []string `json:"env"`
-	CWD       string   `json:"cwd"`
-	TargetUID uint32   `json:"target_uid"`
+	Argv []string `json:"argv"`
+	// Executable is the reviewed, resolved file. Older peers omit it and execute
+	// Argv[0], preserving the previous launch behavior.
+	Executable string   `json:"executable,omitempty"`
+	Env        []string `json:"env"`
+	CWD        string   `json:"cwd"`
+	TargetUID  uint32   `json:"target_uid"`
 	// TargetGID and TargetGroups complete a non-root target identity (sudo
 	// -u): the helper drops to them before exec. Both are absent for root.
 	TargetGID     uint32   `json:"target_gid,omitempty"`
@@ -123,7 +126,7 @@ type LaunchSpec struct {
 // launch spec; anything else is rejected before the typed decode.
 var (
 	launchRequiredFields = []string{"argv", "env", "cwd", "target_uid", "foreground", "job_id"}
-	launchOptionalFields = map[string]bool{"cancel_control": true, "target_gid": true, "target_groups": true}
+	launchOptionalFields = map[string]bool{"cancel_control": true, "executable": true, "target_gid": true, "target_groups": true}
 )
 
 // maxTargetGroups mirrors the kernel's NGROUPS_MAX.
@@ -251,7 +254,11 @@ func ValidateLaunch(s LaunchSpec, fd *os.File) error {
 	if (s.TargetUID == 0 && (s.TargetGID != 0 || len(s.TargetGroups) != 0)) || len(s.TargetGroups) > maxTargetGroups {
 		return errors.New("invalid launch target")
 	}
-	if !strings.HasPrefix(s.Argv[0], "/") || strings.Contains(s.Argv[0], "/../") || strings.Contains(s.Argv[0], "/./") || strings.HasSuffix(s.Argv[0], "/..") || strings.HasSuffix(s.Argv[0], "/.") {
+	executable := s.Executable
+	if executable == "" {
+		executable = s.Argv[0]
+	}
+	if !strings.HasPrefix(executable, "/") || strings.Contains(executable, "/../") || strings.Contains(executable, "/./") || strings.HasSuffix(executable, "/..") || strings.HasSuffix(executable, "/.") {
 		return errors.New("invalid executable path")
 	}
 	for _, arg := range s.Argv {

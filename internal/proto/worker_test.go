@@ -195,6 +195,30 @@ func TestApprovalOnlyBootstrapPolicyAndPreflightValidation(t *testing.T) {
 	}
 }
 
+func TestBootstrapResolvedExecutableCompatibility(t *testing.T) {
+	b := Bootstrap{Type: "bootstrap", Host: "host", RequestID: "0123456789abcdef0123456789abcdef", Operation: WorkerOperation{Mode: "argv", Argv: []string{"sh"}, CWD: "/"}, ReviewDeadlineUnixMS: 1, ApprovalOnly: true, ConfigProjection: ConfigProjection{Models: []ProjectedModel{}, Limits: WorkerLimits{MaxModelCallsPerAttempt: 1, MaxOutputTokens: 1}, Telegram: WorkerTelegram{TokenFile: "/key", ApprovalTTLMS: 1}}}
+	legacy, _ := json.Marshal(b)
+	if strings.Contains(string(legacy), `"executable"`) {
+		t.Fatalf("empty resolution changed legacy bootstrap: %s", legacy)
+	}
+	if _, err := DecodeWorkerMessage(legacy, BrokerToWorker); err != nil {
+		t.Fatalf("legacy bootstrap rejected: %v", err)
+	}
+	b.Operation.Executable = "/usr/bin/dash"
+	if err := ValidateWorkerMessage(b, BrokerToWorker); err != nil {
+		t.Fatalf("resolved executable rejected: %v", err)
+	}
+	resolved, _ := json.Marshal(b)
+	decoded, err := DecodeWorkerMessage(resolved, BrokerToWorker)
+	if err != nil || decoded.(*Bootstrap).Operation.Executable != "/usr/bin/dash" {
+		t.Fatalf("resolved bootstrap round trip=%+v err=%v", decoded, err)
+	}
+	b.Operation.Executable = "dash"
+	if err := ValidateWorkerMessage(b, BrokerToWorker); err == nil {
+		t.Fatal("relative resolved executable accepted")
+	}
+}
+
 func TestBootstrapExecutionEnvironmentAllowsOnlyActualNonSecretVariables(t *testing.T) {
 	b := Bootstrap{
 		Type: "bootstrap", Host: "host", RequestID: "0123456789abcdef0123456789abcdef",

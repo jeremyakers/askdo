@@ -145,6 +145,9 @@ func display(d Display) error {
 	if !d.CapturedStdinKind.Valid() || (d.CapturedStdinKind != "" && d.CapturedStdinBytes == 0) {
 		return ErrProtocol
 	}
+	if d.Executable != "" && (!text(d.Executable, 4096, false) || !path.IsAbs(d.Executable) || path.Clean(d.Executable) != d.Executable) {
+		return ErrProtocol
+	}
 	// Reason was previously bounded inside the 16 KiB operation projection.
 	// CWD follows SubmitRequest's clean absolute, NUL-free UTF-8 path contract;
 	// nonprinting path characters remain data and are quoted by the renderer.

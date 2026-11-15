@@ -62,6 +62,30 @@ func TestSignedRoundTripAndExactBytes(t *testing.T) {
 	}
 }
 
+func TestDisplayHashBindsResolvedExecutableAndAcceptsLegacyAbsence(t *testing.T) {
+	ticket, _, _ := fixture(t)
+	legacyHash, err := HashDisplay(ticket.Display)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket.Display.Executable = "/usr/bin/xtables-nft-multi"
+	resolvedHash, err := HashDisplay(ticket.Display)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedHash == legacyHash {
+		t.Fatal("resolved executable did not change the fleet display hash")
+	}
+	ticket.Binding.DisplayHash = resolvedHash
+	if err := Validate(ticket); err != nil {
+		t.Fatalf("resolved display rejected: %v", err)
+	}
+	ticket.Display.Executable = "xtables-nft-multi"
+	if _, err := HashDisplay(ticket.Display); err == nil {
+		t.Fatal("relative resolved executable accepted")
+	}
+}
+
 func TestZeroSummaryTicketAndReceipt(t *testing.T) {
 	// Given: a frozen zero-part ticket and a separate positive card receipt.
 	ticket, receipt, _ := fixture(t)

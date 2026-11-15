@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,57 @@ func TestLaunchAttachedPTY(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), fmt.Sprintf("ok%d", os.Getuid())) || !strings.Contains(string(out), "PASS") {
 		t.Fatalf("PTY test: %v, output: %s", err, out)
+	}
+}
+
+func TestLaunchPreservesSubmittedArgv0AndPinsExecutable(t *testing.T) {
+	if os.Getenv("ASKDO_FOREGROUND_TEST_HELPER") == "1" {
+		terminal, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer terminal.Close()
+		cwdPath, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cwd, err := os.Open(cwdPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cwd.Close()
+		requested := filepath.Join(t.TempDir(), "multicall")
+		if err := os.Symlink("/bin/sh", requested); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := filepath.EvalSymlinks(requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := LaunchSpec{
+			Argv:       []string{requested, "-c", `[ "$0" = "$EXPECTED_ARGV0" ] || exit 42; printf ARGV0_OK`},
+			Executable: resolved,
+			Env:        []string{"PATH=/usr/bin:/bin", "EXPECTED_ARGV0=" + requested},
+			CWD:        cwdPath,
+			JobID:      "argv0",
+			Foreground: true,
+		}
+		if err := os.Remove(requested); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/bin/false", requested); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Launch(spec, cwd, terminal)
+		if err != nil || result.Type != "exit" || result.ExitCode != 0 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+		return
+	}
+	cmd := exec.Command("/usr/bin/script", "-q", "-e", "-c", os.Args[0]+" -test.run=^TestLaunchPreservesSubmittedArgv0AndPinsExecutable$ -test.v", "/dev/null")
+	cmd.Env = append(os.Environ(), "ASKDO_FOREGROUND_TEST_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "ARGV0_OK") || !strings.Contains(string(out), "PASS") {
+		t.Fatalf("PTY argv[0] test: %v, output: %s", err, out)
 	}
 }

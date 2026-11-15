@@ -66,6 +66,8 @@ type CardInput struct {
 	// by reviewer code from literal argv (display only; execution uses the
 	// unquoted argv). It is never model output.
 	Operation string
+	// Executable is the broker-resolved binary when resolution changed argv[0].
+	Executable string
 	// Reason is the requesting agent's stated purpose (not independently
 	// verified operator intent).
 	Reason string
@@ -99,13 +101,13 @@ type DetailsInput struct {
 // ApprovalOnlyInput contains operation facts and typed availability statuses,
 // never a review report, model history text, or model identity.
 type ApprovalOnlyInput struct {
-	CapturedStdinKind                                                         proto.DeliveryKind
-	CapturedStdinBytes                                                        int64
-	Host, Container, JobID, Operation, Reason, SubmitterName, TargetName, CWD string
-	TargetUID, SubmitterUID                                                   uint32
-	Expiry                                                                    time.Time
-	Failures                                                                  []proto.AvailabilityFailure
-	WithheldCount                                                             int
+	CapturedStdinKind                                                                     proto.DeliveryKind
+	CapturedStdinBytes                                                                    int64
+	Host, Container, JobID, Operation, Executable, Reason, SubmitterName, TargetName, CWD string
+	TargetUID, SubmitterUID                                                               uint32
+	Expiry                                                                                time.Time
+	Failures                                                                              []proto.AvailabilityFailure
+	WithheldCount                                                                         int
 }
 
 // targetLabel names the execution identity: a resolved account name as
@@ -242,7 +244,7 @@ func RenderApprovalOnlyCard(in ApprovalOnlyInput, nonce string) (string, InlineK
 	if len(in.Failures) > 0 {
 		reason = "providers unavailable"
 	}
-	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, TargetName: in.TargetName, Expiry: in.Expiry, Operation: in.Operation, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
+	facts := CardInput{Host: in.Host, Container: in.Container, JobID: in.JobID, SubmitterName: in.SubmitterName, SubmitterUID: in.SubmitterUID, TargetUID: in.TargetUID, TargetName: in.TargetName, Expiry: in.Expiry, Operation: in.Operation, Executable: in.Executable, Reason: in.Reason, CapturedStdinBytes: in.CapturedStdinBytes, CapturedStdinKind: in.CapturedStdinKind, WithheldCount: in.WithheldCount}
 	return "⚠️ <b>NO AI REVIEW</b> — " + reason + ". Risks NOT assessed.\n" + compactIdentity(facts, expiryText(in.Expiry)) + compactOperation(facts, "Details"), kb, nil
 }
 
@@ -430,6 +432,9 @@ func compactWarnings(report proto.ReviewReport, rest string) string {
 func compactOperation(in CardInput, rest string) string {
 	command := compactEsc(in.Operation, 420)
 	text := "\n<b>Runs:</b> <code>" + command + "</code>"
+	if in.Executable != "" {
+		text += "\n<b>Resolves to:</b> <code>" + compactEsc(in.Executable, 420) + "</code>"
+	}
 	if strings.HasSuffix(command, "…") && rest != "Details" {
 		// Auto notices have no Details, so say where the full command is.
 		text += " (full command: " + rest + ")"
