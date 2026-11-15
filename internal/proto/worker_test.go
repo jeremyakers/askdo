@@ -201,7 +201,7 @@ func TestBootstrapExecutionEnvironmentAllowsOnlyActualNonSecretVariables(t *test
 		Operation:            WorkerOperation{Mode: "argv", Argv: []string{"/bin/true"}, CWD: "/work"},
 		ReviewDeadlineUnixMS: 1, ApprovalOnly: true,
 		ConfigProjection:     ConfigProjection{Models: []ProjectedModel{}, Limits: WorkerLimits{MaxModelCallsPerAttempt: 1, MaxOutputTokens: 1}, Telegram: WorkerTelegram{TokenFile: "/key", ApprovalTTLMS: 1}},
-		ExecutionEnvironment: []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PWD=/work"},
+		ExecutionEnvironment: []string{"PATH=" + OperationPath, "HOME=/root", "LANG=C.UTF-8", "PWD=/work"},
 	}
 	if err := ValidateWorkerMessage(b, BrokerToWorker); err != nil {
 		t.Fatalf("safe execution environment rejected: %v", err)
@@ -210,10 +210,10 @@ func TestBootstrapExecutionEnvironmentAllowsOnlyActualNonSecretVariables(t *test
 		name string
 		env  []string
 	}{
-		{"private bundle path", []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "ASKDO_BUNDLE=/private/spool"}},
-		{"wrong cwd", []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PWD=/other"}},
-		{"duplicate", []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "PATH=/usr/bin:/bin"}},
-		{"incomplete", []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8"}},
+		{"private bundle path", []string{"PATH=" + OperationPath, "HOME=/root", "LANG=C.UTF-8", "ASKDO_BUNDLE=/private/spool"}},
+		{"wrong cwd", []string{"PATH=" + OperationPath, "HOME=/root", "LANG=C.UTF-8", "PWD=/other"}},
+		{"duplicate", []string{"PATH=" + OperationPath, "HOME=/root", "LANG=C.UTF-8", "PATH=" + OperationPath}},
+		{"incomplete", []string{"PATH=" + OperationPath, "HOME=/root", "LANG=C.UTF-8"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b.ExecutionEnvironment = tc.env

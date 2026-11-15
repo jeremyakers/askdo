@@ -1674,7 +1674,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 func (j *jobRuntime) operation() Operation {
 	argv := append([]string(nil), j.req.Argv...)
 	cwd := j.req.CWD
-	env := []string{"PATH=/usr/bin:/bin", "HOME=" + j.target.home(), "LANG=C.UTF-8", "PWD=" + cwd}
+	env := []string{"PATH=" + proto.OperationPath, "HOME=" + j.target.home(), "LANG=C.UTF-8", "PWD=" + cwd}
 	if !j.target.root() || j.req.LoginShell {
 		env = append(env, "USER="+j.target.Name, "LOGNAME="+j.target.Name)
 	}

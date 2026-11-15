@@ -86,7 +86,7 @@ func TestModelImmediateReviewNoHostReadsRequiresHumanApproval(t *testing.T) {
 	if err := json.Unmarshal([]byte(visible[start:]), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.TargetUID == nil || *view.TargetUID != 0 || view.SubmitterUID == nil || *view.SubmitterUID != testUID || view.Environment["PATH"] != "/usr/bin:/bin" || view.Environment["HOME"] != "/root" || view.Environment["PWD"] != executor.Snapshot()[0].Operation.CWD || strings.Contains(visible, h.daemon.spoolRoot) {
+	if view.TargetUID == nil || *view.TargetUID != 0 || view.SubmitterUID == nil || *view.SubmitterUID != testUID || view.Environment["PATH"] != proto.OperationPath || view.Environment["HOME"] != "/root" || view.Environment["PWD"] != executor.Snapshot()[0].Operation.CWD || strings.Contains(visible, h.daemon.spoolRoot) {
 		t.Fatalf("model request differs from executed identity/environment or leaks spool: %+v", view)
 	}
 }
@@ -196,7 +196,7 @@ func TestBootstrapProjectsExecutionIdentityWithoutPrivateBundlePath(t *testing.T
 				}
 				env[key] = value
 			}
-			for key, want := range map[string]string{"PATH": "/usr/bin:/bin", "HOME": "/root", "LANG": "C.UTF-8", "PWD": boot.Operation.CWD} {
+			for key, want := range map[string]string{"PATH": proto.OperationPath, "HOME": "/root", "LANG": "C.UTF-8", "PWD": boot.Operation.CWD} {
 				if env[key] != want {
 					t.Fatalf("projected %s=%q, want %q", key, env[key], want)
 				}

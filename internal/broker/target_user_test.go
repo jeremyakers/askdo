@@ -108,7 +108,7 @@ func TestTargetUserBoundIntoManifestBootstrapAndReviewLog(t *testing.T) {
 		t.Fatalf("operation target=%+v", op.Target)
 	}
 	env := strings.Join(op.Env, "\n")
-	for _, want := range []string{"HOME=" + account.HomeDir, "USER=" + account.Username, "LOGNAME=" + account.Username, "PATH=/usr/bin:/bin", "PWD=" + asTarget.req.CWD} {
+	for _, want := range []string{"HOME=" + account.HomeDir, "USER=" + account.Username, "LOGNAME=" + account.Username, "PATH=" + proto.OperationPath, "PWD=" + asTarget.req.CWD} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("environment lacks %q: %v", want, op.Env)
 		}

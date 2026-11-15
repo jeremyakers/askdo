@@ -141,7 +141,8 @@ no gateway upgrade is required for these fields.
 | `reason` | string (no per-field bound; the frame ceiling applies) |
 
 The bootstrap also carries `execution_environment`: exactly the non-secret
-`PATH=/usr/bin:/bin`, `HOME=/root`, `LANG=C.UTF-8`, and `PWD=<operation.cwd>`
+`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin`
+(sudo's default secure_path), `HOME=/root`, `LANG=C.UTF-8`, and `PWD=<operation.cwd>`
 entries for reviewed jobs. For a non-root `target_uid`, `HOME` is instead the
 target account's home directory and, when `target_name` is present, exactly
 `USER=<target_name>` and `LOGNAME=<target_name>` are added; any other value or

@@ -421,7 +421,8 @@ One pass through the pipeline per job (`internal/broker/job.go`):
     that grant to commit `starting`. Neither path retries an ambiguous start.
      Detached `SystemExecutor` then launches the frozen operation with a
      verbatim argv (no shell), an explicit minimal environment
-   (`PATH=/usr/bin:/bin`, `HOME=/root`, `LANG=C.UTF-8`, plus
+   (`PATH` matching sudo's default secure_path,
+   `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin`, `HOME=/root`, `LANG=C.UTF-8`, plus
      `ASKDO_BUNDLE` in bundle mode), the caller-submitted cwd bound by
       directory identity at submission, stdin from `/dev/null` for ordinary
       requests or the sealed captured input for v5, and no inherited environment

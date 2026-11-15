@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -194,7 +195,7 @@ func TestBundleOperationShape(t *testing.T) {
 		t.Fatalf("cwd=%q", op.CWD)
 	}
 	joined := strings.Join(op.Env, "\n")
-	for _, want := range []string{"PATH=/usr/bin:/bin", "HOME=/root", "LANG=C.UTF-8", "ASKDO_BUNDLE=/spool/job/bundle"} {
+	for _, want := range []string{"PATH=" + proto.OperationPath, "HOME=/root", "LANG=C.UTF-8", "ASKDO_BUNDLE=/spool/job/bundle"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("env missing %q: %v", want, op.Env)
 		}
@@ -226,7 +227,7 @@ func TestArgvOperationShape(t *testing.T) {
 	if strings.Join(op.Argv, " ") != "/usr/bin/id -u" {
 		t.Fatalf("argv=%v", op.Argv)
 	}
-	wantEnv := "PATH=/usr/bin:/bin\nHOME=/root\nLANG=C.UTF-8\nPWD=" + cwd
+	wantEnv := "PATH=" + proto.OperationPath + "\nHOME=/root\nLANG=C.UTF-8\nPWD=" + cwd
 	if strings.Join(op.Env, "\n") != wantEnv {
 		t.Fatalf("detached environment changed: %v", op.Env)
 	}
@@ -307,5 +308,24 @@ func TestRelativeOperationsUseInvocationDirectoryNotSpool(t *testing.T) {
 				t.Fatalf("spool marker touched: %v", err)
 			}
 		})
+	}
+}
+
+// Administrative tools such as ufw run helpers like sysctl by bare name; the
+// operation PATH must find sbin tools the way sudo's secure_path does.
+func TestOperationPathFindsSbinHelpers(t *testing.T) {
+	j := &jobRuntime{req: proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/true"}, CWD: "/", Lifecycle: proto.LifecycleDetached}, spool: spoolFiles{dir: "/spool/job"}}
+	op := j.operation()
+	var path string
+	for _, entry := range op.Env {
+		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
+			path = value
+		}
+	}
+	dirs := strings.Split(path, ":")
+	for _, want := range []string{"/usr/sbin", "/sbin", "/usr/local/sbin", "/usr/bin", "/bin"} {
+		if !slices.Contains(dirs, want) {
+			t.Fatalf("operation PATH %q lacks %s", path, want)
+		}
 	}
 }
