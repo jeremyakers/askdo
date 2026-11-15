@@ -25,14 +25,7 @@ func TestDirectHostImplicitFilesystemRoot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			roots := tc.roots
-			root, err := os.MkdirTemp("", "inspection-visibility-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(root) })
-			if err := os.Chmod(root, 0755); err != nil {
-				t.Fatal(err)
-			}
+			root := publicTempRoot(t, "inspection-visibility-")
 			file := filepath.Join(root, "maintenance.sh")
 			content := "#!/bin/sh\necho fixture\n"
 			if err := os.WriteFile(file, []byte(content), 0755); err != nil {

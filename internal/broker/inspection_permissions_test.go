@@ -16,14 +16,7 @@ import (
 func TestImplicitRootContentPermissions(t *testing.T) {
 	// Unlike t.TempDir's private parent, this fixture models a publicly
 	// traversable tree. Respect the test runner's temporary-directory setting.
-	root, err := os.MkdirTemp("", "inspection-permissions-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	if err := os.Chmod(root, 0755); err != nil {
-		t.Fatal(err)
-	}
+	root := publicTempRoot(t, "inspection-permissions-")
 	for _, dir := range []string{"public", "private"} {
 		mode := os.FileMode(0755)
 		if dir == "private" {
@@ -112,5 +105,32 @@ func TestImplicitRootContentPermissions(t *testing.T) {
 	var search proto.SearchPathResult
 	if r.Status != "ok" || json.Unmarshal(r.Payload, &search) != nil || len(search.Matches) != 1 || search.Matches[0].Path != filepath.Join(root, "public/public-file") || search.SkippedMasked != 2 {
 		t.Fatalf("tree search private contents: %+v %+v", r, search)
+	}
+}
+
+// publicTempRoot creates a world-traversable fixture root under the runner's
+// temporary directory. The implicit-root content rule requires every ancestor
+// to be world-searchable, so a private TMPDIR cannot model a public tree.
+func publicTempRoot(t *testing.T, pattern string) string {
+	t.Helper()
+	root, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for dir := filepath.Dir(root); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0001 == 0 {
+			t.Skipf("temporary directory ancestor %s is not world-searchable; set TMPDIR to a world-searchable directory to run this test", dir)
+		}
+		if dir == "/" {
+			return root
+		}
 	}
 }
