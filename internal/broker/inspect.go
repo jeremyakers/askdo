@@ -24,6 +24,8 @@ func (j *jobRuntime) dispatchInspect(ctx context.Context, request proto.InspectR
 		return j.serviceStatus(ctx, request, value)
 	case proto.SudoPolicyRequest:
 		return j.sudoPolicy(ctx, request, value)
+	case proto.FleetHostsRequest:
+		return j.fleetHosts(ctx, request)
 	case proto.ReadPathRequest:
 		return j.readPath(request.RequestSeq, value)
 	case proto.ListPathRequest:

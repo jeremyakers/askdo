@@ -90,7 +90,9 @@ type daemonOptions struct {
 }
 
 type daemon struct {
-	operatorStatus func(context.Context, string) (string, error)
+	operatorStatus      func(context.Context, string) (string, error)
+	fleetHostsAvailable func() bool
+
 	reviewLogPath  string
 	cfg            *config.Config
 	bootID         string
@@ -173,18 +175,21 @@ func (a *connectionAdmission) release() { a.once.Do(func() { close(a.successor) 
 
 // Run loads configuration and serves the broker until ctx is cancelled.
 func Run(ctx context.Context, configPath string) error {
-	return RunWithStatus(ctx, configPath, nil)
+	return RunWithStatus(ctx, configPath, nil, nil)
 }
 
 // RunWithStatus serves fixed non-secret gateway projections supplied by the CLI.
 // Socket DAC and peer credential checks are identical to other broker requests.
-func RunWithStatus(ctx context.Context, configPath string, status func(context.Context, string) (string, error)) error {
+// fleetHostsAvailable uses the same read-only gateway existence check to gate
+// the reviewer projection; nil leaves that optional tool absent.
+func RunWithStatus(ctx context.Context, configPath string, status func(context.Context, string) (string, error), fleetHostsAvailable func() bool) error {
 	d, listener, err := newDaemon(configPath, daemonOptions{})
 	if err != nil {
 		return err
 	}
 	defer d.close()
 	d.operatorStatus = status
+	d.fleetHostsAvailable = fleetHostsAvailable
 	stopDrain := d.drain.Listen(ctx, d.drainPath)
 	defer stopDrain()
 	return d.serve(ctx, listener)

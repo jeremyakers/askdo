@@ -10,6 +10,13 @@ import (
 // Test selection and verbatim administrator data, not the wording or internal
 // sentence fragments of the built-in prompt. Fixed duties are code-reviewed;
 // tool and report boundaries are tested through their executable contracts.
+func TestDefaultCalibrationProportionsUnverifiedClaimsToHarm(t *testing.T) {
+	guidance := "reversible, low-impact changes such as labels, display names, comments, descriptions or other cosmetic metadata stay at 1-2 even when a detail is unverified"
+	if !strings.Contains(defaultRiskCalibration, guidance) {
+		t.Fatal("default calibration does not bound the risk of unverified cosmetic details")
+	}
+}
+
 func TestSystemInstructionsWithoutRubricIsTheEmbeddedDefault(t *testing.T) {
 	if got := SystemInstructions(nil); got != EmbeddedInstructions {
 		t.Fatal("absent rubric changed the embedded default instructions")

@@ -38,7 +38,10 @@ func scopeCompatibility(p *inspection.Policy) *proto.ScopeCompatibility {
 
 func (j *jobRuntime) inspectionCapabilities() proto.InspectionCapabilities {
 	c := j.configuration().Inspection
-	return proto.InspectionCapabilities{HashPathEnabled: c.HashPathEnabled, ServiceStatusEnabled: c.ServiceStatusEnabled, SudoPolicyEnabled: c.SudoPolicyEnabled}
+	j.fleetHostsOnce.Do(func() {
+		j.fleetHostsEnabled = j.daemon.fleetHostsAvailable != nil && j.daemon.fleetHostsAvailable()
+	})
+	return proto.InspectionCapabilities{HashPathEnabled: c.HashPathEnabled, ServiceStatusEnabled: c.ServiceStatusEnabled, SudoPolicyEnabled: c.SudoPolicyEnabled, FleetHostsEnabled: j.fleetHostsEnabled}
 }
 
 // webfetchEnabled is the review's effective webfetch opt-in. A host that sets
@@ -59,7 +62,7 @@ func (j *jobRuntime) webfetchEnabled() bool {
 
 func metadataOperation(op string) bool {
 	switch op {
-	case "inspection_scope", "hash_path", "service_status", "sudo_policy":
+	case "inspection_scope", "hash_path", "service_status", "sudo_policy", "fleet_hosts":
 		return true
 	}
 	return false
@@ -252,6 +255,30 @@ func (j *jobRuntime) sudoPolicy(ctx context.Context, r proto.InspectRequest, arg
 	return directOK(r.RequestSeq, v)
 }
 
+func (j *jobRuntime) fleetHosts(ctx context.Context, r proto.InspectRequest) (proto.InspectResult, error) {
+	if !j.inspectionCapabilities().FleetHostsEnabled {
+		return metadataFailure(r, inspection.StatusInspectionDenied, "disabled"), nil
+	}
+	if j.daemon.operatorStatus == nil {
+		return metadataFailure(r, inspection.StatusUnresolved, "inspection_failed"), nil
+	}
+	text, err := j.daemon.operatorStatus(ctx, "hosts")
+	if ctx.Err() != nil {
+		return metadataFailure(r, inspection.StatusUnknown, "timeout"), nil
+	}
+	if err != nil {
+		return metadataFailure(r, inspection.StatusUnresolved, "inspection_failed"), nil
+	}
+	result, err := directOK(r.RequestSeq, proto.FleetHostsResult{Hosts: text})
+	if err != nil {
+		return proto.InspectResult{}, err
+	}
+	if len(result.Payload) > proto.MaxInspectionMetadataResultBytes {
+		return metadataFailure(r, inspection.StatusLimitExceeded, "output_limit"), nil
+	}
+	return result, nil
+}
+
 type inspectionObservation struct {
 	Sequence         uint32              `json:"sequence"`
 	Operation        string              `json:"operation"`
@@ -436,7 +463,7 @@ func (j *jobRuntime) handleInspectContext(parent context.Context, r proto.Inspec
 
 func auditOperation(op string) string {
 	switch op {
-	case "inspection_scope", "hash_path", "service_status", "sudo_policy", "read_path", "list_path", "search_path", "stat_path", "find_path", "mount_info":
+	case "inspection_scope", "hash_path", "service_status", "sudo_policy", "fleet_hosts", "read_path", "list_path", "search_path", "stat_path", "find_path", "mount_info":
 		return op
 	}
 	return "invalid_operation"

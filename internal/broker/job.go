@@ -84,6 +84,8 @@ type jobRuntime struct {
 	scopeRoots             []string
 	scopeSnapshot          bool
 	metadataReader         hostMetadataReader
+	fleetHostsOnce         sync.Once
+	fleetHostsEnabled      bool
 	// stdinReadBits records broker-delivered read_path bytes for the logical
 	// captured input. Only successful correlated bundle:stdin results count;
 	// each bit represents one byte (at most 128 KiB for the 1 MiB cap).

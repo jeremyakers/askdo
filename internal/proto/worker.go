@@ -874,7 +874,7 @@ func requireWorkerFields(raw []byte, value reflect.Value) error {
 				return fmt.Errorf("missing required worker field %s", name)
 			}
 			if string(child) == "null" {
-				if name == "inspection_caps" || name == "reason_code" || name == "compatibility" || value.Type() == reflect.TypeOf(SudoRule{}) {
+				if name == "inspection_caps" || name == "reason_code" || name == "compatibility" || name == "fleet_hosts_enabled" || value.Type() == reflect.TypeOf(SudoRule{}) {
 					return fmt.Errorf("worker field %s must not be null", name)
 				}
 				if optional {

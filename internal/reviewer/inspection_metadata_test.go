@@ -15,7 +15,7 @@ func TestScopeAlwaysOffered(t *testing.T) {
 	for _, def := range Definitions() {
 		names[def.Name] = true
 	}
-	if !names["inspection_scope"] || names["hash_path"] || names["service_status"] || names["sudo_policy"] {
+	if !names["inspection_scope"] || names["hash_path"] || names["service_status"] || names["sudo_policy"] || names["fleet_hosts"] {
 		t.Fatalf("unexpected tools: %v", names)
 	}
 }
@@ -36,21 +36,63 @@ func (b *metadataBroker) Inspect(_ context.Context, request proto.InspectRequest
 }
 
 func TestCapabilityRegistryAndIndependentDisabledGate(t *testing.T) {
-	defs := DefinitionsForCapabilities(proto.InspectionCapabilities{HashPathEnabled: true, ServiceStatusEnabled: true, SudoPolicyEnabled: true}, true)
+	defs := DefinitionsForCapabilities(proto.InspectionCapabilities{HashPathEnabled: true, ServiceStatusEnabled: true, SudoPolicyEnabled: true, FleetHostsEnabled: true}, true)
 	names := map[string]bool{}
 	for _, def := range defs {
 		names[def.Name] = true
 	}
-	if len(names) != 12 || !names["hash_path"] || !names["service_status"] || !names["sudo_policy"] || !names["inspection_scope"] || !names["webfetch"] {
+	if len(names) != 13 || !names["hash_path"] || !names["service_status"] || !names["sudo_policy"] || !names["fleet_hosts"] || !names["inspection_scope"] || !names["webfetch"] {
 		t.Fatalf("tools: %v", names)
 	}
-	for _, name := range []string{"hash_path", "service_status", "sudo_policy"} {
+	for _, name := range []string{"hash_path", "service_status", "sudo_policy", "fleet_hosts"} {
 		broker := &metadataBroker{}
 		e := NewToolExecutor(toolBootstrap(), broker)
 		result, terminal, err := e.Execute(context.Background(), ToolCall{ID: "1", Name: name, Arguments: json.RawMessage(`{}`)})
 		if err != nil || terminal || broker.calls != 0 || !strings.Contains(result.Content, `"reason_code":"disabled"`) {
 			t.Fatalf("disabled %s: %+v %v %v calls=%d", name, result, terminal, err, broker.calls)
 		}
+	}
+}
+
+func TestFleetHostsCapabilityProjectionAndFailureCanComplete(t *testing.T) {
+	// Decode the new flag from JSON so this regression also runs against an old
+	// parser, where the unknown capability is ignored and the tool must be absent.
+	var caps proto.InspectionCapabilities
+	if err := json.Unmarshal([]byte(`{"fleet_hosts_enabled":true}`), &caps); err != nil {
+		t.Fatal(err)
+	}
+	var definition *ToolDefinition
+	for _, candidate := range DefinitionsForCapabilities(caps, false) {
+		if candidate.Name == "fleet_hosts" {
+			definition = &candidate
+		}
+	}
+	if definition == nil {
+		t.Fatal("fleet_hosts was not offered with its capability")
+	}
+	wantDescription := "List this fleet gateway's enrolled hosts (ID, display name, release, state). Read-only; use it to confirm which machine a host ID refers to."
+	if definition.Description != wantDescription {
+		t.Fatalf("description: %q", definition.Description)
+	}
+
+	bootstrap := toolBootstrap()
+	bootstrap.ConfigProjection.Limits.InspectionCaps = caps
+	broker := &metadataBroker{result: proto.InspectResult{Type: "inspect_result", Status: "ok", Payload: json.RawMessage(`{"hosts":"host_123 enabled=true name=office-desktop\\n","bearer":"secret-token"}`)}}
+	e := NewToolExecutor(bootstrap, broker)
+	result, terminal, err := e.Execute(context.Background(), ToolCall{ID: "1", Name: "fleet_hosts", Arguments: json.RawMessage(`{}`)})
+	if err != nil || terminal || result.IsError || !strings.Contains(result.Content, "host_123") || !strings.Contains(result.Content, "office-desktop") || strings.Contains(result.Content, "bearer") || strings.Contains(result.Content, "secret-token") {
+		t.Fatalf("projection %+v terminal=%v err=%v", result, terminal, err)
+	}
+
+	broker = &metadataBroker{err: errors.New("locked gateway database")}
+	e = NewToolExecutor(bootstrap, broker)
+	result, terminal, err = e.Execute(context.Background(), ToolCall{ID: "2", Name: "fleet_hosts", Arguments: json.RawMessage(`{}`)})
+	if err != nil || terminal || !result.IsError || result.Content != `{"status":"unresolved","reason_code":"inspection_failed"}` {
+		t.Fatalf("failure %+v terminal=%v err=%v", result, terminal, err)
+	}
+	result, terminal, err = e.Execute(context.Background(), ToolCall{ID: "3", Name: "submit_review", Arguments: json.RawMessage(`{"risk":"unknown","summary":"Fleet hosts unavailable","effects":[],"warnings":[],"missing_context":[],"reversibility":"Unknown","intent_match":"unverified"}`)})
+	if err != nil || !terminal || result.IsError {
+		t.Fatalf("review did not continue: %+v terminal=%v err=%v", result, terminal, err)
 	}
 }
 
