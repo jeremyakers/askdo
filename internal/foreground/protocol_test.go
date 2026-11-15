@@ -48,7 +48,7 @@ func TestRightsRoundTripAndRejectExtra(t *testing.T) {
 	}
 	defer sender.Close()
 	defer receiver.Close()
-	spec := LaunchSpec{Argv: []string{"/usr/bin/id", "-u"}, Env: []string{"PATH=/usr/bin"}, CWD: filepath.Clean(dir), TargetUID: 0, Foreground: true, JobID: "test"}
+	spec := LaunchSpec{Argv: []string{"/submitted/id", "-u"}, Executable: "/usr/bin/id", Env: []string{"PATH=/usr/bin"}, CWD: filepath.Clean(dir), TargetUID: 0, Foreground: true, JobID: "test"}
 	done := make(chan error, 1)
 	go func() { done <- SendLaunch(sender.(*net.UnixConn), spec, []int{int(f.Fd())}) }()
 	received, fd, err := ReceiveLaunch(receiver.(*net.UnixConn))
@@ -61,6 +61,9 @@ func TestRightsRoundTripAndRejectExtra(t *testing.T) {
 	}
 	if received.CWD != dir {
 		t.Fatalf("CWD mismatch: %q", received.CWD)
+	}
+	if received.Executable != spec.Executable || received.Argv[0] != spec.Argv[0] {
+		t.Fatalf("launch paths changed: argv=%q executable=%q", received.Argv[0], received.Executable)
 	}
 	if err := ValidateLaunch(received, fd); err != nil {
 		t.Fatal(err)
@@ -81,13 +84,19 @@ func TestLaunchValidation(t *testing.T) {
 	if err := ValidateLaunch(base, f); err != nil {
 		t.Fatal(err)
 	}
-	for _, change := range []func(*LaunchSpec){func(s *LaunchSpec) { s.Argv[0] = "id" }, func(s *LaunchSpec) { s.Env = []string{"LD_PRELOAD=/tmp/inject"} }, func(s *LaunchSpec) { s.CWD = "/" }, func(s *LaunchSpec) { s.Argv = []string{"/bin/sh", "-c", "id\x00"} }} {
+	for _, change := range []func(*LaunchSpec){func(s *LaunchSpec) { s.Argv[0] = "id" }, func(s *LaunchSpec) { s.Executable = "id" }, func(s *LaunchSpec) { s.Executable = "/usr/bin/../bin/id" }, func(s *LaunchSpec) { s.Env = []string{"LD_PRELOAD=/tmp/inject"} }, func(s *LaunchSpec) { s.CWD = "/" }, func(s *LaunchSpec) { s.Argv = []string{"/bin/sh", "-c", "id\x00"} }} {
 		s := base
 		s.Argv = append([]string(nil), base.Argv...)
 		change(&s)
 		if err := ValidateLaunch(s, f); err == nil {
 			t.Errorf("accepted %+v", s)
 		}
+	}
+	customName := base
+	customName.Argv = []string{"multicall-name"}
+	customName.Executable = "/usr/bin/id"
+	if err := ValidateLaunch(customName, f); err != nil {
+		t.Fatalf("opaque argv[0] rejected with a valid executable: %v", err)
 	}
 	file, err := os.CreateTemp(dir, "file")
 	if err != nil {

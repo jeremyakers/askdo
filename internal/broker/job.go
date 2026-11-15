@@ -50,6 +50,7 @@ type jobRuntime struct {
 	executionContainer string
 	cwd                *cwdBinding
 	resolvedArgv       []string
+	resolvedExecutable string
 	target             ExecutionTarget                 // resolved at admission; zero value is root
 	foreground         *foregroundPeer                 // immutable after queue submission
 	handoffReady       chan proto.ForegroundReadyEvent // original submit follower only
@@ -1691,7 +1692,7 @@ func (j *jobRuntime) operation() Operation {
 	}
 	target := j.target
 	target.Groups = j.target.groups()
-	return Operation{Mode: j.req.Mode, Argv: argv, Env: env, CWD: cwd, Target: target}
+	return Operation{Mode: j.req.Mode, Argv: argv, Executable: j.resolvedExecutable, Env: env, CWD: cwd, Target: target}
 }
 
 func decodeStoredResult(job store.Job) store.Result {

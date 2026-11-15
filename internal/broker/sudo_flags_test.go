@@ -160,9 +160,8 @@ func TestSudoShellBrokerArgvAndLoginEnvironment(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				wantArgv := append([]string{resolved}, req.Argv[1:]...)
-				if !slices.Equal(op.Argv, wantArgv) {
-					t.Fatalf("argv=%v want=%v", op.Argv, req.Argv)
+				if !slices.Equal(op.Argv, req.Argv) || op.Executable != resolved {
+					t.Fatalf("argv=%v executable=%q want argv=%v executable=%q", op.Argv, op.Executable, req.Argv, resolved)
 				}
 				if login && (op.CWD != home || !slices.Contains(op.Env, "HOME="+home) || !slices.Contains(op.Env, "USER="+name) || !slices.Contains(op.Env, "LOGNAME="+name)) {
 					t.Fatalf("login operation=%+v", op)

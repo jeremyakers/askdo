@@ -25,12 +25,15 @@ import (
 // path after approval can never redirect the execution. CWDFd is never
 // serialized into the manifest or sent to the reviewer.
 type Operation struct {
-	Mode  string
-	Argv  []string
-	Env   []string
-	CWD   string
-	CWDFd *os.File
-	Stdin *os.File // broker-verified captured input, or nil for /dev/null
+	Mode string
+	Argv []string
+	// Executable is the reviewed, resolved file to execute. Argv[0] remains the
+	// submitted invocation name; an empty Executable uses Argv[0] for compatibility.
+	Executable string
+	Env        []string
+	CWD        string
+	CWDFd      *os.File
+	Stdin      *os.File // broker-verified captured input, or nil for /dev/null
 	// Target is the resolved execution identity; its zero value launches as
 	// root exactly as before target selection existed.
 	Target ExecutionTarget
@@ -137,7 +140,12 @@ func (SystemExecutor) Start(op Operation, stdout, stderr io.Writer) (Execution, 
 		pipes = append(pipes, executionOutputPipe{reader: r, writer: w, destination: destination})
 		return w, nil
 	}
-	cmd := exec.Command(op.Argv[0], op.Argv[1:]...)
+	executable := op.Executable
+	if executable == "" {
+		executable = op.Argv[0]
+	}
+	cmd := exec.Command(executable, op.Argv[1:]...)
+	cmd.Args[0] = op.Argv[0]
 	cmd.Dir = "/proc/self/fd/" + strconv.Itoa(int(heldDir.Fd()))
 	cmd.Env = append([]string(nil), op.Env...)
 	cmd.Stdin = stdin
@@ -196,8 +204,12 @@ func validateOperation(op Operation) error {
 	if len(op.Argv) == 0 || op.Argv[0] == "" {
 		return errors.New("operation has no executable")
 	}
-	if !filepath.IsAbs(op.Argv[0]) || filepath.Clean(op.Argv[0]) != op.Argv[0] {
-		return fmt.Errorf("executable path %q is not a clean absolute path", op.Argv[0])
+	executable := op.Executable
+	if executable == "" {
+		executable = op.Argv[0]
+	}
+	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return fmt.Errorf("executable path %q is not a clean absolute path", executable)
 	}
 	if op.CWD == "" || !filepath.IsAbs(op.CWD) {
 		return fmt.Errorf("working directory %q is not absolute", op.CWD)

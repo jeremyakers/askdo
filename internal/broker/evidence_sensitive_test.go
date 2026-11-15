@@ -77,8 +77,8 @@ func TestSubmitTimeSensitiveSymlinkExecutableWithheld(t *testing.T) {
 	}
 	job.req.Argv = []string{alias}
 	err := job.captureEvidence()
-	if err != nil || job.resolvedArgv[0] != secret || len(job.withheldPaths) != 2 {
-		t.Fatalf("metadata resolution err=%v argv=%v withheld=%v", err, job.resolvedArgv, job.withheldPaths)
+	if err != nil || job.resolvedArgv[0] != alias || job.resolvedExecutable != secret || len(job.withheldPaths) != 2 {
+		t.Fatalf("metadata resolution err=%v argv=%v executable=%q withheld=%v", err, job.resolvedArgv, job.resolvedExecutable, job.withheldPaths)
 	}
 	if _, ok := job.withheldPaths[alias]; !ok {
 		t.Fatalf("requested alias missing from operator warning: %v", job.withheldPaths)
