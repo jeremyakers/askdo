@@ -8,6 +8,7 @@ import (
 
 	"github.com/jeremyakers/askdo/internal/config"
 	"github.com/jeremyakers/askdo/internal/proto"
+	"github.com/jeremyakers/askdo/internal/store"
 )
 
 func newWithheldJob(t *testing.T, configure func(*config.Config, string)) (*jobRuntime, string) {
@@ -77,8 +78,8 @@ func TestSubmitTimeSensitiveSymlinkExecutableWithheld(t *testing.T) {
 	}
 	job.req.Argv = []string{alias}
 	err := job.captureEvidence()
-	if err != nil || job.resolvedArgv[0] != alias || job.resolvedExecutable != secret || len(job.withheldPaths) != 2 {
-		t.Fatalf("metadata resolution err=%v argv=%v executable=%q withheld=%v", err, job.resolvedArgv, job.resolvedExecutable, job.withheldPaths)
+	if err != nil || job.resolvedArgv[0] != alias || job.resolvedExecutable != secret || job.bootstrap().Operation.Executable != secret || len(job.withheldPaths) != 2 {
+		t.Fatalf("metadata resolution err=%v argv=%v executable=%q bootstrap=%q withheld=%v", err, job.resolvedArgv, job.resolvedExecutable, job.bootstrap().Operation.Executable, job.withheldPaths)
 	}
 	if _, ok := job.withheldPaths[alias]; !ok {
 		t.Fatalf("requested alias missing from operator warning: %v", job.withheldPaths)
@@ -113,23 +114,30 @@ func TestSubmitTimeOrdinaryExecutableNotCaptured(t *testing.T) {
 		t.Fatal(err)
 	}
 	index, err := readCaptureIndex(job.spool.captureIndex)
-	if err != nil || len(index.Files) != 0 || job.resolvedArgv[0] != tool {
-		t.Fatalf("capture index=%+v err=%v", index, err)
+	if err != nil || len(index.Files) != 0 || job.resolvedArgv[0] != tool || job.bootstrap().Operation.Executable != "" {
+		t.Fatalf("capture index=%+v bootstrap=%+v err=%v", index, job.bootstrap().Operation, err)
 	}
 }
 
 func TestMetadataOnlyApprovedPATHResolution(t *testing.T) {
 	job, _ := newWithheldJob(t, nil)
-	job.req.Argv = []string{"id", "-u"}
+	job.req.Argv = []string{"sh", "-c", `printf '%s' "$0"`}
 	if err := job.captureEvidence(); err != nil {
 		t.Fatal(err)
 	}
-	want, err := resolveExecutableMetadata("/usr/bin/id")
+	resolved, err := resolveExecutableMetadata("/usr/bin/sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if job.resolvedArgv[0] != want || job.bootstrap().Operation.Argv[0] != want || job.operation().Argv[0] != want || job.resolvedArgv[1] != "-u" {
-		t.Fatalf("bootstrap/dispatch diverged: resolved=%v bootstrap=%v operation=%v", job.resolvedArgv, job.bootstrap().Operation.Argv, job.operation().Argv)
+	bootstrap := job.bootstrap().Operation
+	op := job.operation()
+	if job.resolvedArgv[0] != "sh" || bootstrap.Argv[0] != "sh" || op.Argv[0] != "sh" || bootstrap.Executable != resolved || op.Executable != resolved {
+		t.Fatalf("bootstrap/dispatch diverged: argv=%v bootstrap=%+v operation=%+v", job.resolvedArgv, bootstrap, op)
+	}
+	op.CWDFd = job.cwdFD()
+	result, stdout, stderr := runSystem(t, op)
+	if result.Kind != store.ResultExit || result.ExitCode == nil || *result.ExitCode != 0 || stdout != "sh" || stderr != "" {
+		t.Fatalf("result=%+v stdout=%q stderr=%q", result, stdout, stderr)
 	}
 	index, err := readCaptureIndex(job.spool.captureIndex)
 	if err != nil || len(index.Files) != 0 {

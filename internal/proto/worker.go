@@ -120,11 +120,14 @@ type WorkerOperation struct {
 	Mode          string         `json:"mode"`
 	CapturedStdin *CapturedInput `json:"captured_stdin,omitempty"`
 	Argv          []string       `json:"argv,omitempty"`
-	Entry         string         `json:"entry,omitempty"`
-	Args          []string       `json:"args,omitempty"`
-	CWD           string         `json:"cwd"`
-	BundleDir     string         `json:"bundle_dir,omitempty"`
-	Reason        string         `json:"reason"`
+	// Executable is the submission-time resolved binary when it differs from
+	// Argv[0]. Absence retains the legacy interpretation: execute Argv[0].
+	Executable string   `json:"executable,omitempty"`
+	Entry      string   `json:"entry,omitempty"`
+	Args       []string `json:"args,omitempty"`
+	CWD        string   `json:"cwd"`
+	BundleDir  string   `json:"bundle_dir,omitempty"`
+	Reason     string   `json:"reason"`
 }
 
 // CapturedInput is broker-authored metadata for the logical bundle file;
@@ -1186,8 +1189,11 @@ func validateOperation(o WorkerOperation) error {
 				return errors.New("invalid argv")
 			}
 		}
+		if o.Executable != "" && (!bounded(o.Executable, 4096) || !path.IsAbs(o.Executable) || path.Clean(o.Executable) != o.Executable) {
+			return errors.New("invalid resolved executable")
+		}
 	} else if o.Mode == "bundle" {
-		if !bounded(o.Entry, 1024) || len(o.Args) > 64 || len(o.Argv) != 0 {
+		if !bounded(o.Entry, 1024) || len(o.Args) > 64 || len(o.Argv) != 0 || o.Executable != "" {
 			return errors.New("invalid bundle operation")
 		}
 		for _, v := range o.Args {

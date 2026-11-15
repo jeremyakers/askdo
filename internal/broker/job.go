@@ -1616,7 +1616,7 @@ func (j *jobRuntime) bootstrap() proto.Bootstrap {
 	if len(j.resolvedArgv) != 0 {
 		argv = j.resolvedArgv
 	}
-	operation := proto.WorkerOperation{Mode: j.req.Mode, Argv: append([]string{}, argv...), Entry: j.req.Entry, Args: append([]string{}, j.req.Args...), CWD: j.req.CWD, Reason: j.req.Reason}
+	operation := proto.WorkerOperation{Mode: j.req.Mode, Argv: append([]string{}, argv...), Executable: executableEvidence(argv, j.resolvedExecutable), Entry: j.req.Entry, Args: append([]string{}, j.req.Args...), CWD: j.req.CWD, Reason: j.req.Reason}
 	if j.req.CapturedStdinBase64 != "" {
 		data, _ := base64.StdEncoding.DecodeString(j.req.CapturedStdinBase64)
 		digest := sha256.Sum256(data)

@@ -82,6 +82,26 @@ func TestHostHeaderPairsServerAndJobID(t *testing.T) {
 	}
 }
 
+func TestCardShowsResolvedExecutable(t *testing.T) {
+	in := testCardInput()
+	in.Operation = "/usr/sbin/iptables-save"
+	in.Executable = "/usr/sbin/xtables-nft-multi"
+	want := "<b>Resolves to:</b> <code>/usr/sbin/xtables-nft-multi</code>"
+	reviewed, _, err := RenderReviewedCard(in, testNonce)
+	if err != nil || !strings.Contains(reviewed, "<b>Runs:</b> <code>/usr/sbin/iptables-save</code>") || !strings.Contains(reviewed, want) {
+		t.Fatalf("reviewed card=%q err=%v", reviewed, err)
+	}
+	unreviewed, _, err := RenderApprovalOnlyCard(ApprovalOnlyInput{Host: in.Host, JobID: in.JobID, Operation: in.Operation, Executable: in.Executable, Reason: in.Reason, Expiry: in.Expiry}, testNonce)
+	if err != nil || !strings.Contains(unreviewed, "<b>Runs:</b> <code>/usr/sbin/iptables-save</code>") || !strings.Contains(unreviewed, want) {
+		t.Fatalf("unreviewed card=%q err=%v", unreviewed, err)
+	}
+	in.Executable = ""
+	plain, _, err := RenderReviewedCard(in, testNonce)
+	if err != nil || strings.Contains(plain, "Resolves to:") {
+		t.Fatalf("redundant resolution rendered: %q err=%v", plain, err)
+	}
+}
+
 func TestReviewedSecurityScoreOnAllCards(t *testing.T) {
 	for _, tc := range []struct{ risk, visible string }{{"1", "1/5"}, {"5", "5/5"}, {"unknown", "UNKNOWN"}} {
 		t.Run(tc.risk, func(t *testing.T) {

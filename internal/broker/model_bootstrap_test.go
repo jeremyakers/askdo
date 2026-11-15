@@ -91,7 +91,7 @@ func TestModelImmediateReviewNoHostReadsRequiresHumanApproval(t *testing.T) {
 	}
 }
 
-func TestApprovedPATHBasenameCardMatchesExecutedPath(t *testing.T) {
+func TestApprovedPATHBasenameCardAndExecutionPreserveInvocation(t *testing.T) {
 	fake := faketelegram.New(t)
 	executor := &FakeExecutor{}
 	worker := telegramReviewerWorker{factory: func(proto.ProjectedModel) (reviewer.ModelTurn, error) {
@@ -112,7 +112,7 @@ func TestApprovedPATHBasenameCardMatchesExecutedPath(t *testing.T) {
 	for _, message := range fake.Sent() {
 		joined += message.Text
 	}
-	if !strings.Contains(joined, want) || len(executor.Snapshot()) != 0 {
+	if !strings.Contains(joined, "<b>Runs:</b> <code>id</code>") || !strings.Contains(joined, "<b>Resolves to:</b> <code>"+want+"</code>") || len(executor.Snapshot()) != 0 {
 		t.Fatalf("card=%s executions=%v", joined, executor.Snapshot())
 	}
 	fake.QueueCallback(1, "approve-path", telegramOperator, telegramChat, card.ID, card.ButtonData("a:"))
@@ -124,8 +124,8 @@ func TestApprovedPATHBasenameCardMatchesExecutedPath(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("no terminal result")
 	}
-	if got := executor.Snapshot(); len(got) != 1 || got[0].Operation.Argv[0] != want {
-		t.Fatalf("card path %q differs from executed %+v", want, got)
+	if got := executor.Snapshot(); len(got) != 1 || got[0].Operation.Argv[0] != "id" || got[0].Operation.Executable != want {
+		t.Fatalf("invocation differs from executed %+v", got)
 	}
 }
 

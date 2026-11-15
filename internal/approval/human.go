@@ -82,7 +82,7 @@ func NotifyReviewed(ctx context.Context, transport Transport, facts ReviewedFact
 	}
 	input := telegram.CardInput{
 		Host: bootstrap.Host, Container: bootstrap.Container, TargetUID: bootstrap.TargetUID, TargetName: bootstrap.TargetName,
-		JobID: bootstrap.RequestID, Operation: command, Reason: bootstrap.Operation.Reason,
+		JobID: bootstrap.RequestID, Operation: command, Executable: bootstrap.Operation.Executable, Reason: bootstrap.Operation.Reason,
 		Report: frozen.Report, WithheldRefs: frozen.WithheldRefs, WithheldCount: frozen.WithheldCount,
 		ReviewerModel: card.model, Expiry: card.expiry, SubmitterUID: bootstrap.SubmitterUID,
 		SubmitterName: bootstrap.SubmitterName, CWD: bootstrap.Operation.CWD,
@@ -119,7 +119,7 @@ func NotifyUnreviewed(ctx context.Context, transport Transport, facts Unreviewed
 	}
 	input := telegram.ApprovalOnlyInput{
 		Host: bootstrap.Host, Container: bootstrap.Container, TargetUID: bootstrap.TargetUID, TargetName: bootstrap.TargetName,
-		JobID: bootstrap.RequestID, Operation: command, Reason: bootstrap.Operation.Reason,
+		JobID: bootstrap.RequestID, Operation: command, Executable: bootstrap.Operation.Executable, Reason: bootstrap.Operation.Reason,
 		SubmitterUID: bootstrap.SubmitterUID, SubmitterName: bootstrap.SubmitterName,
 		CWD: bootstrap.Operation.CWD, Expiry: card.expiry, Failures: frozen.History,
 	}

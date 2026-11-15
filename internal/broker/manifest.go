@@ -92,7 +92,7 @@ func (j *jobRuntime) freezeApprovalOnly(ctx context.Context, reason string, hist
 		Version: 1, RequestID: j.req.RequestID, TargetUID: j.target.UID, TargetUser: j.target.Name,
 		TargetGID: j.target.gid(), TargetGroups: j.target.groups(),
 		Context:          manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
-		Operation:        manifestOperation{Mode: op.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), op.Argv...), Env: append([]string(nil), op.Env...), CWD: op.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
+		Operation:        manifestOperation{Mode: op.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), op.Argv...), Executable: executableEvidence(op.Argv, op.Executable), Env: append([]string(nil), op.Env...), CWD: op.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:         append([]captureRecord{}, index.Files...),
 		TrustAssumptions: manifestTrustAssumptions{ReadRoots: append([]string(nil), j.configuration().Inspection.ReadRoots...), DenyPaths: append([]string(nil), j.configuration().Inspection.DenyPaths...), SensitiveMasks: effectiveSensitiveMasks(j.configuration().Inspection.SensitiveMasks)},
 		Settings:         manifestSettings{MaxInspectedFiles: j.configuration().Limits.MaxInspectedFiles, MaxInspectedBytes: j.configuration().Limits.MaxInspectedBytes},
@@ -120,6 +120,7 @@ type manifestOperation struct {
 	Mode          string               `json:"mode"`
 	Lifecycle     string               `json:"lifecycle"`
 	Argv          []string             `json:"argv"`
+	Executable    string               `json:"executable,omitempty"`
 	Env           []string             `json:"environment"`
 	CWD           string               `json:"cwd"`
 }
@@ -220,7 +221,7 @@ func (j *jobRuntime) freezeReview(ctx context.Context, review proto.ReviewComple
 		Version: 1, RequestID: j.req.RequestID, TargetUID: j.target.UID, TargetUser: j.target.Name,
 		TargetGID: j.target.gid(), TargetGroups: j.target.groups(),
 		Context:   manifestContext{SubmitterUID: j.uid, SubmitterName: j.submitterName, Host: j.executionHost, Container: j.executionContainer, CWDDev: j.cwd.dev, CWDIno: j.cwd.ino},
-		Operation: manifestOperation{Mode: operation.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), operation.Argv...), Env: append([]string(nil), operation.Env...), CWD: operation.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
+		Operation: manifestOperation{Mode: operation.Mode, Lifecycle: effectiveLifecycle(j.req), Argv: append([]string(nil), operation.Argv...), Executable: executableEvidence(operation.Argv, operation.Executable), Env: append([]string(nil), operation.Env...), CWD: operation.CWD, CapturedStdin: j.bootstrap().Operation.CapturedStdin},
 		Captures:  append([]captureRecord(nil), index.Files...),
 		TrustAssumptions: manifestTrustAssumptions{
 			ReadRoots:      append([]string(nil), j.configuration().Inspection.ReadRoots...),

@@ -42,9 +42,8 @@ func (j *jobRuntime) captureEvidence() error {
 	if err != nil {
 		return err
 	}
-	var requested, resolved string
+	var resolved string
 	for _, target := range targets {
-		requested = target
 		resolved, err = resolveExecutableMetadata(target)
 		if err == nil {
 			break
@@ -65,8 +64,17 @@ func (j *jobRuntime) captureEvidence() error {
 		}
 	}
 	j.resolvedExecutable = resolved
-	j.resolvedArgv = append([]string{executionName(requested, resolved)}, j.req.Argv[1:]...)
+	j.resolvedArgv = append([]string{executionName(j.req.Argv[0], resolved)}, j.req.Argv[1:]...)
 	return nil
+}
+
+// executableEvidence omits redundant or unavailable resolution so older peer
+// frames and legacy manifest/display hashes remain unchanged.
+func executableEvidence(argv []string, resolved string) string {
+	if resolved == "" || len(argv) > 0 && argv[0] == resolved {
+		return ""
+	}
+	return resolved
 }
 
 // Multicall binaries select their behavior from argv[0], so execution and review
