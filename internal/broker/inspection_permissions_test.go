@@ -121,7 +121,16 @@ func publicTempRoot(t *testing.T, pattern string) string {
 	if err := os.Chmod(root, 0755); err != nil {
 		t.Fatal(err)
 	}
-	for dir := filepath.Dir(root); ; dir = filepath.Dir(dir) {
+	// Inspection traverses the canonical path, so check the ancestors of the
+	// absolute, symlink-resolved root (this also handles a relative TMPDIR).
+	resolved, err := filepath.Abs(root)
+	if err == nil {
+		resolved, err = filepath.EvalSymlinks(resolved)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for dir := filepath.Dir(resolved); ; dir = filepath.Dir(dir) {
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -129,8 +138,8 @@ func publicTempRoot(t *testing.T, pattern string) string {
 		if info.Mode().Perm()&0001 == 0 {
 			t.Skipf("temporary directory ancestor %s is not world-searchable; set TMPDIR to a world-searchable directory to run this test", dir)
 		}
-		if dir == "/" {
-			return root
+		if filepath.Dir(dir) == dir {
+			return resolved
 		}
 	}
 }
