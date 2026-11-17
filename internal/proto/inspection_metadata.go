@@ -296,7 +296,7 @@ func DecodeInspectionMetadataResult(request InspectRequest, result InspectResult
 // object identity, an object kind the operation cannot inspect, or private
 // content outside explicitly configured read roots.
 func directDenialReason(code string) bool {
-	return oneOf(code, "outside_scope", "protected_path", "unverified_identity", "unsupported_object", "not_world_readable")
+	return oneOf(code, "outside_scope", "protected_path", "unverified_identity", "unsupported_object", "not_readable_by_submitter")
 }
 
 func validateInspectionReason(op string, r InspectResult) error {

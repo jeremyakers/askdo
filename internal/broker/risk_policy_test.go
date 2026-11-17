@@ -772,7 +772,7 @@ func TestConcurrentRubricLoadsAreSelfConsistent(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			job := newJobRuntime(h.daemon, uid, proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id"}, RequestID: strings.Repeat("0", 31) + string(rune('a'+worker))}, spool, resolveSubmitterIdentity(uid), nil, "n")
+			job := newJobRuntime(h.daemon, uid, proto.SubmitRequest{Mode: "argv", Argv: []string{"/usr/bin/id"}, RequestID: strings.Repeat("0", 31) + string(rune('a'+worker))}, spool, testSubmitterIdentity(uid), nil, "n")
 			for range 25 {
 				snapshot, err := job.loadRiskPolicy()
 				if err != nil || snapshot == nil {

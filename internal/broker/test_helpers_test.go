@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"net"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
 )
@@ -78,6 +80,11 @@ func validWorkerReview(_ proto.WorkerOperation) proto.ReviewComplete {
 
 func newTestJobRuntime(t *testing.T, d *daemon, request proto.SubmitRequest, spool spoolFiles) *jobRuntime {
 	t.Helper()
+	return newTestJobRuntimeForSubmitter(t, d, request, spool, testUID)
+}
+
+func newTestJobRuntimeForSubmitter(t *testing.T, d *daemon, request proto.SubmitRequest, spool spoolFiles, submitterUID uint32) *jobRuntime {
+	t.Helper()
 	cwd, err := bindCWD(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -89,5 +96,24 @@ func newTestJobRuntime(t *testing.T, d *daemon, request proto.SubmitRequest, spo
 	if err := captureSubmittedBundle(spool, request, d.cfg.Limits, d.policy); err != nil {
 		t.Fatal(err)
 	}
-	return newJobRuntime(d, testUID, request, spool, resolveSubmitterIdentity(testUID), cwd, resolveSubmitterName(testUID))
+	return newJobRuntime(d, submitterUID, request, spool, testSubmitterIdentity(submitterUID), cwd, resolveSubmitterName(submitterUID))
+}
+
+func testSubmitterIdentity(uid uint32) inspection.SubmitterIdentity {
+	identity := inspection.SubmitterIdentity{UID: uid}
+	if uid != uint32(os.Getuid()) {
+		return identity
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return identity
+	}
+	ids := make([]uint32, len(groups))
+	for i, gid := range groups {
+		ids[i] = uint32(gid)
+	}
+	identity.GID = uint32(os.Getegid())
+	identity.Groups = normalizeSubmitterGroups(ids)
+	identity.GroupsResolved = true
+	return identity
 }

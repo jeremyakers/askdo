@@ -491,7 +491,7 @@ func TestApprovalTimestampFailedClientHandoffDoesNotRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cwd.close()
-	j := newJobRuntime(h.daemon, uid, req, spool, resolveSubmitterIdentity(uid), cwd, "test user")
+	j := newJobRuntime(h.daemon, uid, req, spool, testSubmitterIdentity(uid), cwd, "test user")
 	if _, err := h.daemon.store.SubmitReservedJob(context.Background(), store.Job{UID: uid, RequestID: req.RequestID, SubmitBody: []byte(`{}`), Mode: "argv", SpoolDir: spool.dir}); err != nil {
 		t.Fatal(err)
 	}

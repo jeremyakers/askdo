@@ -8,21 +8,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/jeremyakers/askdo/internal/inspection"
 )
 
 // approvedHostPATH is the broker-controlled command lookup path. It is also
 // the PATH used by the executor; client environment never participates.
 var approvedHostPATH = []string{"/usr/bin", "/bin"}
-
-var lookupSubmitterGroupIDs = func(uid uint32) ([]string, error) {
-	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
-	if err != nil {
-		return nil, err
-	}
-	return account.GroupIds()
-}
 
 func (j *jobRuntime) captureEvidence() error {
 	index, err := readCaptureIndex(j.spool.captureIndex)
@@ -116,25 +106,6 @@ func resolveTopLevelExecutable(argv0 string) ([]string, error) {
 		targets = append(targets, filepath.Join(directory, argv0))
 	}
 	return targets, nil
-}
-
-func resolveSubmitterIdentity(uid uint32) inspection.SubmitterIdentity {
-	identity := inspection.SubmitterIdentity{UID: uid}
-	groupIDs, err := lookupSubmitterGroupIDs(uid)
-	if err != nil {
-		return identity
-	}
-	identity.Groups = make([]uint32, 0, len(groupIDs))
-	for _, groupID := range groupIDs {
-		parsed, err := strconv.ParseUint(groupID, 10, 32)
-		if err != nil {
-			identity.Groups = nil
-			return identity
-		}
-		identity.Groups = append(identity.Groups, uint32(parsed))
-	}
-	identity.GroupsResolved = true
-	return identity
 }
 
 // resolveSubmitterName returns the host account name for the authenticated

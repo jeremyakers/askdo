@@ -10,10 +10,16 @@ import (
 	"testing"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
 )
 
 func TestImplicitRootContentPermissions(t *testing.T) {
+	unrelatedUID := uint32(65534)
+	if unrelatedUID == uint32(os.Getuid()) {
+		unrelatedUID--
+	}
+	unrelated := inspection.SubmitterIdentity{UID: unrelatedUID, GID: unrelatedUID, GroupsResolved: true}
 	// Unlike t.TempDir's private parent, this fixture models a publicly
 	// traversable tree. Respect the test runner's temporary-directory setting.
 	root := publicTempRoot(t, "inspection-permissions-")
@@ -47,6 +53,7 @@ func TestImplicitRootContentPermissions(t *testing.T) {
 					roots = append(roots, filepath.Dir(path))
 				}
 				j := directJobWithInspection(t, config.InspectionConfig{ReadRoots: roots, HashPathEnabled: true, SensitiveMasks: []string{"*.privmask"}}, nil)
+				j.identity = unrelated
 				for _, op := range []string{"read_path", "search_path"} {
 					var args any = proto.ReadPathRequest{Base: "host", Path: path, MaxBytes: 64}
 					if op == "search_path" {
@@ -54,7 +61,7 @@ func TestImplicitRootContentPermissions(t *testing.T) {
 					}
 					r := directCall(t, j, op, args)
 					if tc.deny && !explicit {
-						if r.Status != "inspection_denied" || r.ReasonCode != "not_world_readable" || len(r.Payload) != 0 {
+						if r.Status != "inspection_denied" || r.ReasonCode != "not_readable_by_submitter" || len(r.Payload) != 0 {
 							t.Errorf("%s revealed private content: %+v", op, r)
 						}
 					} else if r.Status != "ok" || !strings.Contains(string(r.Payload), "permission_canary") {
@@ -101,10 +108,81 @@ func TestImplicitRootContentPermissions(t *testing.T) {
 	// Tree search must still return public matches without matching private
 	// content or aborting merely because a private application file is present.
 	j := directJobWithInspection(t, config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}}, nil)
+	j.identity = unrelated
 	r := directCall(t, j, "search_path", proto.SearchPathRequest{Base: "host", Path: root, Pattern: "permission_canary"})
 	var search proto.SearchPathResult
 	if r.Status != "ok" || json.Unmarshal(r.Payload, &search) != nil || len(search.Matches) != 1 || search.Matches[0].Path != filepath.Join(root, "public/public-file") || search.SkippedMasked != 2 {
 		t.Fatalf("tree search private contents: %+v %+v", r, search)
+	}
+}
+
+func TestReadPathUsesJobSubmitterCredentials(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("submitter owner case requires a non-root test process")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "private")
+	if err := os.WriteFile(path, []byte("submitter credential canary\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	uid := uint32(os.Getuid())
+	j := directJobWithInspectionForSubmitter(t, config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}}, nil, uid)
+	if j.uid != uid || j.identity.UID != uid {
+		t.Fatalf("job submitter identity = %d/%d, want %d", j.uid, j.identity.UID, uid)
+	}
+	if !j.identity.GroupsResolved {
+		t.Fatal("test submitter groups did not resolve")
+	}
+	if j.identity.GID != uint32(os.Getegid()) {
+		t.Fatalf("submitter effective GID = %d, want %d", j.identity.GID, os.Getegid())
+	}
+	r := directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: path, MaxBytes: 64})
+	if r.Status != "ok" || !strings.Contains(string(r.Payload), "submitter credential canary") {
+		t.Fatalf("read_path did not use the job submitter identity: %+v", r)
+	}
+}
+
+func TestPeerSocketGroupsControlContentAccess(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("group permission case requires a non-root test process")
+	}
+	root := t.TempDir()
+	for _, dir := range []string{filepath.Dir(root), root} {
+		if err := os.Chmod(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(root, "private")
+	if err := os.WriteFile(path, []byte("socket group canary\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	peerUID := uint32(65534)
+	if peerUID == uint32(os.Getuid()) {
+		peerUID++
+	}
+	gid := uint32(os.Getgid())
+	socketIdentity := unixPeerIdentity(acceptedLocalPeer(t), uint32(os.Getuid()))
+	if !socketIdentity.GroupsResolved {
+		t.Fatal("socket groups did not resolve")
+	}
+	p, err := inspection.NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	identity := inspection.SubmitterIdentity{UID: peerUID, GID: peerUID, Groups: socketIdentity.Groups, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != inspection.StatusOK || string(r.Content) != "socket group canary\n" {
+		t.Fatalf("socket group did not grant content: %+v", r)
+	}
+	withoutGroup := make([]uint32, 0, len(socketIdentity.Groups))
+	for _, member := range socketIdentity.Groups {
+		if member != gid {
+			withoutGroup = append(withoutGroup, member)
+		}
+	}
+	identity.Groups = withoutGroup
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != inspection.StatusInspectionDenied || r.Reason != inspection.ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("group absent from socket credentials granted content: %+v", r)
 	}
 }
 
