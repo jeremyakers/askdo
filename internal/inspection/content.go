@@ -1,6 +1,7 @@
 package inspection
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -8,8 +9,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// contentOpen applies the implicit-root permission rule before acquiring a
-// readable descriptor. Hashes and directory listings use authorizedOpen instead:
+// contentOpen applies the implicit-root permission rule before returning a
+// readable content descriptor. Hashes and directory listings use authorizedOpen instead:
 // they expose no file content and retain their existing permissions policy.
 func (p *Policy) contentOpen(path string, identity SubmitterIdentity) (int, authorization, error) {
 	fd, a, err := p.authorizedOpen(path, 0)
@@ -33,36 +34,36 @@ func (p *Policy) checkContentAccess(a authorization, identity SubmitterIdentity)
 		// Preserve the existing world-readable grant before considering the
 		// submitting account. An unknown identity and UID 0 deliberately retain
 		// the world-only rule rather than gaining root's universal read access.
-		err := p.checkContentPath(path, a.stat, worldContentPermission)
+		err := p.checkContentPath(path, a.stat, worldContentPermission, false)
 		if err == nil {
 			continue
 		}
 		if denialReason(err) != ReasonNotReadableBySubmitter || identity.UID == 0 || !identity.GroupsResolved {
 			return err
 		}
-		if err := p.checkContentPath(path, a.stat, func(st unix.Stat_t, directory bool) bool {
-			return submitterContentPermission(st, identity, directory)
-		}); err != nil {
+		if err := p.checkContentPath(path, a.stat, func(st unix.Stat_t, directory, aclPresent bool) bool {
+			return submitterContentPermission(st, identity, directory, aclPresent)
+		}, true); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-type contentPermission func(st unix.Stat_t, directory bool) bool
+type contentPermission func(st unix.Stat_t, directory, aclPresent bool) bool
 
-func worldContentPermission(st unix.Stat_t, directory bool) bool {
+func worldContentPermission(st unix.Stat_t, directory, _ bool) bool {
 	if directory {
 		return st.Mode&0001 != 0
 	}
 	return st.Mode&0004 != 0
 }
 
-// submitterContentPermission applies the kernel's owner/group/other bit
-// selection: an owner match never falls through to group or other bits. The
-// inspection policy has no ACL resolver, so this deliberately uses permission
-// bits only; POSIX ACL grants and denials are not modeled.
-func submitterContentPermission(st unix.Stat_t, identity SubmitterIdentity, directory bool) bool {
+// submitterContentPermission applies owner/group/other bit selection. With an
+// access ACL, group bits are the ACL mask rather than the owning-group entry:
+// owner bits remain authoritative, an owning-group match is denied, and other
+// bits are used only outside that group. Named ACL entries are not evaluated.
+func submitterContentPermission(st unix.Stat_t, identity SubmitterIdentity, directory, aclPresent bool) bool {
 	owner, group, other := uint32(0400), uint32(0040), uint32(0004)
 	if directory {
 		owner, group, other = 0100, 0010, 0001
@@ -70,7 +71,11 @@ func submitterContentPermission(st unix.Stat_t, identity SubmitterIdentity, dire
 	if st.Uid == identity.UID {
 		return st.Mode&owner != 0
 	}
-	if st.Gid == identity.GID || submitterGroupMember(st.Gid, identity.Groups) {
+	member := st.Gid == identity.GID || submitterGroupMember(st.Gid, identity.Groups)
+	if aclPresent {
+		return !member && st.Mode&other != 0
+	}
+	if member {
 		return st.Mode&group != 0
 	}
 	return st.Mode&other != 0
@@ -85,7 +90,7 @@ func submitterGroupMember(gid uint32, groups []uint32) bool {
 // chain of symlinks. Looking only at the final canonical parent would miss a
 // private directory traversed on the way to a public symlink target. All opens
 // are metadata-only and use the policy's existing anchored resolver.
-func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted contentPermission) error {
+func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted contentPermission, checkACL bool) error {
 	pending := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	current := "/"
 	links := 0
@@ -123,7 +128,7 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 			if st.Dev != target.Dev || st.Ino != target.Ino {
 				return denied(ReasonUnverifiedIdentity, "content permission target changed")
 			}
-			if !permitted(st, false) {
+			if !permitted(st, false, checkACL && p.accessACLPresent(current)) {
 				return denied(ReasonNotReadableBySubmitter, "file lacks required read permission")
 			}
 			return nil
@@ -131,11 +136,24 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 			return unix.ENOTDIR
 		}
-		if !permitted(st, true) {
+		if !permitted(st, true, checkACL && p.accessACLPresent(current)) {
 			return denied(ReasonNotReadableBySubmitter, "ancestor directory lacks required search permission")
 		}
 		component := pending[0]
 		pending = pending[1:]
 		current = filepath.Join(current, component)
 	}
+}
+
+// accessACLPresent uses a readable metadata descriptor because fgetxattr does
+// not accept O_PATH descriptors. No content is read. Every open or xattr failure
+// except ENODATA fails closed for group-class submitter grants.
+func (p *Policy) accessACLPresent(path string) bool {
+	fd, err := p.open(p.roots[0], path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return true
+	}
+	defer unix.Close(fd)
+	_, err = fgetxattr(fd, "system.posix_acl_access", nil)
+	return err == nil || !errors.Is(err, unix.ENODATA)
 }

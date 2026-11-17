@@ -99,11 +99,13 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
   content access, either the file must have other-read (`0004`) and every
   traversed ancestor directory other-search (`0001`), or the authenticated
   submitting user must have ordinary read/search access using its authenticated
-  UID and the effective GID/supplementary groups frozen from the submitting
-  process at submission; account-database memberships alone do not qualify.
-  Owner→group→other selection and permission bits follow Unix semantics; ACLs
-  are not evaluated. A root submitter or unresolved process identity uses only
-  the world rule. Otherwise the result is payload-free
+  UID and the kernel's connect-time effective GID/supplementary groups for the
+  submitting socket; account-database memberships alone do not qualify.
+  Owner→group→other selection follows Unix semantics. ACL entries are not
+  evaluated: with an access ACL, this rule grants only owner bits or, outside
+  the owning group, other bits; named ACL grants are not honored, and probe
+  failures count as ACL presence. A root submitter or unresolved socket identity
+  uses only the world rule. Otherwise the result is payload-free
   `inspection_denied`, reason `not_readable_by_submitter`. An explicit `/` is
   still subject to this rule. Hard denies, masks and exclusions always apply.
   Metadata tools (including executable hashes) and names-only directory listings
@@ -436,11 +438,13 @@ of the trust boundary — enforces:
    text or a later check, and reasons never include private rule/path spellings.
 - **Content permissions:** the implicit `/` grants file content when the file
   and all traversed ancestor directories are world-readable/searchable, or when
-  the submitting user's authenticated UID and its process's frozen effective GID
-  and supplementary groups have ordinary Unix read/search permission bits.
+  the submitting user's authenticated UID and its socket's connect-time effective
+  GID and supplementary groups have ordinary Unix read/search permission bits.
   Account-database memberships alone do not qualify. Owner→group→other selection
-  applies; ACLs are not evaluated. Root submitters and unresolved identities
-  retain the world-only rule. Configured non-`/` roots grant private-tree content
+  applies. ACL entries are not evaluated: ACL-present objects grant only owner
+  bits or, outside the owning group, other bits; named grants are not honored
+  and probe failures count as ACL presence. Root submitters and unresolved
+  identities retain the world-only rule. Configured non-`/` roots grant private-tree content
   access; they do not override named secret protections. A refused file
   read/search returns `inspection_denied` with
   `reason_code: "not_readable_by_submitter"`. Directory searches skip these

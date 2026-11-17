@@ -110,6 +110,7 @@ type daemon struct {
 	executor       Executor
 	peerUID        peerCredentialGetter
 	peerPID        peerPIDGetter
+	peerIdentity   func(*net.UnixConn, uint32) inspection.SubmitterIdentity
 	helperPeer     func(*net.UnixConn) (uint32, int64, error)
 	ttyEvidence    func(int64) (ttyIdentity, error)
 	codex          *codexauth.Client
@@ -386,7 +387,7 @@ func newDaemon(configPath string, options daemonOptions) (*daemon, *net.UnixList
 	admissionTail := make(chan struct{})
 	close(admissionTail)
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
-	d := &daemon{cfg: cfg, bootID: strings.TrimSpace(string(bootID)), store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, drainPath: admission.Path(storePath), frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
+	d := &daemon{cfg: cfg, bootID: strings.TrimSpace(string(bootID)), store: jobStore, socketPath: socketPath, spoolRoot: spoolRoot, fencePath: fencePath, fenceOwner: fenceOwner, drainPath: admission.Path(storePath), frameMax: effectiveFrameLimit(cfg.Limits.MaxInspectedBytes), worker: worker, executor: executor, peerUID: peerUID, peerPID: peerPID, peerIdentity: unixPeerIdentity, helperPeer: helperPeer, ttyEvidence: ttyEvidence, codex: codex, queue: newJobQueue(), policy: policy, listener: listener, launchListener: launchListener, launchPath: launchPath, handoffs: make(map[[32]byte]*jobRuntime), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel, cancelStop: make(chan struct{}), jobs: make(map[string]*jobRuntime), connections: make(map[*net.UnixConn]struct{}), admissionTail: admissionTail,
 		riskPolicyDefault: riskPolicyDefaultPath(configPath), riskPolicyTrust: rootRiskPolicyTrust(), configPath: configPath, reloadConfig: options.cfg == nil}
 	d.telegramHub = telegram.NewHub(shutdownCtx)
 	d.reviewLogPath = reviewlog.Path(storePath)
@@ -995,10 +996,7 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: proto.TargetUserBundleRefusal(target.Name)})
 		return
 	}
-	identity := inspection.SubmitterIdentity{UID: uid}
-	if pid, err := d.peerPID(conn); err == nil {
-		identity = resolvePeerSubmitterIdentity(uid, pid)
-	}
+	identity := d.peerIdentity(conn, uid)
 	var foreground *foregroundPeer
 	if request.Lifecycle == proto.LifecycleForeground {
 		pid, err := d.peerPID(conn)

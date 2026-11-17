@@ -100,8 +100,20 @@ func newTestJobRuntimeForSubmitter(t *testing.T, d *daemon, request proto.Submit
 }
 
 func testSubmitterIdentity(uid uint32) inspection.SubmitterIdentity {
-	if uid == uint32(os.Getuid()) {
-		return resolvePeerSubmitterIdentity(uid, int64(os.Getpid()))
+	identity := inspection.SubmitterIdentity{UID: uid}
+	if uid != uint32(os.Getuid()) {
+		return identity
 	}
-	return inspection.SubmitterIdentity{UID: uid}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return identity
+	}
+	ids := make([]uint32, len(groups))
+	for i, gid := range groups {
+		ids[i] = uint32(gid)
+	}
+	identity.GID = uint32(os.Getegid())
+	identity.Groups = normalizeSubmitterGroups(ids)
+	identity.GroupsResolved = true
+	return identity
 }

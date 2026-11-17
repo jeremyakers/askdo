@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -134,8 +133,8 @@ func TestReadPathUsesJobSubmitterCredentials(t *testing.T) {
 	if !j.identity.GroupsResolved {
 		t.Fatal("test submitter groups did not resolve")
 	}
-	if j.identity.GID != uint32(os.Getgid()) {
-		t.Fatalf("submitter primary GID = %d, want %d", j.identity.GID, os.Getgid())
+	if j.identity.GID != uint32(os.Getegid()) {
+		t.Fatalf("submitter effective GID = %d, want %d", j.identity.GID, os.Getegid())
 	}
 	r := directCall(t, j, "read_path", proto.ReadPathRequest{Base: "host", Path: path, MaxBytes: 64})
 	if r.Status != "ok" || !strings.Contains(string(r.Payload), "submitter credential canary") {
@@ -143,7 +142,7 @@ func TestReadPathUsesJobSubmitterCredentials(t *testing.T) {
 	}
 }
 
-func TestPeerProcessGroupsControlContentAccess(t *testing.T) {
+func TestPeerSocketGroupsControlContentAccess(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("group permission case requires a non-root test process")
 	}
@@ -154,7 +153,7 @@ func TestPeerProcessGroupsControlContentAccess(t *testing.T) {
 		}
 	}
 	path := filepath.Join(root, "private")
-	if err := os.WriteFile(path, []byte("process group canary\n"), 0640); err != nil {
+	if err := os.WriteFile(path, []byte("socket group canary\n"), 0640); err != nil {
 		t.Fatal(err)
 	}
 	peerUID := uint32(65534)
@@ -162,43 +161,28 @@ func TestPeerProcessGroupsControlContentAccess(t *testing.T) {
 		peerUID++
 	}
 	gid := uint32(os.Getgid())
+	socketIdentity := unixPeerIdentity(acceptedLocalPeer(t), uint32(os.Getuid()))
+	if !socketIdentity.GroupsResolved {
+		t.Fatal("socket groups did not resolve")
+	}
 	p, err := inspection.NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	for _, tc := range []struct {
-		name         string
-		processGroup string
-		readable     bool
-	}{
-		{name: "account group absent from process", readable: false},
-		{name: "process holds group", processGroup: strconv.FormatUint(uint64(gid), 10), readable: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			previousStatus, previousStart := readPeerProcessStatus, peerProcessStartTime
-			readPeerProcessStatus = func(int64) ([]byte, error) {
-				status := "Name:\tpeer\nUid:\t" + strconv.FormatUint(uint64(peerUID), 10) + "\t" + strconv.FormatUint(uint64(peerUID), 10) + "\t0\t0\n" +
-					"Gid:\t0\t" + strconv.FormatUint(uint64(peerUID), 10) + "\t0\t0\nGroups:\t" + tc.processGroup + "\n"
-				return []byte(status), nil
-			}
-			peerProcessStartTime = func(int64) (int64, error) { return 1234, nil }
-			t.Cleanup(func() {
-				readPeerProcessStatus, peerProcessStartTime = previousStatus, previousStart
-			})
-			identity := resolvePeerSubmitterIdentity(peerUID, 42)
-			if !identity.GroupsResolved {
-				t.Fatal("valid process credentials did not resolve")
-			}
-			r := p.ReadRange(path, 0, 64, identity)
-			if tc.readable {
-				if r.Status != inspection.StatusOK || string(r.Content) != "process group canary\n" {
-					t.Fatalf("process group did not grant content: %+v", r)
-				}
-			} else if r.Status != inspection.StatusInspectionDenied || r.Reason != inspection.ReasonNotReadableBySubmitter || len(r.Content) != 0 {
-				t.Fatalf("group absent from process credentials granted content: %+v", r)
-			}
-		})
+	identity := inspection.SubmitterIdentity{UID: peerUID, GID: peerUID, Groups: socketIdentity.Groups, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != inspection.StatusOK || string(r.Content) != "socket group canary\n" {
+		t.Fatalf("socket group did not grant content: %+v", r)
+	}
+	withoutGroup := make([]uint32, 0, len(socketIdentity.Groups))
+	for _, member := range socketIdentity.Groups {
+		if member != gid {
+			withoutGroup = append(withoutGroup, member)
+		}
+	}
+	identity.Groups = withoutGroup
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != inspection.StatusInspectionDenied || r.Reason != inspection.ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("group absent from socket credentials granted content: %+v", r)
 	}
 }
 

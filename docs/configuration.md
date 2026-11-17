@@ -160,14 +160,17 @@ allows it. The existing world rule requires **other-read** (`0004`) on the file
 and **other-search** (`0001`) on every traversed ancestor directory.
 Alternatively, the submitting user must have read permission on the file and
 search permission on every traversed ancestor, using the authenticated UID and
-the submitting process's effective GID and supplementary groups frozen at
-submission, with the kernel's owner→group→other bit selection (an owner match
-uses only owner bits). Account-database memberships alone do not grant access.
+the kernel's connect-time effective GID and supplementary groups for the
+submitting socket, with the kernel's owner→group→other bit selection (an owner
+match uses only owner bits). Account-database memberships alone do not grant access.
 A root submitter and an identity whose process credentials cannot be
-authenticated retain the world-only rule. These
-checks use permission bits only; POSIX ACLs are not evaluated. When neither
-model permits access, the result is payload-free `inspection_denied` with reason
-`not_readable_by_submitter`. Directory searches skip such files and include them
+authenticated retain the world-only rule. POSIX ACL entries are not evaluated:
+for the submitter rule, an object with an access ACL grants only through owner
+bits or, for a submitter outside the owning group, other bits; named-user and
+named-group grants are not honored. An ACL probe failure is treated as ACL
+presence. When neither model permits access, the result is payload-free
+`inspection_denied` with reason `not_readable_by_submitter`. Directory searches
+skip such files and include them
 in `skipped_masked`; they never match or return private lines. Permissions and
 path identity, including the submitter-access condition and symlink ancestors,
 are rechecked after reading; a change discards the content.

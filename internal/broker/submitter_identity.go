@@ -1,114 +1,74 @@
 package broker
 
 import (
-	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
+	"net"
 	"slices"
-	"strconv"
-	"strings"
+	"unsafe"
 
-	"github.com/jeremyakers/askdo/internal/admission"
 	"github.com/jeremyakers/askdo/internal/inspection"
+	"golang.org/x/sys/unix"
 )
 
-var readPeerProcessStatus = func(pid int64) ([]byte, error) {
-	return os.ReadFile(filepath.Join("/proc", strconv.FormatInt(pid, 10), "status"))
-}
+var getsockoptPeerGroups = socketPeerGroups
 
-var peerProcessStartTime = func(pid int64) (int64, error) {
-	start, err := admission.ProcessStart("/proc", int(pid))
-	return int64(start), err
-}
-
-// resolvePeerSubmitterIdentity freezes the submitting process's effective GID
-// and supplementary groups, not account-database memberships that may await a
-// new login. Stable process start times around the status read reject PID reuse;
-// matching real/effective UIDs bind the proc entry to SO_PEERCRED. Every failure
-// returns an unresolved identity, preserving world-only content access without
+// unixPeerIdentity freezes the kernel's connect-time socket credentials. Unlike
+// a procfs lookup by PID, SO_PEERCRED and SO_PEERGROUPS cannot be redirected by
+// PID reuse. A group lookup failure leaves content access world-only without
 // rejecting the submission.
-func resolvePeerSubmitterIdentity(uid uint32, pid int64) inspection.SubmitterIdentity {
+func unixPeerIdentity(conn *net.UnixConn, uid uint32) inspection.SubmitterIdentity {
 	identity := inspection.SubmitterIdentity{UID: uid}
-	if pid <= 0 || int64(int(pid)) != pid {
-		return identity
-	}
-	before, err := peerProcessStartTime(pid)
+	raw, err := conn.SyscallConn()
 	if err != nil {
 		return identity
 	}
-	status, err := readPeerProcessStatus(pid)
-	if err != nil {
+	var credential *unix.Ucred
+	var groups []uint32
+	var socketErr, groupsErr error
+	if err := raw.Control(func(fd uintptr) {
+		credential, socketErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		if socketErr != nil || credential == nil || credential.Uid != uid {
+			return
+		}
+		groups, groupsErr = getsockoptPeerGroups(int(fd))
+	}); err != nil || socketErr != nil || credential == nil || credential.Uid != uid {
 		return identity
 	}
-	after, err := peerProcessStartTime(pid)
-	if err != nil || before != after {
+	identity.GID = credential.Gid
+	if groupsErr != nil {
 		return identity
 	}
-	gid, groups, err := parsePeerProcessStatus(status, uid)
-	if err != nil {
-		return identity
-	}
-	slices.Sort(groups)
-	identity.GID = gid
-	identity.Groups = slices.Compact(groups)
+	identity.Groups = normalizeSubmitterGroups(groups)
 	identity.GroupsResolved = true
 	return identity
 }
 
-func parsePeerProcessStatus(status []byte, peerUID uint32) (uint32, []uint32, error) {
-	var gid uint32
-	var groups []uint32
-	var uidSeen, gidSeen, groupsSeen bool
-	for _, line := range strings.Split(string(status), "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
+// socketPeerGroups uses the SO_PEERGROUPS size returned with ERANGE for its one
+// retry. Linux reports the option length in bytes.
+func socketPeerGroups(fd int) ([]uint32, error) {
+	groups := make([]uint32, 1)
+	for attempt := 0; attempt < 2; attempt++ {
+		size := uint32(len(groups) * 4)
+		_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, uintptr(fd), uintptr(unix.SOL_SOCKET), uintptr(unix.SO_PEERGROUPS), uintptr(unsafe.Pointer(&groups[0])), uintptr(unsafe.Pointer(&size)), 0)
+		if errno == unix.ERANGE && attempt == 0 {
+			if size == 0 || size%4 != 0 {
+				return nil, unix.EINVAL
+			}
+			groups = make([]uint32, int(size/4))
 			continue
 		}
-		switch key {
-		case "Uid", "Gid":
-			if (key == "Uid" && uidSeen) || (key == "Gid" && gidSeen) {
-				return 0, nil, errors.New("duplicate process credential field")
-			}
-			ids, err := parseProcIDs(strings.Fields(value))
-			if err != nil || len(ids) != 4 {
-				return 0, nil, errors.New("invalid process credential field")
-			}
-			if key == "Uid" {
-				uidSeen = true
-				if ids[0] != peerUID || ids[1] != peerUID {
-					return 0, nil, errors.New("process UID does not match socket peer")
-				}
-			} else {
-				gidSeen = true
-				gid = ids[1]
-			}
-		case "Groups":
-			if groupsSeen {
-				return 0, nil, errors.New("duplicate process groups")
-			}
-			groupsSeen = true
-			var err error
-			groups, err = parseProcIDs(strings.Fields(value))
-			if err != nil {
-				return 0, nil, errors.New("invalid process groups")
-			}
+		if errno != 0 {
+			return nil, errno
 		}
+		if size%4 != 0 || int(size/4) > len(groups) {
+			return nil, unix.EINVAL
+		}
+		return groups[:int(size/4)], nil
 	}
-	if !uidSeen || !gidSeen || !groupsSeen {
-		return 0, nil, errors.New("incomplete process credentials")
-	}
-	return gid, groups, nil
+	return nil, unix.ERANGE
 }
 
-func parseProcIDs(fields []string) ([]uint32, error) {
-	ids := make([]uint32, len(fields))
-	for i, field := range fields {
-		id, err := strconv.ParseUint(field, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid numeric ID %q", field)
-		}
-		ids[i] = uint32(id)
-	}
-	return ids, nil
+func normalizeSubmitterGroups(groups []uint32) []uint32 {
+	groups = append([]uint32(nil), groups...)
+	slices.Sort(groups)
+	return slices.Compact(groups)
 }

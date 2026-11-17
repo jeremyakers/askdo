@@ -113,29 +113,39 @@ func TestArgvBootstrapDoesNotCaptureExecutable(t *testing.T) {
 	}
 }
 
-func TestPeerCredentialLookupFailureStillSnapshotsSubmitterIdentity(t *testing.T) {
+func TestPeerGroupLookupFailureStillSnapshotsSubmitterIdentity(t *testing.T) {
 	root := t.TempDir()
 	target := writeEvidenceFixture(t, root, "group-writable", "fixture")
 	if err := os.Chmod(target, 0770); err != nil {
 		t.Fatal(err)
 	}
-	previous := readPeerProcessStatus
+	previous := getsockoptPeerGroups
 	lookups := 0
-	readPeerProcessStatus = func(int64) ([]byte, error) {
+	getsockoptPeerGroups = func(int) ([]uint32, error) {
 		lookups++
-		return nil, errors.New("injected process status lookup failure")
+		return nil, errors.New("injected SO_PEERGROUPS failure")
 	}
-	t.Cleanup(func() { readPeerProcessStatus = previous })
+	t.Cleanup(func() { getsockoptPeerGroups = previous })
 	h := newEvidenceHarness(t, root, root, nil)
+	uid := uint32(os.Getuid())
+	h.peerUID.Store(uid)
 	req := newReservedRequest(t, h, "identity")
 	req.Argv = []string{target}
 	if body := submitAndReadTerminal(t, h.socket, req); !strings.Contains(string(body), `"state":"finished"`) {
 		t.Fatalf("result=%s", body)
 	}
 	if lookups != 1 {
-		t.Fatalf("process status lookup count=%d; want one at submit", lookups)
+		t.Fatalf("SO_PEERGROUPS lookup count=%d; want one at submit", lookups)
 	}
-	if index := readJobCaptureIndex(t, h, req.RequestID); len(index.Files) != 0 {
+	job, err := h.daemon.store.GetJob(context.Background(), uid, req.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := readCaptureIndex(filepath.Join(job.SpoolDir, "capture-index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(index.Files) != 0 {
 		t.Fatalf("identity preflight captured host code: %+v", index.Files)
 	}
 }

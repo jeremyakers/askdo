@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jeremyakers/askdo/internal/config"
+	"golang.org/x/sys/unix"
 )
 
 // Also run by TestLegacySecurityMatrix: parent-directory relative links work
@@ -201,6 +202,48 @@ func TestSubmitterReadableSecretRemainsWithheld(t *testing.T) {
 	t.Cleanup(func() { _ = p.Close() })
 	if r := p.ReadRange(path, 0, 64, currentIdentity()); r.Status != StatusWithheld || len(r.Content) != 0 {
 		t.Fatalf("submitter-readable system-secret mask: %+v", r)
+	}
+}
+
+func TestSubmitterContentPermissionWithAccessACL(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("ACL permission case requires a non-root test process")
+	}
+	root := t.TempDir()
+	for _, dir := range []string{filepath.Dir(root), root} {
+		if err := os.Chmod(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(root, "private")
+	writeFile(t, path, "ACL canary", 0640)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	previous := fgetxattr
+	t.Cleanup(func() { fgetxattr = previous })
+	fgetxattr = func(int, string, []byte) (int, error) { return 0, unix.ENODATA }
+	otherUID := uint32(65534)
+	if otherUID == uint32(os.Getuid()) {
+		otherUID++
+	}
+	identity := SubmitterIdentity{UID: otherUID, GID: otherUID, Groups: []uint32{uint32(os.Getgid())}, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusOK || string(r.Content) != "ACL canary" {
+		t.Fatalf("group read without ACL: %+v", r)
+	}
+	fgetxattr = func(int, string, []byte) (int, error) { return 0, nil }
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("ACL mask used as owning-group entry: %+v", r)
+	}
+	fgetxattr = func(int, string, []byte) (int, error) { return 0, unix.EIO }
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusInspectionDenied || len(r.Content) != 0 {
+		t.Fatalf("xattr failure allowed group grant: %+v", r)
+	}
+	fgetxattr = func(int, string, []byte) (int, error) { return 0, nil }
+	if r := p.ReadRange(path, 0, 64, currentIdentity()); r.Status != StatusOK || string(r.Content) != "ACL canary" {
+		t.Fatalf("owner read with ACL: %+v", r)
 	}
 }
 
