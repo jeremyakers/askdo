@@ -119,13 +119,13 @@ func TestGroupLookupFailureStillSnapshotsSubmitterIdentity(t *testing.T) {
 	if err := os.Chmod(target, 0770); err != nil {
 		t.Fatal(err)
 	}
-	previous := lookupSubmitterGroupIDs
+	previous := lookupSubmitterGroups
 	lookups := 0
-	lookupSubmitterGroupIDs = func(uint32) ([]string, error) {
+	lookupSubmitterGroups = func(uint32) (string, []string, error) {
 		lookups++
-		return nil, errors.New("injected group lookup failure")
+		return "", nil, errors.New("injected group lookup failure")
 	}
-	t.Cleanup(func() { lookupSubmitterGroupIDs = previous })
+	t.Cleanup(func() { lookupSubmitterGroups = previous })
 	h := newEvidenceHarness(t, root, root, nil)
 	req := newReservedRequest(t, h, "identity")
 	req.Argv = []string{target}

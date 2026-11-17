@@ -36,7 +36,8 @@ func writeFile(t *testing.T, path, content string, mode os.FileMode) {
 }
 
 func currentIdentity() SubmitterIdentity {
-	return SubmitterIdentity{UID: uint32(os.Getuid()), GroupsResolved: true}
+	gid := uint32(os.Getgid())
+	return SubmitterIdentity{UID: uint32(os.Getuid()), GID: gid, Groups: []uint32{gid}, GroupsResolved: true}
 }
 
 func TestTraversalAndScopeRejection(t *testing.T) {

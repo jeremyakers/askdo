@@ -52,10 +52,11 @@ const (
 	// inspectable by this operation (special file, pseudo-filesystem, a
 	// directory read as content, or an unsupported legacy symlink follow).
 	ReasonUnsupportedObject Reason = "unsupported_object"
-	// ReasonNotWorldReadable: content under the implicit filesystem root lacks
-	// other-read on the file or other-search on a traversed ancestor directory.
-	// Metadata remains available; configured non-"/" roots grant content access.
-	ReasonNotWorldReadable Reason = "not_world_readable"
+	// ReasonNotReadableBySubmitter: content under the implicit filesystem root is
+	// neither world-readable nor readable by the resolved non-root submitter using
+	// file-read and ancestor-search permission bits. Metadata remains available;
+	// configured non-"/" roots grant content access.
+	ReasonNotReadableBySubmitter Reason = "not_readable_by_submitter"
 )
 
 // Knowledge records whether a supported deterministic fact is present, absent,
@@ -90,10 +91,12 @@ type Facts struct {
 }
 
 // SubmitterIdentity is the authenticated submitter identity used for
-// deterministic owner/group/world writability checks. When GroupsResolved is
-// false, group-write bits are conservatively treated as submitter-writable.
+// deterministic owner/group/world permission checks. When GroupsResolved is
+// false, group-write bits are conservatively treated as submitter-writable and
+// implicit-root content retains the world-readable-only rule.
 type SubmitterIdentity struct {
 	UID            uint32
+	GID            uint32
 	Groups         []uint32
 	GroupsResolved bool
 }
@@ -137,11 +140,10 @@ var rangeReadHooks sync.Map // *Policy -> rangeHooks
 // file. Both names are masked before any content access, and no bytes escape
 // until descriptor metadata and the requested path have been revalidated.
 func (p *Policy) ReadRange(path string, offset int64, maxBytes int, identity SubmitterIdentity) RangeResult {
-	_ = identity // Direct reads do not score submitter writability.
 	if offset < 0 || maxBytes < 1 || maxBytes > 16384 || offset > math.MaxInt64-int64(maxBytes) {
 		return RangeResult{Status: StatusLimitExceeded}
 	}
-	fd, auth, err := p.contentOpen(path)
+	fd, auth, err := p.contentOpen(path, identity)
 	if err != nil {
 		r := resultForError(err)
 		return RangeResult{Status: r.Status, Reason: r.Reason, Err: r.Err}
@@ -179,7 +181,7 @@ func (p *Policy) ReadRange(path string, offset int64, maxBytes int, identity Sub
 	if err := unix.Fstat(fd, &after); err != nil {
 		return RangeResult{Status: StatusUnknown, Err: err}
 	}
-	sameErr := p.revalidate(path, auth)
+	sameErr := p.revalidateWithIdentity(path, auth, identity)
 	if errors.Is(sameErr, errRequiredOpenat2) {
 		return RangeResult{Status: StatusError, Err: sameErr}
 	}

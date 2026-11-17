@@ -122,7 +122,7 @@ when the key is absent.
 
 | Field | Required | Default | Rules and meaning |
 |---|---|---|---|
-| `read_roots` | no | `[]` (implicit `/` always applies) | Absolute, cleaned **additive** read paths (files or directory trees), not an allow-list limiting metadata inspection. A configured entry **other than `/`** grants content access even to private files in that tree. With only the implicit `/`, content requires file other-read and ancestor-directory other-search permissions (see below). Configured spellings remain in manifests and trust assumptions and may re-open a more-specific part of `deny_paths`; they never override hard exclusions or masks. A path need not exist yet: requests report `not_found` until it appears, then use the same per-request checks without a restart. Symlink targets are checked independently. |
+| `read_roots` | no | `[]` (implicit `/` always applies) | Absolute, cleaned **additive** read paths (files or directory trees), not an allow-list limiting metadata inspection. A configured entry **other than `/`** grants content access even to private files in that tree. With only the implicit `/`, content requires world access or ordinary read/search access for the submitting user (see below). Configured spellings remain in manifests and trust assumptions and may re-open a more-specific part of `deny_paths`; they never override hard exclusions or masks. A path need not exist yet: requests report `not_found` until it appears, then use the same per-request checks without a restart. Symlink targets are checked independently. |
 | `deny_paths` | no | `[]` | Absolute, cleaned exclusions. The most-specific component-wise match wins across the implicit `/`, configured read paths and deny rules; ties deny. Deny `/home/user`, allow `/home/user/bin` reopens only the `bin` subtree. Hard exclusions always win. |
 | `trusted_executable_roots` | no | — | **Deprecated and ignored.** Still accepted by the strict decoder so existing version 4 files that carry it keep loading, but the value has no effect: no validation, no warning, no policy decision, and no record in the frozen approval manifest. There is no trusted-code category that substitutes for the model reading code, and the reviewer does not automatically discover dependencies. Omit this field in new configurations. |
 | `sensitive_masks` | no | built-in default list | Credential-like path **name** masks. Omitting the field compiles the built-in well-known secret-name conventions; an explicit **non-empty** array **replaces** those configurable defaults (it does not extend them), so tuning out one false positive without re-listing the others silently unprotects them. The always-on system-secret protections below apply **in addition** and cannot be replaced. An explicit empty or `null` array is invalid — never a silent disable. At most 256 configured masks, each ≤ 256 bytes, valid UTF-8, no backslashes, control characters, or empty/`.`/`..` components. Mask syntax and matching semantics are defined below. |
@@ -155,13 +155,20 @@ Directory listings remain names-only and do not require world-readable or
 world-searchable permissions.
 
 For `read_path` and file contents matched by `search_path`, a file allowed
-only by the implicit `/` must have the **other-read** bit (`0004`) set and
-**every traversed ancestor directory** must have **other-search** (`0001`)
-set. A `0600`/`0640` file, or a `0644` file behind a `0700` directory, returns
-payload-free `inspection_denied` with reason `not_world_readable`. Directory
-searches skip such files and include them in `skipped_masked`; they never
-match or return private lines. Permissions and path identity are rechecked
-after reading; a change discards the content.
+only by the implicit `/` is readable when either of two permission models
+allows it. The existing world rule requires **other-read** (`0004`) on the file
+and **other-search** (`0001`) on every traversed ancestor directory.
+Alternatively, the submitting user must have read permission on the file and
+search permission on every traversed ancestor, using its authenticated UID,
+primary GID and supplementary groups and the kernel's owner→group→other bit
+selection (an owner match uses only owner bits). A root submitter and an
+identity whose groups cannot be resolved retain the world-only rule. These
+checks use permission bits only; POSIX ACLs are not evaluated. When neither
+model permits access, the result is payload-free `inspection_denied` with reason
+`not_readable_by_submitter`. Directory searches skip such files and include them
+in `skipped_masked`; they never match or return private lines. Permissions and
+path identity, including the submitter-access condition and symlink ancestors,
+are rechecked after reading; a change discards the content.
 
 Administrators can grant content access to a private file or tree by adding
 that path to `inspection.read_roots`, for example `/etc/sudoers` or
@@ -252,7 +259,7 @@ The always-on masks also apply wherever the policy's sensitive matcher is used.
 `askdo-config inspection check <path> [--config PATH]` runs as root and prints
 ALLOWED or DENIED with the decisive rule and resolved path where available.
 It checks metadata/path policy without reading content: ALLOWED does not
-override `not_world_readable` on a later implicit-root content request.
+override `not_readable_by_submitter` on a later implicit-root content request.
 It opens metadata only; it does not print contents or change configuration.
 It reports an **inspection policy decision only**; incomplete reviewer or
 Telegram sections are intentionally permitted during onboarding. Run

@@ -325,7 +325,7 @@ func (j *jobRuntime) searchPath(seq uint32, req proto.SearchPathRequest) (proto.
 		if budget < 1 {
 			return failedInspect(seq, inspection.StatusLimitExceeded), nil
 		}
-		data, status, reason := j.inspectionPolicy().ReadSearchFileReason(req.Path, budget)
+		data, status, reason := j.inspectionPolicy().ReadSearchFileReason(req.Path, budget, j.identity)
 		if status == inspection.StatusWithheld {
 			j.recordWithheldPath(req.Path)
 		}
@@ -658,8 +658,8 @@ func (j *jobRuntime) searchHostTree(seq uint32, req proto.SearchPathRequest, re 
 		if meta.Type != "file" {
 			continue
 		}
-		data, status, reason := j.inspectionPolicy().ReadSearchFileReason(name, budget)
-		if status == inspection.StatusInspectionDenied && reason == inspection.ReasonNotWorldReadable {
+		data, status, reason := j.inspectionPolicy().ReadSearchFileReason(name, budget, j.identity)
+		if status == inspection.StatusInspectionDenied && reason == inspection.ReasonNotReadableBySubmitter {
 			skipped++
 			continue
 		}

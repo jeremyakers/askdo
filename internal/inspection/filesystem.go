@@ -180,17 +180,17 @@ func (p *Policy) mountDetails(fd int, path string, a authorization) (MountDetail
 // ReadSearchFile bounds one whole-file text observation on one descriptor. It
 // rechecks identity and timestamps after reading and verifies the path again.
 func (p *Policy) ReadSearchFile(path string, limit int64) ([]byte, Status) {
-	data, status, _ := p.ReadSearchFileReason(path, limit)
+	data, status, _ := p.ReadSearchFileReason(path, limit, SubmitterIdentity{})
 	return data, status
 }
 
 // ReadSearchFileReason preserves the authoritative policy reason for a denied
 // content read, independently of the metadata-only search-tree traversal.
-func (p *Policy) ReadSearchFileReason(path string, limit int64) ([]byte, Status, Reason) {
+func (p *Policy) ReadSearchFileReason(path string, limit int64, identity SubmitterIdentity) ([]byte, Status, Reason) {
 	if limit < 1 || limit > 1<<20 {
 		return nil, StatusLimitExceeded, ""
 	}
-	fd, a, err := p.contentOpen(path)
+	fd, a, err := p.contentOpen(path, identity)
 	if err != nil {
 		r := resultForError(err)
 		return nil, r.Status, r.Reason
@@ -228,7 +228,7 @@ func (p *Policy) ReadSearchFileReason(path string, limit int64) ([]byte, Status,
 		}
 	}
 	var after unix.Stat_t
-	if err := unix.Fstat(fd, &after); err != nil || rangeChanged(a.stat, after) || p.revalidate(path, a) != nil {
+	if err := unix.Fstat(fd, &after); err != nil || rangeChanged(a.stat, after) || p.revalidateWithIdentity(path, a, identity) != nil {
 		return nil, StatusChangedDuringCapture, ""
 	}
 	if n > int(limit) {

@@ -38,12 +38,20 @@ func TestContentPermissionsSymlinksAndRevalidation(t *testing.T) {
 		t.Fatalf("public relative parent link: %+v", r)
 	}
 	// The canonical target is public, but the intermediate link traverses a
-	// private directory. Neither range reads nor search may bypass it.
+	// private directory. Its owner may read it; an unrelated submitter and the
+	// legacy world-only search entrypoint may not bypass the private ancestor.
 	indirect := filepath.Join(root, "indirect/file")
-	if r := p.ReadRange(indirect, 0, 64, currentIdentity()); r.Status != StatusInspectionDenied || r.Reason != ReasonNotWorldReadable || len(r.Content) != 0 {
+	if r := p.ReadRange(indirect, 0, 64, currentIdentity()); r.Status != StatusOK || string(r.Content) != "public fixture" {
+		t.Fatalf("submitter-owned intermediate link: %+v", r)
+	}
+	other := SubmitterIdentity{UID: 65534, GroupsResolved: true}
+	if other.UID == uint32(os.Getuid()) {
+		other.UID++
+	}
+	if r := p.ReadRange(indirect, 0, 64, other); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
 		t.Fatalf("private intermediate link: %+v", r)
 	}
-	if data, status, reason := p.ReadSearchFileReason(indirect, 64); status != StatusInspectionDenied || reason != ReasonNotWorldReadable || len(data) != 0 {
+	if data, status, reason := p.ReadSearchFileReason(indirect, 64, SubmitterIdentity{}); status != StatusInspectionDenied || reason != ReasonNotReadableBySubmitter || len(data) != 0 {
 		t.Fatalf("private intermediate search: %q %s/%s", data, status, reason)
 	}
 	file := filepath.Join(private, "file")
@@ -56,7 +64,7 @@ func TestContentPermissionsSymlinksAndRevalidation(t *testing.T) {
 		t.Fatalf("explicit private-file grant: %+v", r)
 	}
 	writeFile(t, filepath.Join(private, "sibling"), "private sibling", 0644)
-	if r := grant.ReadRange(filepath.Join(private, "sibling"), 0, 64, currentIdentity()); r.Status != StatusInspectionDenied || r.Reason != ReasonNotWorldReadable || len(r.Content) != 0 {
+	if r := grant.ReadRange(filepath.Join(private, "sibling"), 0, 64, other); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
 		t.Fatalf("file-only grant admitted sibling content: %+v", r)
 	}
 	for _, search := range []bool{false, true} {
@@ -69,13 +77,170 @@ func TestContentPermissionsSymlinksAndRevalidation(t *testing.T) {
 			if data, status := p.ReadSearchFile(filepath.Join(public, "file"), 64); status != StatusChangedDuringCapture || len(data) != 0 {
 				t.Errorf("ancestor permission changed during search: %q %s", data, status)
 			}
-		} else if r := p.ReadRange(filepath.Join(public, "file"), 0, 64, currentIdentity()); r.Status != StatusChangedDuringCapture || len(r.Content) != 0 {
+		} else if r := p.ReadRange(filepath.Join(public, "file"), 0, 64, other); r.Status != StatusChangedDuringCapture || len(r.Content) != 0 {
 			t.Errorf("ancestor permission changed during range read: %+v", r)
 		}
 		rangeReadHooks.Delete(p)
 		if err := os.Chmod(public, 0755); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestSubmitterOwnerContentPermission(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("owner submitter case requires a non-root test process")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "private")
+	writeFile(t, path, "owner canary", 0600)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	identity := currentIdentity()
+	identity.Groups = []uint32{uint32(os.Getgid())}
+	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusOK || string(r.Content) != "owner canary" {
+		t.Fatalf("submitter owner read: %+v", r)
+	}
+	if data, status, reason := p.ReadSearchFileReason(path, 64, identity); status != StatusOK || reason != "" || string(data) != "owner canary" {
+		t.Fatalf("submitter owner search read: %q %s/%s", data, status, reason)
+	}
+	other := SubmitterIdentity{UID: 65534, GroupsResolved: true}
+	if other.UID == identity.UID {
+		other.UID++
+	}
+	if r := p.ReadRange(path, 0, 64, other); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("other UID read: %+v", r)
+	}
+	if r := p.ReadRange(path, 0, 64, SubmitterIdentity{UID: identity.UID}); r.Status != StatusInspectionDenied || len(r.Content) != 0 {
+		t.Fatalf("unresolved submitter groups must retain world-only access: %+v", r)
+	}
+}
+
+func TestSubmitterGroupContentPermission(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("group submitter case requires a non-root test process")
+	}
+	root := t.TempDir()
+	// t.TempDir has a per-test parent in addition to the returned directory.
+	for _, dir := range []string{filepath.Dir(root), root} {
+		if err := os.Chmod(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(root, "group")
+	if err := os.Mkdir(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "private")
+	writeFile(t, path, "group canary", 0640)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	otherUID := uint32(65534)
+	if otherUID == uint32(os.Getuid()) {
+		otherUID++
+	}
+	gid := uint32(os.Getgid())
+	member := SubmitterIdentity{UID: otherUID, Groups: []uint32{gid}, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, member); r.Status != StatusOK || string(r.Content) != "group canary" {
+		t.Fatalf("submitter group read: %+v", r)
+	}
+	nonmember := SubmitterIdentity{UID: otherUID, Groups: []uint32{gid + 1}, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, nonmember); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("nonmember group read: %+v", r)
+	}
+}
+
+func TestSubmitterContentRequiresAncestorSearch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private")
+	writeFile(t, path, "ancestor canary", 0644)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	other := SubmitterIdentity{UID: 65534, GroupsResolved: true}
+	if other.UID == uint32(os.Getuid()) {
+		other.UID++
+	}
+	// The test process owns and can traverse the 0700 fixture directory, while
+	// the other UID has file other-read but no ancestor search permission.
+	if r := p.ReadRange(path, 0, 64, other); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("ancestor without submitter search: %+v", r)
+	}
+}
+
+func TestRootSubmitterRetainsWorldOnlyContentPermission(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private")
+	writeFile(t, path, "root canary", 0600)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if r := p.ReadRange(path, 0, 64, SubmitterIdentity{UID: 0, GroupsResolved: true}); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("root submitter private read: %+v", r)
+	}
+}
+
+func TestSubmitterReadableSecretRemainsWithheld(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "ssh_host_rsa_key")
+	writeFile(t, path, "secret canary", 0600)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	if r := p.ReadRange(path, 0, 64, currentIdentity()); r.Status != StatusWithheld || len(r.Content) != 0 {
+		t.Fatalf("submitter-readable system-secret mask: %+v", r)
+	}
+}
+
+func TestSubmitterContentPermissionRevalidatedAfterRead(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("submitter permission case requires a non-root test process")
+	}
+	root := t.TempDir()
+	for _, dir := range []string{filepath.Dir(root), root} {
+		if err := os.Chmod(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(root, "private")
+	writeFile(t, path, "revalidation canary", 0640)
+	alias := filepath.Join(filepath.Dir(root), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	rangeReadHooks.Store(p, rangeHooks{afterRead: func() {
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	t.Cleanup(func() {
+		rangeReadHooks.Delete(p)
+		_ = os.Chmod(root, 0750)
+	})
+	otherUID := uint32(65534)
+	if otherUID == uint32(os.Getuid()) {
+		otherUID++
+	}
+	identity := SubmitterIdentity{UID: otherUID, GID: otherUID, Groups: []uint32{uint32(os.Getgid())}, GroupsResolved: true}
+	if r := p.ReadRange(filepath.Join(alias, "private"), 0, 64, identity); r.Status != StatusChangedDuringCapture || len(r.Content) != 0 {
+		t.Fatalf("submitter permission changed during read: %+v", r)
 	}
 }
 

@@ -78,6 +78,11 @@ func validWorkerReview(_ proto.WorkerOperation) proto.ReviewComplete {
 
 func newTestJobRuntime(t *testing.T, d *daemon, request proto.SubmitRequest, spool spoolFiles) *jobRuntime {
 	t.Helper()
+	return newTestJobRuntimeForSubmitter(t, d, request, spool, testUID)
+}
+
+func newTestJobRuntimeForSubmitter(t *testing.T, d *daemon, request proto.SubmitRequest, spool spoolFiles, submitterUID uint32) *jobRuntime {
+	t.Helper()
 	cwd, err := bindCWD(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -89,5 +94,5 @@ func newTestJobRuntime(t *testing.T, d *daemon, request proto.SubmitRequest, spo
 	if err := captureSubmittedBundle(spool, request, d.cfg.Limits, d.policy); err != nil {
 		t.Fatal(err)
 	}
-	return newJobRuntime(d, testUID, request, spool, resolveSubmitterIdentity(testUID), cwd, resolveSubmitterName(testUID))
+	return newJobRuntime(d, submitterUID, request, spool, resolveSubmitterIdentity(submitterUID), cwd, resolveSubmitterName(submitterUID))
 }

@@ -16,12 +16,13 @@ import (
 // the PATH used by the executor; client environment never participates.
 var approvedHostPATH = []string{"/usr/bin", "/bin"}
 
-var lookupSubmitterGroupIDs = func(uid uint32) ([]string, error) {
+var lookupSubmitterGroups = func(uid uint32) (string, []string, error) {
 	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	return account.GroupIds()
+	groupIDs, err := account.GroupIds()
+	return account.Gid, groupIDs, err
 }
 
 func (j *jobRuntime) captureEvidence() error {
@@ -120,16 +121,20 @@ func resolveTopLevelExecutable(argv0 string) ([]string, error) {
 
 func resolveSubmitterIdentity(uid uint32) inspection.SubmitterIdentity {
 	identity := inspection.SubmitterIdentity{UID: uid}
-	groupIDs, err := lookupSubmitterGroupIDs(uid)
+	primaryGID, groupIDs, err := lookupSubmitterGroups(uid)
 	if err != nil {
 		return identity
 	}
+	gid, err := strconv.ParseUint(primaryGID, 10, 32)
+	if err != nil {
+		return identity
+	}
+	identity.GID = uint32(gid)
 	identity.Groups = make([]uint32, 0, len(groupIDs))
 	for _, groupID := range groupIDs {
 		parsed, err := strconv.ParseUint(groupID, 10, 32)
 		if err != nil {
-			identity.Groups = nil
-			return identity
+			return inspection.SubmitterIdentity{UID: uid}
 		}
 		identity.Groups = append(identity.Groups, uint32(parsed))
 	}

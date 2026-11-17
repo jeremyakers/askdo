@@ -266,6 +266,10 @@ func readableDescriptor(fd int, a authorization, flags int) (int, error) {
 }
 
 func (p *Policy) revalidate(path string, before authorization) error {
+	return p.revalidateWithIdentity(path, before, SubmitterIdentity{})
+}
+
+func (p *Policy) revalidateWithIdentity(path string, before authorization, identity SubmitterIdentity) error {
 	fd, after, err := p.authorizedOpen(path, 0)
 	if err != nil {
 		return err
@@ -275,7 +279,7 @@ func (p *Policy) revalidate(path string, before authorization) error {
 		return denied(ReasonUnverifiedIdentity, "requested path or mount mapping changed")
 	}
 	if before.content {
-		return p.checkContentAccess(after)
+		return p.checkContentAccess(after, identity)
 	}
 	return nil
 }

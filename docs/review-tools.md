@@ -96,12 +96,16 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
   through a terminal symlink or an absolute-path symlink is denied rather than
   followed; the `inspection_scope` `compatibility` leaf reports this.
 - **Host content permissions:** unless a non-`/` configured read root grants
-  content access, the file must have other-read (`0004`) and every traversed
-  ancestor directory must have other-search (`0001`). Otherwise the result is
-  payload-free `inspection_denied`, reason `not_world_readable`. An explicit
-  `/` is still subject to this rule. Hard denies, masks and exclusions always
-  apply. Metadata tools (including executable hashes) and names-only directory
-  listings retain their existing behavior on private objects.
+  content access, either the file must have other-read (`0004`) and every
+  traversed ancestor directory other-search (`0001`), or the authenticated
+  submitting user must have ordinary read/search access using its UID, primary
+  GID and supplementary groups. Owner→group→other selection and permission bits
+  follow Unix semantics; ACLs are not evaluated. A root submitter or unresolved
+  group identity uses only the world rule. Otherwise the result is payload-free
+  `inspection_denied`, reason `not_readable_by_submitter`. An explicit `/` is
+  still subject to this rule. Hard denies, masks and exclusions always apply.
+  Metadata tools (including executable hashes) and names-only directory listings
+  retain their existing behavior on private objects.
 - **Bundle reads:** served from the root-only staged copy; the staged bytes
   are re-hashed against the capture index on every read. A staged file the
   broker classified as masked (admin `Masked` policy or a client
@@ -428,13 +432,17 @@ of the trust boundary — enforces:
    `unsupported_object` distinguish other policy/object boundaries when the
    same decision establishes them. Unknown causes are not guessed from errno
    text or a later check, and reasons never include private rule/path spellings.
-- **Content permissions:** the implicit `/` grants file content only when the
-  file is world-readable and all traversed ancestor directories are
-  world-searchable. Configured non-`/` roots grant private-tree content access;
-  they do not override named secret protections. A refused file read/search
-  returns `inspection_denied` with `reason_code: "not_world_readable"`.
-  Directory searches skip these files, counting them in `skipped_masked`, so
-  public matches remain available without revealing private content.
+- **Content permissions:** the implicit `/` grants file content when the file
+  and all traversed ancestor directories are world-readable/searchable, or when
+  the submitting user's authenticated UID, primary GID and supplementary groups
+  have ordinary Unix read/search permission bits. Owner→group→other selection
+  applies; ACLs are not evaluated. Root submitters and unresolved identities
+  retain the world-only rule. Configured non-`/` roots grant private-tree content
+  access; they do not override named secret protections. A refused file
+  read/search returns `inspection_denied` with
+  `reason_code: "not_readable_by_submitter"`. Directory searches skip these
+  files, counting them in `skipped_masked`, so public matches remain available
+  without revealing private content.
 - **Sensitive name masks:** a permitted host path or staged bundle path whose
   requested or resolved name matches the always-on system-secret masks,
   `inspection.sensitive_masks` (or a client `sensitive_inclusions` opt-in) is

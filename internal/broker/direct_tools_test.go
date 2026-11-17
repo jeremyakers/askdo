@@ -24,6 +24,11 @@ func directJob(t *testing.T, root string, bundle []proto.BundleFile) *jobRuntime
 
 func directJobWithInspection(t *testing.T, inspectionCfg config.InspectionConfig, bundle []proto.BundleFile) *jobRuntime {
 	t.Helper()
+	return directJobWithInspectionForSubmitter(t, inspectionCfg, bundle, testUID)
+}
+
+func directJobWithInspectionForSubmitter(t *testing.T, inspectionCfg config.InspectionConfig, bundle []proto.BundleFile, submitterUID uint32) *jobRuntime {
+	t.Helper()
 	cfg := testConfig()
 	cfg.Inspection = inspectionCfg
 	spool, err := createSpool(filepath.Join(t.TempDir(), "spool"), []byte(`{}`))
@@ -42,7 +47,7 @@ func directJobWithInspection(t *testing.T, inspectionCfg config.InspectionConfig
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
-	id, err := s.ReserveJobID(ctx, testUID, time.Now())
+	id, err := s.ReserveJobID(ctx, submitterUID, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +59,7 @@ func directJobWithInspection(t *testing.T, inspectionCfg config.InspectionConfig
 		req.Files = bundle
 		req.SensitiveInclusions = []string{"secret.privmask"}
 	}
-	j := newTestJobRuntime(t, &daemon{cfg: cfg, policy: p, store: s}, req, spool)
+	j := newTestJobRuntimeForSubmitter(t, &daemon{cfg: cfg, policy: p, store: s}, req, spool, submitterUID)
 	if _, err := s.SubmitReservedJob(ctx, store.Job{UID: j.uid, RequestID: id, SubmitBody: []byte(`{}`), OperationJSON: []byte(`{}`), Reason: req.Reason, Mode: req.Mode, SpoolDir: spool.dir, AttemptsJSON: []byte(`[]`)}); err != nil {
 		t.Fatal(err)
 	}
