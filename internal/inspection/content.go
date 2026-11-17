@@ -134,7 +134,7 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 			if st.Dev != target.Dev || st.Ino != target.Ino {
 				return denied(ReasonUnverifiedIdentity, "content permission target changed")
 			}
-			if !permitted(st, false, p.accessACLFor(current, checkACL)) {
+			if !permitted(st, false, p.accessACLFor(current, st, checkACL)) {
 				return denied(ReasonNotReadableBySubmitter, "file lacks required read permission")
 			}
 			return nil
@@ -142,7 +142,7 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 			return unix.ENOTDIR
 		}
-		if !permitted(st, true, p.accessACLFor(current, checkACL)) {
+		if !permitted(st, true, p.accessACLFor(current, st, checkACL)) {
 			return denied(ReasonNotReadableBySubmitter, "ancestor directory lacks required search permission")
 		}
 		component := pending[0]
@@ -245,7 +245,7 @@ func parseAccessACL(raw []byte) (accessACL, bool) {
 // descriptor (fgetxattr does not accept O_PATH descriptors); no content is
 // read. ENODATA means no ACL. Any other failure is unknown, which grants only
 // the owner.
-func (p *Policy) accessACLFor(path string, check bool) accessACL {
+func (p *Policy) accessACLFor(path string, statted unix.Stat_t, check bool) accessACL {
 	if !check {
 		return accessACL{}
 	}
@@ -259,10 +259,24 @@ func (p *Policy) accessACLFor(path string, check bool) accessACL {
 			return accessACL{unknown: true}
 		}
 		defer unix.Close(pathFD)
+		if !sameObject(pathFD, statted) {
+			return accessACL{unknown: true}
+		}
 		return readAccessACL(pathFD, procFDGetxattr)
 	}
 	defer unix.Close(fd)
+	if !sameObject(fd, statted) {
+		return accessACL{unknown: true}
+	}
 	return readAccessACL(fd, fgetxattr)
+}
+
+// sameObject reports whether fd still names the object whose metadata the
+// permission walk checked; a rename between the two opens must not pair one
+// object's mode with another's ACL.
+func sameObject(fd int, statted unix.Stat_t) bool {
+	var st unix.Stat_t
+	return unix.Fstat(fd, &st) == nil && st.Dev == statted.Dev && st.Ino == statted.Ino
 }
 
 // procFDGetxattr reads an xattr of an O_PATH descriptor through its

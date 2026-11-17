@@ -402,7 +402,11 @@ func TestRealAccessACLParsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	acl := p.accessACLFor(path, true)
+	var pst unix.Stat_t
+	if err := unix.Stat(path, &pst); err != nil {
+		t.Fatal(err)
+	}
+	acl := p.accessACLFor(path, pst, true)
 	if !acl.present || acl.unknown {
 		t.Fatalf("setfacl ACL not parsed: %+v", acl)
 	}
@@ -414,5 +418,44 @@ func TestRealAccessACLParsed(t *testing.T) {
 	group := SubmitterIdentity{UID: 65532, GID: 65532, Groups: []uint32{65533}, GroupsResolved: true}
 	if acl.permits(st, named, 4) || !acl.permits(st, group, 4) {
 		t.Fatalf("real ACL evaluated wrongly: %+v", acl)
+	}
+}
+
+// The ACL must come from the same object the permission walk checked: a path
+// renamed to another object between the two opens yields an unknown ACL, which
+// grants only the owner.
+func TestAccessACLBoundToStattedObject(t *testing.T) {
+	dir := t.TempDir()
+	path, decoy := filepath.Join(dir, "target"), filepath.Join(dir, "decoy")
+	writeFile(t, path, "x", 0644)
+	writeFile(t, decoy, "y", 0644)
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	var target, other unix.Stat_t
+	if err := unix.Stat(path, &target); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat(decoy, &other); err != nil {
+		t.Fatal(err)
+	}
+	if acl := p.accessACLFor(path, target, true); acl.unknown {
+		t.Fatalf("same object reported unknown: %+v", acl)
+	}
+	if acl := p.accessACLFor(path, other, true); !acl.unknown {
+		t.Fatalf("ACL read from a different object than the statted one: %+v", acl)
+	}
+}
+
+func TestWritableByIncludesPrimaryGroup(t *testing.T) {
+	st := unix.Stat_t{Uid: 1, Gid: 500, Mode: unix.S_IFDIR | 0770}
+	primary := SubmitterIdentity{UID: 2, GID: 500, Groups: []uint32{600}, GroupsResolved: true}
+	if !writableBy(st, primary) {
+		t.Fatal("group-writable object owned by the primary group not reported writable")
+	}
+	if writableBy(st, SubmitterIdentity{UID: 2, GID: 700, Groups: []uint32{600}, GroupsResolved: true}) {
+		t.Fatal("unrelated group reported writable")
 	}
 }

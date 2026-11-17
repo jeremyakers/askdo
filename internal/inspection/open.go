@@ -469,12 +469,7 @@ func writableBy(st unix.Stat_t, identity SubmitterIdentity) bool {
 	if !identity.GroupsResolved {
 		return true
 	}
-	for _, gid := range identity.Groups {
-		if st.Gid == gid {
-			return true
-		}
-	}
-	return false
+	return st.Gid == identity.GID || submitterGroupMember(st.Gid, identity.Groups)
 }
 
 func xattrKnowledge(fd int, name string) Knowledge {
