@@ -101,10 +101,9 @@ Read up to `max_bytes` bytes of one file the model chooses, starting at byte
   submitting user must have ordinary read/search access using its authenticated
   UID and the kernel's connect-time effective GID/supplementary groups for the
   submitting socket; account-database memberships alone do not qualify.
-  Owner→group→other selection follows Unix semantics. ACL entries are not
-  evaluated: with an access ACL, this rule grants only owner bits or, outside
-  the owning group, other bits; named ACL grants are not honored, and probe
-  failures count as ACL presence. A root submitter or unresolved socket identity
+  Owner→group→other selection follows Unix semantics. With a POSIX access ACL,
+  the kernel's ACL check applies (named users and groups, mask); an ACL that
+  cannot be read grants only the owner. A root submitter or unresolved socket identity
   uses only the world rule. Otherwise the result is payload-free
   `inspection_denied`, reason `not_readable_by_submitter`. An explicit `/` is
   still subject to this rule. Hard denies, masks and exclusions always apply.
@@ -441,9 +440,8 @@ of the trust boundary — enforces:
   the submitting user's authenticated UID and its socket's connect-time effective
   GID and supplementary groups have ordinary Unix read/search permission bits.
   Account-database memberships alone do not qualify. Owner→group→other selection
-  applies. ACL entries are not evaluated: ACL-present objects grant only owner
-  bits or, outside the owning group, other bits; named grants are not honored
-  and probe failures count as ACL presence. Root submitters and unresolved
+  applies. With a POSIX access ACL the kernel's ACL check
+  applies; an ACL that cannot be read grants only the owner. Root submitters and unresolved
   identities retain the world-only rule. Configured non-`/` roots grant private-tree content
   access; they do not override named secret protections. A refused file
   read/search returns `inspection_denied` with

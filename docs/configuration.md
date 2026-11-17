@@ -164,11 +164,10 @@ the kernel's connect-time effective GID and supplementary groups for the
 submitting socket, with the kernel's owner→group→other bit selection (an owner
 match uses only owner bits). Account-database memberships alone do not grant access.
 A root submitter and an identity whose process credentials cannot be
-authenticated retain the world-only rule. POSIX ACL entries are not evaluated:
-for the submitter rule, an object with an access ACL grants only through owner
-bits or, for a submitter outside the owning group, other bits; named-user and
-named-group grants are not honored. An ACL probe failure is treated as ACL
-presence. When neither model permits access, the result is payload-free
+authenticated retain the world-only rule. For an object with a POSIX access ACL,
+the submitter rule applies the kernel's ACL check (owner, named users, owning and
+named groups limited by the mask, then other). An ACL that cannot be read grants
+only the owner. When neither model permits access, the result is payload-free
 `inspection_denied` with reason `not_readable_by_submitter`. Directory searches
 skip such files and include them
 in `skipped_masked`; they never match or return private lines. Permissions and

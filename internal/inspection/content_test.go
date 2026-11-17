@@ -1,7 +1,9 @@
 package inspection
 
 import (
+	"encoding/binary"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -205,16 +207,71 @@ func TestSubmitterReadableSecretRemainsWithheld(t *testing.T) {
 	}
 }
 
+func encodeACL(entries ...aclEntry) []byte {
+	raw := binary.LittleEndian.AppendUint32(nil, aclVersion)
+	for _, e := range entries {
+		raw = binary.LittleEndian.AppendUint16(raw, e.tag)
+		raw = binary.LittleEndian.AppendUint16(raw, e.perm)
+		raw = binary.LittleEndian.AppendUint32(raw, e.id)
+	}
+	return raw
+}
+
+func stubACL(t *testing.T, raw []byte, err error) {
+	t.Helper()
+	previous := fgetxattr
+	t.Cleanup(func() { fgetxattr = previous })
+	fgetxattr = func(_ int, _ string, dest []byte) (int, error) {
+		if err != nil {
+			return 0, err
+		}
+		if dest == nil {
+			return len(raw), nil
+		}
+		return copy(dest, raw), nil
+	}
+}
+
+func TestAccessACLPermitsFollowsKernelOrder(t *testing.T) {
+	const owner, member, named, outsider, group, other = 1000, 1001, 1002, 1003, 2000, 2001
+	st := unix.Stat_t{Uid: owner, Gid: group}
+	acl := accessACL{present: true, entries: []aclEntry{
+		{tag: aclUserObj, perm: 6}, {tag: aclUser, perm: 0, id: named},
+		{tag: aclGroupObj, perm: 0}, {tag: aclGroup, perm: 4, id: other},
+		{tag: aclMask, perm: 4}, {tag: aclOther, perm: 4},
+	}}
+	id := func(uid uint32, groups ...uint32) SubmitterIdentity {
+		return SubmitterIdentity{UID: uid, GID: uid, Groups: groups, GroupsResolved: true}
+	}
+	for name, tc := range map[string]struct {
+		identity SubmitterIdentity
+		want     bool
+	}{
+		"owner entry":                      {id(owner), true},
+		"named user ---- overrides other":  {id(named), false},
+		"owning group --- overrides other": {id(member, group), false},
+		"named group grants":               {id(member, other), true},
+		"any matching group grants":        {id(member, group, other), true},
+		"outsider uses other":              {id(outsider), true},
+	} {
+		if got := acl.permits(st, tc.identity, 4); got != tc.want {
+			t.Errorf("%s: permits=%v want %v", name, got, tc.want)
+		}
+	}
+	masked := accessACL{present: true, entries: []aclEntry{
+		{tag: aclUserObj, perm: 6}, {tag: aclUser, perm: 4, id: named},
+		{tag: aclGroupObj, perm: 4}, {tag: aclMask, perm: 0}, {tag: aclOther, perm: 0},
+	}}
+	if masked.permits(st, id(named), 4) || masked.permits(st, id(member, group), 4) {
+		t.Error("mask did not limit named-user and group entries")
+	}
+}
+
 func TestSubmitterContentPermissionWithAccessACL(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("ACL permission case requires a non-root test process")
 	}
 	root := t.TempDir()
-	for _, dir := range []string{filepath.Dir(root), root} {
-		if err := os.Chmod(dir, 0750); err != nil {
-			t.Fatal(err)
-		}
-	}
 	path := filepath.Join(root, "private")
 	writeFile(t, path, "ACL canary", 0640)
 	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}, SensitiveMasks: []string{"*.privmask"}})
@@ -222,28 +279,33 @@ func TestSubmitterContentPermissionWithAccessACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	previous := fgetxattr
-	t.Cleanup(func() { fgetxattr = previous })
-	fgetxattr = func(int, string, []byte) (int, error) { return 0, unix.ENODATA }
-	otherUID := uint32(65534)
-	if otherUID == uint32(os.Getuid()) {
-		otherUID++
+	denied, outsider := uint32(65534), uint32(65533)
+	for _, uid := range []*uint32{&denied, &outsider} {
+		if *uid == uint32(os.Getuid()) {
+			*uid -= 10
+		}
 	}
-	identity := SubmitterIdentity{UID: otherUID, GID: otherUID, Groups: []uint32{uint32(os.Getgid())}, GroupsResolved: true}
-	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusOK || string(r.Content) != "ACL canary" {
-		t.Fatalf("group read without ACL: %+v", r)
+	// Every object carries this ACL: the named user is denied even though the
+	// other entry grants read and search.
+	stubACL(t, encodeACL(
+		aclEntry{tag: aclUserObj, perm: 7}, aclEntry{tag: aclUser, perm: 0, id: denied},
+		aclEntry{tag: aclGroupObj, perm: 5}, aclEntry{tag: aclMask, perm: 5}, aclEntry{tag: aclOther, perm: 5},
+	), nil)
+	named := SubmitterIdentity{UID: denied, GID: denied, Groups: []uint32{denied}, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, named); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
+		t.Fatalf("named user:---: entry did not override other bits: %+v", r)
 	}
-	fgetxattr = func(int, string, []byte) (int, error) { return 0, nil }
-	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusInspectionDenied || r.Reason != ReasonNotReadableBySubmitter || len(r.Content) != 0 {
-		t.Fatalf("ACL mask used as owning-group entry: %+v", r)
+	other := SubmitterIdentity{UID: outsider, GID: outsider, Groups: []uint32{outsider}, GroupsResolved: true}
+	if r := p.ReadRange(path, 0, 64, other); r.Status != StatusOK || string(r.Content) != "ACL canary" {
+		t.Fatalf("ACL other entry did not grant an outsider: %+v", r)
 	}
-	fgetxattr = func(int, string, []byte) (int, error) { return 0, unix.EIO }
-	if r := p.ReadRange(path, 0, 64, identity); r.Status != StatusInspectionDenied || len(r.Content) != 0 {
-		t.Fatalf("xattr failure allowed group grant: %+v", r)
-	}
-	fgetxattr = func(int, string, []byte) (int, error) { return 0, nil }
 	if r := p.ReadRange(path, 0, 64, currentIdentity()); r.Status != StatusOK || string(r.Content) != "ACL canary" {
 		t.Fatalf("owner read with ACL: %+v", r)
+	}
+	// An unreadable ACL grants only the owner.
+	stubACL(t, nil, unix.EIO)
+	if r := p.ReadRange(path, 0, 64, other); r.Status != StatusInspectionDenied || len(r.Content) != 0 {
+		t.Fatalf("unreadable ACL granted a non-owner: %+v", r)
 	}
 }
 
@@ -320,5 +382,37 @@ func publicTempRoot(t *testing.T, pattern string) string {
 		if filepath.Dir(dir) == dir {
 			return resolved
 		}
+	}
+}
+
+// TestRealAccessACLParsed reads an ACL written by setfacl, so the parser is
+// checked against the kernel's actual xattr encoding.
+func TestRealAccessACLParsed(t *testing.T) {
+	setfacl, err := exec.LookPath("setfacl")
+	if err != nil {
+		t.Skip("setfacl not installed")
+	}
+	path := filepath.Join(t.TempDir(), "acl")
+	writeFile(t, path, "x", 0640)
+	if out, err := exec.Command(setfacl, "-m", "u:65534:---,g:65533:r--,m::r--", path).CombinedOutput(); err != nil {
+		t.Skipf("filesystem does not support ACLs: %v %s", err, out)
+	}
+	p, err := NewPolicy(config.InspectionConfig{ReadRoots: []string{"/usr"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	acl := p.accessACLFor(path, true)
+	if !acl.present || acl.unknown {
+		t.Fatalf("setfacl ACL not parsed: %+v", acl)
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	named := SubmitterIdentity{UID: 65534, GID: 65534, GroupsResolved: true}
+	group := SubmitterIdentity{UID: 65532, GID: 65532, Groups: []uint32{65533}, GroupsResolved: true}
+	if acl.permits(st, named, 4) || !acl.permits(st, group, 4) {
+		t.Fatalf("real ACL evaluated wrongly: %+v", acl)
 	}
 }

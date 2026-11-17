@@ -1,6 +1,7 @@
 package inspection
 
 import (
+	"encoding/binary"
 	"errors"
 	"path/filepath"
 	"slices"
@@ -41,8 +42,8 @@ func (p *Policy) checkContentAccess(a authorization, identity SubmitterIdentity)
 		if denialReason(err) != ReasonNotReadableBySubmitter || identity.UID == 0 || !identity.GroupsResolved {
 			return err
 		}
-		if err := p.checkContentPath(path, a.stat, func(st unix.Stat_t, directory, aclPresent bool) bool {
-			return submitterContentPermission(st, identity, directory, aclPresent)
+		if err := p.checkContentPath(path, a.stat, func(st unix.Stat_t, directory bool, acl accessACL) bool {
+			return submitterContentPermission(st, identity, directory, acl)
 		}, true); err != nil {
 			return err
 		}
@@ -50,35 +51,39 @@ func (p *Policy) checkContentAccess(a authorization, identity SubmitterIdentity)
 	return nil
 }
 
-type contentPermission func(st unix.Stat_t, directory, aclPresent bool) bool
+type contentPermission func(st unix.Stat_t, directory bool, acl accessACL) bool
 
-func worldContentPermission(st unix.Stat_t, directory, _ bool) bool {
+func worldContentPermission(st unix.Stat_t, directory bool, _ accessACL) bool {
 	if directory {
 		return st.Mode&0001 != 0
 	}
 	return st.Mode&0004 != 0
 }
 
-// submitterContentPermission applies owner/group/other bit selection. With an
-// access ACL, group bits are the ACL mask rather than the owning-group entry:
-// owner bits remain authoritative, an owning-group match is denied, and other
-// bits are used only outside that group. Named ACL entries are not evaluated.
-func submitterContentPermission(st unix.Stat_t, identity SubmitterIdentity, directory, aclPresent bool) bool {
-	owner, group, other := uint32(0400), uint32(0040), uint32(0004)
+// submitterContentPermission applies the kernel's access check for the
+// submitter: owner/group/other bit selection, or the full POSIX access ACL
+// (named users and groups, mask) when one is present. An ACL that cannot be
+// read grants only the owner.
+func submitterContentPermission(st unix.Stat_t, identity SubmitterIdentity, directory bool, acl accessACL) bool {
+	want := uint16(4) // read
 	if directory {
-		owner, group, other = 0100, 0010, 0001
+		want = 1 // search
+	}
+	if acl.unknown {
+		// The ACL could not be read or parsed: grant only the owner, whose
+		// access is always the owner bits.
+		return st.Uid == identity.UID && st.Mode&(uint32(want)<<6) != 0
+	}
+	if acl.present {
+		return acl.permits(st, identity, want)
 	}
 	if st.Uid == identity.UID {
-		return st.Mode&owner != 0
+		return st.Mode&(uint32(want)<<6) != 0
 	}
-	member := st.Gid == identity.GID || submitterGroupMember(st.Gid, identity.Groups)
-	if aclPresent {
-		return !member && st.Mode&other != 0
+	if st.Gid == identity.GID || submitterGroupMember(st.Gid, identity.Groups) {
+		return st.Mode&(uint32(want)<<3) != 0
 	}
-	if member {
-		return st.Mode&group != 0
-	}
-	return st.Mode&other != 0
+	return st.Mode&uint32(want) != 0
 }
 
 func submitterGroupMember(gid uint32, groups []uint32) bool {
@@ -128,7 +133,7 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 			if st.Dev != target.Dev || st.Ino != target.Ino {
 				return denied(ReasonUnverifiedIdentity, "content permission target changed")
 			}
-			if !permitted(st, false, checkACL && p.accessACLPresent(current)) {
+			if !permitted(st, false, p.accessACLFor(current, checkACL)) {
 				return denied(ReasonNotReadableBySubmitter, "file lacks required read permission")
 			}
 			return nil
@@ -136,7 +141,7 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 			return unix.ENOTDIR
 		}
-		if !permitted(st, true, checkACL && p.accessACLPresent(current)) {
+		if !permitted(st, true, p.accessACLFor(current, checkACL)) {
 			return denied(ReasonNotReadableBySubmitter, "ancestor directory lacks required search permission")
 		}
 		component := pending[0]
@@ -145,15 +150,124 @@ func (p *Policy) checkContentPath(path string, target unix.Stat_t, permitted con
 	}
 }
 
-// accessACLPresent uses a readable metadata descriptor because fgetxattr does
-// not accept O_PATH descriptors. No content is read. Every open or xattr failure
-// except ENODATA fails closed for group-class submitter grants.
-func (p *Policy) accessACLPresent(path string) bool {
+// POSIX access ACL tags and the xattr header version (linux/posix_acl_xattr.h).
+const (
+	aclUserObj  = 0x01
+	aclUser     = 0x02
+	aclGroupObj = 0x04
+	aclGroup    = 0x08
+	aclMask     = 0x10
+	aclOther    = 0x20
+	aclVersion  = 2
+	maxACLBytes = 64 << 10
+)
+
+type aclEntry struct {
+	tag, perm uint16
+	id        uint32
+}
+
+// accessACL is an object's parsed system.posix_acl_access. unknown means an
+// ACL may exist but could not be read or parsed.
+type accessACL struct {
+	present, unknown bool
+	entries          []aclEntry
+}
+
+// permits applies the kernel's ACL access algorithm (posix_acl_permission):
+// owner entry; else a matching named user, masked; else any matching owning
+// or named group grants (masked), and a match without a grant denies; else
+// the other entry.
+func (a accessACL) permits(st unix.Stat_t, identity SubmitterIdentity, want uint16) bool {
+	mask, hasMask := uint16(7), false
+	for _, e := range a.entries {
+		if e.tag == aclMask {
+			mask, hasMask = e.perm, true
+		}
+	}
+	masked := func(perm uint16) uint16 {
+		if hasMask {
+			return perm & mask
+		}
+		return perm
+	}
+	inGroup := func(gid uint32) bool { return gid == identity.GID || submitterGroupMember(gid, identity.Groups) }
+	if st.Uid == identity.UID {
+		for _, e := range a.entries {
+			if e.tag == aclUserObj {
+				return e.perm&want != 0
+			}
+		}
+		return false
+	}
+	for _, e := range a.entries {
+		if e.tag == aclUser && e.id == identity.UID {
+			return masked(e.perm)&want != 0
+		}
+	}
+	matched := false
+	for _, e := range a.entries {
+		if (e.tag == aclGroupObj && inGroup(st.Gid)) || (e.tag == aclGroup && inGroup(e.id)) {
+			if masked(e.perm)&want != 0 {
+				return true
+			}
+			matched = true
+		}
+	}
+	if matched {
+		return false
+	}
+	for _, e := range a.entries {
+		if e.tag == aclOther {
+			return e.perm&want != 0
+		}
+	}
+	return false
+}
+
+func parseAccessACL(raw []byte) (accessACL, bool) {
+	if len(raw) < 4 || (len(raw)-4)%8 != 0 || binary.LittleEndian.Uint32(raw) != aclVersion {
+		return accessACL{}, false
+	}
+	acl := accessACL{present: true}
+	for off := 4; off < len(raw); off += 8 {
+		acl.entries = append(acl.entries, aclEntry{
+			tag:  binary.LittleEndian.Uint16(raw[off:]),
+			perm: binary.LittleEndian.Uint16(raw[off+2:]),
+			id:   binary.LittleEndian.Uint32(raw[off+4:]),
+		})
+	}
+	return acl, true
+}
+
+// accessACLFor reads an object's access ACL through a readable metadata
+// descriptor (fgetxattr does not accept O_PATH descriptors); no content is
+// read. ENODATA means no ACL. Any other failure is unknown, which grants only
+// the owner.
+func (p *Policy) accessACLFor(path string, check bool) accessACL {
+	if !check {
+		return accessACL{}
+	}
 	fd, err := p.open(p.roots[0], path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return true
+		return accessACL{unknown: true}
 	}
 	defer unix.Close(fd)
-	_, err = fgetxattr(fd, "system.posix_acl_access", nil)
-	return err == nil || !errors.Is(err, unix.ENODATA)
+	size, err := fgetxattr(fd, "system.posix_acl_access", nil)
+	if errors.Is(err, unix.ENODATA) {
+		return accessACL{}
+	}
+	if err != nil || size <= 0 || size > maxACLBytes {
+		return accessACL{unknown: true}
+	}
+	buf := make([]byte, size)
+	n, err := fgetxattr(fd, "system.posix_acl_access", buf)
+	if err != nil || n != size {
+		return accessACL{unknown: true}
+	}
+	acl, ok := parseAccessACL(buf)
+	if !ok {
+		return accessACL{unknown: true}
+	}
+	return acl
 }
