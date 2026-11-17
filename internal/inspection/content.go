@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -250,10 +251,28 @@ func (p *Policy) accessACLFor(path string, check bool) accessACL {
 	}
 	fd, err := p.open(p.roots[0], path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return accessACL{unknown: true}
+		// The legacy (pre-openat2) resolver cannot always open a readable
+		// descriptor for a directory it may only traverse. Read the xattr through
+		// the same O_PATH descriptor the permission walk uses instead.
+		pathFD, pathErr := p.open(p.roots[0], path, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if pathErr != nil {
+			return accessACL{unknown: true}
+		}
+		defer unix.Close(pathFD)
+		return readAccessACL(pathFD, procFDGetxattr)
 	}
 	defer unix.Close(fd)
-	size, err := fgetxattr(fd, "system.posix_acl_access", nil)
+	return readAccessACL(fd, fgetxattr)
+}
+
+// procFDGetxattr reads an xattr of an O_PATH descriptor through its
+// /proc/self/fd magic link, which fgetxattr does not accept.
+var procFDGetxattr = func(fd int, name string, dest []byte) (int, error) {
+	return unix.Getxattr("/proc/self/fd/"+strconv.Itoa(fd), name, dest)
+}
+
+func readAccessACL(fd int, get func(int, string, []byte) (int, error)) accessACL {
+	size, err := get(fd, "system.posix_acl_access", nil)
 	if errors.Is(err, unix.ENODATA) {
 		return accessACL{}
 	}
@@ -261,7 +280,7 @@ func (p *Policy) accessACLFor(path string, check bool) accessACL {
 		return accessACL{unknown: true}
 	}
 	buf := make([]byte, size)
-	n, err := fgetxattr(fd, "system.posix_acl_access", buf)
+	n, err := get(fd, "system.posix_acl_access", buf)
 	if err != nil || n != size {
 		return accessACL{unknown: true}
 	}
