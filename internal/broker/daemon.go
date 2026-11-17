@@ -995,7 +995,10 @@ func (d *daemon) handleSubmit(conn *net.UnixConn, uid uint32, body []byte, reque
 		_ = writeClient(conn, proto.ErrorEvent{Op: "error", Code: "invalid_request", Message: proto.TargetUserBundleRefusal(target.Name)})
 		return
 	}
-	identity := resolveSubmitterIdentity(uid)
+	identity := inspection.SubmitterIdentity{UID: uid}
+	if pid, err := d.peerPID(conn); err == nil {
+		identity = resolvePeerSubmitterIdentity(uid, pid)
+	}
 	var foreground *foregroundPeer
 	if request.Lifecycle == proto.LifecycleForeground {
 		pid, err := d.peerPID(conn)

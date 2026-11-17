@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"net"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/jeremyakers/askdo/internal/inspection"
 	"github.com/jeremyakers/askdo/internal/proto"
 	"github.com/jeremyakers/askdo/internal/store"
 )
@@ -94,5 +96,12 @@ func newTestJobRuntimeForSubmitter(t *testing.T, d *daemon, request proto.Submit
 	if err := captureSubmittedBundle(spool, request, d.cfg.Limits, d.policy); err != nil {
 		t.Fatal(err)
 	}
-	return newJobRuntime(d, submitterUID, request, spool, resolveSubmitterIdentity(submitterUID), cwd, resolveSubmitterName(submitterUID))
+	return newJobRuntime(d, submitterUID, request, spool, testSubmitterIdentity(submitterUID), cwd, resolveSubmitterName(submitterUID))
+}
+
+func testSubmitterIdentity(uid uint32) inspection.SubmitterIdentity {
+	if uid == uint32(os.Getuid()) {
+		return resolvePeerSubmitterIdentity(uid, int64(os.Getpid()))
+	}
+	return inspection.SubmitterIdentity{UID: uid}
 }

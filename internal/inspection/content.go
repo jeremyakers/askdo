@@ -2,6 +2,7 @@ package inspection
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -76,12 +77,8 @@ func submitterContentPermission(st unix.Stat_t, identity SubmitterIdentity, dire
 }
 
 func submitterGroupMember(gid uint32, groups []uint32) bool {
-	for _, member := range groups {
-		if member == gid {
-			return true
-		}
-	}
-	return false
+	_, found := slices.BinarySearch(groups, gid)
+	return found
 }
 
 // Check every traversed directory, including directories reached through a

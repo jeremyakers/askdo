@@ -113,19 +113,19 @@ func TestArgvBootstrapDoesNotCaptureExecutable(t *testing.T) {
 	}
 }
 
-func TestGroupLookupFailureStillSnapshotsSubmitterIdentity(t *testing.T) {
+func TestPeerCredentialLookupFailureStillSnapshotsSubmitterIdentity(t *testing.T) {
 	root := t.TempDir()
 	target := writeEvidenceFixture(t, root, "group-writable", "fixture")
 	if err := os.Chmod(target, 0770); err != nil {
 		t.Fatal(err)
 	}
-	previous := lookupSubmitterGroups
+	previous := readPeerProcessStatus
 	lookups := 0
-	lookupSubmitterGroups = func(uint32) (string, []string, error) {
+	readPeerProcessStatus = func(int64) ([]byte, error) {
 		lookups++
-		return "", nil, errors.New("injected group lookup failure")
+		return nil, errors.New("injected process status lookup failure")
 	}
-	t.Cleanup(func() { lookupSubmitterGroups = previous })
+	t.Cleanup(func() { readPeerProcessStatus = previous })
 	h := newEvidenceHarness(t, root, root, nil)
 	req := newReservedRequest(t, h, "identity")
 	req.Argv = []string{target}
@@ -133,7 +133,7 @@ func TestGroupLookupFailureStillSnapshotsSubmitterIdentity(t *testing.T) {
 		t.Fatalf("result=%s", body)
 	}
 	if lookups != 1 {
-		t.Fatalf("group lookup count=%d; want one at submit", lookups)
+		t.Fatalf("process status lookup count=%d; want one at submit", lookups)
 	}
 	if index := readJobCaptureIndex(t, h, req.RequestID); len(index.Files) != 0 {
 		t.Fatalf("identity preflight captured host code: %+v", index.Files)

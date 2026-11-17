@@ -95,8 +95,9 @@ type Facts struct {
 // false, group-write bits are conservatively treated as submitter-writable and
 // implicit-root content retains the world-readable-only rule.
 type SubmitterIdentity struct {
-	UID            uint32
-	GID            uint32
+	UID uint32
+	GID uint32
+	// Groups is the frozen, sorted supplementary-group set when resolved.
 	Groups         []uint32
 	GroupsResolved bool
 }

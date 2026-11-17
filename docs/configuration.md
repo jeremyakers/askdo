@@ -159,10 +159,12 @@ only by the implicit `/` is readable when either of two permission models
 allows it. The existing world rule requires **other-read** (`0004`) on the file
 and **other-search** (`0001`) on every traversed ancestor directory.
 Alternatively, the submitting user must have read permission on the file and
-search permission on every traversed ancestor, using its authenticated UID,
-primary GID and supplementary groups and the kernel's owner→group→other bit
-selection (an owner match uses only owner bits). A root submitter and an
-identity whose groups cannot be resolved retain the world-only rule. These
+search permission on every traversed ancestor, using the authenticated UID and
+the submitting process's effective GID and supplementary groups frozen at
+submission, with the kernel's owner→group→other bit selection (an owner match
+uses only owner bits). Account-database memberships alone do not grant access.
+A root submitter and an identity whose process credentials cannot be
+authenticated retain the world-only rule. These
 checks use permission bits only; POSIX ACLs are not evaluated. When neither
 model permits access, the result is payload-free `inspection_denied` with reason
 `not_readable_by_submitter`. Directory searches skip such files and include them
